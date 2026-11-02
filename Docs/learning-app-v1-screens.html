@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learning App v1 Screens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--ground:#E9E6DD;--ink:#1F1E1B;--quiet:#5F5C55;--accent:#3E5C41}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:Inter,-apple-system,system-ui,sans-serif}
+a{color:#3E5C41}a:hover{color:#2C432E}
+button,textarea,input{font:inherit}
+.top{position:sticky;top:0;z-index:10;background:#F7F5EF;border-bottom:1px solid #D6D2C7;padding:12px 16px;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center}
+.top h1{margin:0;font-family:Newsreader,Georgia,serif;font-size:22px;font-weight:600;margin-right:auto}
+.top nav{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:14px}
+.top nav a{text-decoration:none;font-weight:500}
+.screen{scroll-margin-top:72px;max-width:1480px;margin:0 auto;padding:40px 16px 8px}
+.screen-head{max-width:900px;margin-bottom:16px}
+.screen-head h2{margin:0 0 6px;font-family:Newsreader,Georgia,serif;font-size:28px;font-weight:600}
+.screen-head p{margin:0;color:var(--quiet);line-height:1.5;font-size:15px}
+.frame{border-radius:14px;overflow:hidden;border:1px solid #CFCABD;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.frame-inner{overflow-x:auto}
+.frame-inner.fixed{overflow:visible}
+footer.page{max-width:1480px;margin:0 auto;padding:32px 16px 48px;color:var(--quiet);font-size:13px}
+@media (max-width:600px){.frame-inner.fixed > div{width:100% !important;height:auto !important}}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>Learning App v1 · Screens</h1>
+  <nav aria-label="Screens"><a href="#logo">Logo</a><a href="#main">1 · Library</a><a href="#prepare">2 · Prepare</a><a href="#generate">3 · Generate sheet</a><a href="#review">4 · Review with a proposal</a><a href="#export">5 · Export to Anki</a></nav>
+</header>
+
+<section id="logo" class="screen" aria-labelledby="logo-h">
+  <div class="screen-head">
+    <h2 id="logo-h">Logo</h2>
+    <p>An L whose foot rises into a reading desk, and into the tick you give a good card. Mark, app icon, small sizes, reversed and one-colour versions.</p>
+  </div>
+  <div class="frame" style="max-width: 880px; margin: 0 auto">
+    <div class="frame-inner fixed">
+
+<div style="width: 880px; height: 560px; box-sizing: border-box; padding: 40px; background: #F7F5EF; color: #1F1E1B; font-family: Inter, -apple-system, system-ui, sans-serif; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px">
+  <div style="grid-column: 1 / 3; display: flex; align-items: center; gap: 22px; padding: 28px 32px; background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 16px">
+    <svg role="img" aria-label="Lectern mark" width="104" height="104" viewBox="0 0 256 256"><path fill="#3E5C41" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <div style="font-family: Newsreader, Georgia, serif; font-size: 76px; font-weight: 600; letter-spacing: -0.02em; line-height: 1">Lectern</div>
+      <div style="font-size: 15px; color: #5F5C55">An L whose foot rises into a reading desk, and into the tick you give a good card.</div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: center; justify-content: center; gap: 28px; padding: 24px; background: #E9E6DD; border-radius: 16px">
+    <svg role="img" aria-label="Lectern app icon" width="168" height="168" viewBox="100 100 824 824"><rect x="100" y="100" width="824" height="824" rx="185" fill="#3E5C41"/><path fill="#F7F5EF" transform="translate(512 512) scale(2.2) translate(-128 -127)" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 14px">
+      <svg role="img" aria-label="App icon at 64 pixels" width="64" height="64" viewBox="100 100 824 824"><rect x="100" y="100" width="824" height="824" rx="185" fill="#3E5C41"/><path fill="#F7F5EF" transform="translate(512 512) scale(2.2) translate(-128 -127)" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+      <svg role="img" aria-label="App icon at 32 pixels" width="32" height="32" viewBox="100 100 824 824"><rect x="100" y="100" width="824" height="824" rx="185" fill="#3E5C41"/><path fill="#F7F5EF" transform="translate(512 512) scale(2.2) translate(-128 -127)" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+      <svg role="img" aria-label="Mark at 16 pixels" width="16" height="16" viewBox="0 0 256 256"><path fill="#1F1E1B" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
+    <div style="display: flex; align-items: center; justify-content: center; gap: 10px; background: #1F1E1B; border-radius: 16px">
+      <svg aria-hidden="true" width="40" height="40" viewBox="0 0 256 256"><path fill="#F7F5EF" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+      <span style="font-family: Newsreader, Georgia, serif; font-size: 30px; font-weight: 600; color: #F7F5EF">Lectern</span>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: center; gap: 10px; background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 16px">
+      <svg aria-hidden="true" width="40" height="40" viewBox="0 0 256 256"><path fill="#000000" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+      <span style="font-family: Newsreader, Georgia, serif; font-size: 30px; font-weight: 600; color: #000000">Lectern</span>
+    </div>
+    <div style="grid-column: 1 / 3; display: flex; gap: 10px; align-items: center; justify-content: center; font-size: 13px; color: #5F5C55">
+      <span style="display: inline-block; width: 20px; height: 20px; border-radius: 6px; background: #3E5C41"></span>Green #3E5C41
+      <span style="display: inline-block; width: 20px; height: 20px; border-radius: 6px; background: #F7F5EF; border: 1px solid #D6D2C7; margin-left: 12px"></span>Ivory #F7F5EF
+      <span style="display: inline-block; width: 20px; height: 20px; border-radius: 6px; background: #1F1E1B; margin-left: 12px"></span>Charcoal #1F1E1B
+    </div>
+  </div>
+</div>
+</div>
+  </div>
+</section>
+<section id="main" class="screen" aria-labelledby="main-h">
+  <div class="screen-head">
+    <h2 id="main-h">1 · Library</h2>
+    <p>Modules on the left. Each lecture shows slides selected, card counts and status, including a lecture whose cards are still being generated. Module instructions sit under the list.</p>
+  </div>
+  <div class="frame" style="width: 100%">
+    <div class="frame-inner">
+
+<div style="display: flex; flex-wrap: wrap; min-height: 900px; background: #F7F5EF; color: #1F1E1B; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 14px">
+  <nav aria-label="Modules" style="flex: 1 1 240px; max-width: 260px; min-width: 220px; background: #EFECE3; border-right: 1px solid #E2DED3; padding: 24px 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 24px">
+    <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px">
+      <svg aria-hidden="true" width="30" height="30" viewBox="0 0 256 256"><path fill="#3E5C41" d="M50 32H94V146.4L184.5 94.2L206.5 132.3L50 222.6Z"/></svg>
+      <span style="font-family: Newsreader, Georgia, serif; font-size: 26px; font-weight: 600; letter-spacing: -0.01em">Lectern</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div style="font-size: 12px; font-weight: 600; color: #5F5C55; text-transform: uppercase; letter-spacing: 0.06em; padding: 0 8px 6px">Modules</div>
+      <a href="#" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-radius: 8px; background: #FFFFFF; border: 1px solid #E2DED3; color: #1F1E1B; text-decoration: none; font-weight: 600">Statistics II <span style="font-weight: 500; color: #5F5C55">4</span></a>
+      <a href="#" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-radius: 8px; color: #1F1E1B; text-decoration: none">Microeconomics <span style="color: #5F5C55">6</span></a>
+      <a href="#" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-radius: 8px; color: #1F1E1B; text-decoration: none">Databases <span style="color: #5F5C55">3</span></a>
+      <button type="button" style="margin-top: 8px; text-align: left; padding: 10px 12px; min-height: 44px; border: 1px dashed #C9C4B7; border-radius: 8px; background: transparent; color: #3E5C41; cursor: pointer">+ New module</button>
+    </div>
+    <div style="margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding: 0 8px">
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #5F5C55"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #3F7A4A"></span>Claude CLI connected</div>
+      <button type="button" style="text-align: left; padding: 8px 0; min-height: 44px; border: 0; background: transparent; color: #1F1E1B; cursor: pointer">Settings</button>
+    </div>
+  </nav>
+
+  <main style="flex: 999 1 560px; min-width: 0; padding: 40px 48px; box-sizing: border-box; display: flex; flex-direction: column; gap: 28px">
+    <header style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 16px">
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <h1 style="margin: 0; font-family: Newsreader, Georgia, serif; font-size: 40px; font-weight: 600; line-height: 1.1">Statistics II</h1>
+        <div style="color: #5F5C55">4 lectures · 101 approved · 23 to review · 20 ready to export</div>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 10px">
+        <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; color: #1F1E1B; cursor: pointer">Import PDF</button>
+        <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #3E5C41; background: #3E5C41; color: #FFFFFF; font-weight: 600; cursor: pointer">Export module to Anki</button>
+      </div>
+    </header>
+
+    <section aria-label="Lectures" style="background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 12px; overflow-x: auto">
+      <table style="width: 100%; border-collapse: collapse; min-width: 760px">
+        <thead>
+          <tr style="text-align: left; color: #5F5C55; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em">
+            <th style="padding: 14px 20px; font-weight: 600">Lecture</th>
+            <th style="padding: 14px 20px; font-weight: 600">Slides selected</th>
+            <th style="padding: 14px 20px; font-weight: 600">Cards</th>
+            <th style="padding: 14px 20px; font-weight: 600">Status</th>
+            <th style="padding: 14px 20px"><span style="position: absolute; left: -9999px">Open</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-top: 1px solid #EEEBE3">
+            <td style="padding: 18px 20px; font-weight: 600">01 Descriptive statistics</td>
+            <td style="padding: 18px 20px; color: #5F5C55">34 of 52</td>
+            <td style="padding: 18px 20px">48 approved</td>
+            <td style="padding: 18px 20px"><span style="display: inline-block; padding: 4px 10px; border-radius: 999px; background: #E7EFE6; color: #2F5F38; font-size: 13px; font-weight: 500">Exported 28 Oct</span></td>
+            <td style="padding: 18px 20px; text-align: right"><a href="#prepare" style="font-weight: 500">Open</a></td>
+          </tr>
+          <tr style="border-top: 1px solid #EEEBE3">
+            <td style="padding: 18px 20px; font-weight: 600">02 Probability</td>
+            <td style="padding: 18px 20px; color: #5F5C55">40 of 61</td>
+            <td style="padding: 18px 20px">39 approved</td>
+            <td style="padding: 18px 20px"><span style="display: inline-block; padding: 4px 10px; border-radius: 999px; background: #F6EBDD; color: #7A4810; font-size: 13px; font-weight: 500">6 changed since export</span></td>
+            <td style="padding: 18px 20px; text-align: right"><a href="#prepare" style="font-weight: 500">Open</a></td>
+          </tr>
+          <tr style="border-top: 1px solid #EEEBE3">
+            <td style="padding: 18px 20px; font-weight: 600">03 Distributions</td>
+            <td style="padding: 18px 20px; color: #5F5C55">28 of 44</td>
+            <td style="padding: 18px 20px">14 approved · 23 to review</td>
+            <td style="padding: 18px 20px"><span style="display: inline-block; padding: 4px 10px; border-radius: 999px; background: #E3ECF5; color: #244A70; font-size: 13px; font-weight: 500">Ready to review</span></td>
+            <td style="padding: 18px 20px; text-align: right"><a href="#review" style="font-weight: 500">Review</a></td>
+          </tr>
+          <tr style="border-top: 1px solid #EEEBE3">
+            <td style="padding: 18px 20px; font-weight: 600">04 Estimation</td>
+            <td style="padding: 18px 20px; color: #5F5C55">31 of 58</td>
+            <td style="padding: 18px 20px; color: #5F5C55">None yet</td>
+            <td style="padding: 18px 20px">
+              <div style="display: flex; align-items: center; gap: 10px">
+                <div aria-hidden="true" style="width: 96px; height: 6px; border-radius: 3px; background: #EEEBE3; overflow: hidden"><div style="width: 60%; height: 6px; background: #3E5C41"></div></div>
+                <span style="font-size: 13px; color: #5F5C55">Writing cards from 31 slides</span>
+              </div>
+            </td>
+            <td style="padding: 18px 20px; text-align: right"><a href="#prepare" style="font-weight: 500">Open</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section aria-label="Module instructions" style="display: flex; flex-wrap: wrap; gap: 20px">
+      <div style="flex: 2 1 420px; background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 10px">
+        <div style="display: flex; justify-content: space-between; align-items: center">
+          <h2 style="margin: 0; font-size: 15px; font-weight: 600">Module instructions</h2>
+          <button type="button" style="min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Edit</button>
+        </div>
+        <p style="margin: 0; line-height: 1.55">Open-book exam for formulas. Test interpretation and when to use each method, not formula recall. Prefer cards that ask why a method fits a situation.</p>
+        <p style="margin: 0; font-size: 13px; color: #5F5C55">Applied after the global rules, before slide notes. 2 rules added from review feedback.</p>
+      </div>
+      <div style="flex: 1 1 260px; background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 10px">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">Global card rules</h2>
+        <p style="margin: 0; line-height: 1.55">Flashcards v9 · short, self-contained, transferable over example-bound.</p>
+        <a href="#" style="font-size: 13px; font-weight: 500">Open rules in Settings</a>
+      </div>
+    </section>
+  </main>
+</div>
+</div>
+  </div>
+</section>
+<section id="prepare" class="screen" aria-labelledby="prepare-h">
+  <div class="screen-head">
+    <h2 id="prepare-h">2 · Prepare</h2>
+    <p>Slide Learning&#x27;s workspace plus coverage badges and a job bar. Right: Ask about the slide and its neighbours. Claude distils each chat into learning points you can untick; those go into the next generation, or into a revision proposal when the slide already has cards.</p>
+  </div>
+  <div class="frame" style="width: 100%">
+    <div class="frame-inner">
+
+<div style="display: flex; flex-direction: column; min-height: 900px; background: #F7F5EF; color: #1F1E1B; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 14px">
+  <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 24px; border-bottom: 1px solid #E2DED3; background: #FBFAF6">
+    <a href="#main" style="font-weight: 500; text-decoration: none">Statistics II</a>
+    <div style="font-family: Newsreader, Georgia, serif; font-size: 20px; font-weight: 600">04 Estimation</div>
+    <div role="group" aria-label="Mode" style="display: flex; border: 1px solid #C9C4B7; border-radius: 8px; overflow: hidden">
+      <button type="button" aria-pressed="true" style="min-height: 36px; padding: 0 14px; border: 0; background: #3E5C41; color: #FFFFFF; font-weight: 600">Prepare</button>
+      <a href="#review" style="display: flex; align-items: center; min-height: 36px; padding: 0 14px; color: #1F1E1B; text-decoration: none; background: #FFFFFF">Review</a>
+    </div>
+    <div role="group" aria-label="Filter" style="display: flex; border: 1px solid #C9C4B7; border-radius: 8px; overflow: hidden">
+      <button type="button" aria-pressed="true" style="min-height: 36px; padding: 0 12px; border: 0; background: #EFECE3; font-weight: 600">All</button>
+      <button type="button" aria-pressed="false" style="min-height: 36px; padding: 0 12px; border: 0; background: #FFFFFF">Selected</button>
+      <button type="button" aria-pressed="false" style="min-height: 36px; padding: 0 12px; border: 0; background: #FFFFFF">No cards</button>
+    </div>
+    <div style="margin-left: auto; color: #5F5C55">31 of 58 selected · 27 without cards</div>
+    <button type="button" disabled style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #C9C4B7; background: #EFECE3; color: #5F5C55">Generating…</button>
+  </header>
+
+  <div style="display: flex; flex-wrap: wrap; flex: 1 1 auto; min-height: 0">
+    <nav aria-label="Slides" style="flex: 0 0 216px; border-right: 1px solid #E2DED3; padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; max-height: 790px">
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: transparent; border: 2px solid #3E5C41; opacity: 1">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">11</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              
+              
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #E7EFE6; color: #2F5F38">2 cards</span>
+              <span aria-label="Selected" style="display: inline-flex; width: 18px; height: 18px; border-radius: 50%; background: #3E5C41; align-items: center; justify-content: center"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg></span>
+            </span>
+          </div>
+        </button>
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: transparent; border: 2px solid transparent; opacity: 0.55">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">12</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              
+              
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #EFECE3; color: #5F5C55">0 cards</span>
+              
+            </span>
+          </div>
+        </button>
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: transparent; border: 2px solid #3E5C41; opacity: 1">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">13</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              <span aria-label="Has questions" style="padding: 1px 6px; border-radius: 4px; background: #E3ECF5; color: #244A70">Q</span>
+              
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #E7EFE6; color: #2F5F38">1 card</span>
+              <span aria-label="Selected" style="display: inline-flex; width: 18px; height: 18px; border-radius: 50%; background: #3E5C41; align-items: center; justify-content: center"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg></span>
+            </span>
+          </div>
+        </button>
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: #FFFFFF; border: 2px solid #2F5D8C; opacity: 1">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">14</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              <span aria-label="Has questions" style="padding: 1px 6px; border-radius: 4px; background: #E3ECF5; color: #244A70">Q</span>
+              <span style="padding: 1px 6px; border-radius: 4px; background: #F6EBDD; color: #7A4810">Note</span>
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #E7EFE6; color: #2F5F38">3 cards</span>
+              <span aria-label="Selected" style="display: inline-flex; width: 18px; height: 18px; border-radius: 50%; background: #3E5C41; align-items: center; justify-content: center"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg></span>
+            </span>
+          </div>
+        </button>
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: transparent; border: 2px solid #3E5C41; opacity: 1">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">15</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              
+              
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #EFECE3; color: #5F5C55">0 cards</span>
+              <span aria-label="Selected" style="display: inline-flex; width: 18px; height: 18px; border-radius: 50%; background: #3E5C41; align-items: center; justify-content: center"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg></span>
+            </span>
+          </div>
+        </button>
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: transparent; border: 2px solid #3E5C41; opacity: 1">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">16</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              <span aria-label="Has questions" style="padding: 1px 6px; border-radius: 4px; background: #E3ECF5; color: #244A70">Q</span>
+              <span style="padding: 1px 6px; border-radius: 4px; background: #F6EBDD; color: #7A4810">Note</span>
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #EFECE3; color: #5F5C55">0 cards</span>
+              <span aria-label="Selected" style="display: inline-flex; width: 18px; height: 18px; border-radius: 50%; background: #3E5C41; align-items: center; justify-content: center"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg></span>
+            </span>
+          </div>
+        </button>
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: transparent; border: 2px solid transparent; opacity: 0.55">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">17</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              
+              
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #EFECE3; color: #5F5C55">0 cards</span>
+              
+            </span>
+          </div>
+        </button>
+      
+        <button type="button" style="text-align: left; padding: 6px; border-radius: 8px; cursor: pointer; background: transparent; border: 2px solid #3E5C41; opacity: 1">
+          <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border-radius: 4px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px">
+            <div style="height: 6px; width: 70%; background: #3B3A36; border-radius: 2px"></div>
+            <div style="height: 4px; width: 90%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 80%; background: #D6D2C7; border-radius: 2px"></div>
+            <div style="height: 4px; width: 60%; background: #D6D2C7; border-radius: 2px"></div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 12px">
+            <span style="color: #5F5C55">18</span>
+            <span style="display: flex; gap: 4px; align-items: center">
+              
+              
+              <span style="padding: 1px 6px; border-radius: 4px; white-space: nowrap; background: #EFECE3; color: #5F5C55">0 cards</span>
+              <span aria-label="Selected" style="display: inline-flex; width: 18px; height: 18px; border-radius: 50%; background: #3E5C41; align-items: center; justify-content: center"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg></span>
+            </span>
+          </div>
+        </button>
+      
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; padding: 24px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px">
+        <div style="display: flex; align-items: center; gap: 10px">
+          <span style="font-weight: 600">Slide 14</span>
+          <span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: #E7EFE6; color: #2F5F38; font-size: 13px; font-weight: 500">Selected</span>
+          <span style="color: #5F5C55; font-size: 13px">3 cards from this slide · 2 approved</span>
+        </div>
+        <a href="#review" style="font-size: 13px; font-weight: 500">Show its cards in Review</a>
+      </div>
+
+      <section aria-label="Active slide" style="background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 10px; aspect-ratio: 16 / 9; max-height: 470px; padding: 40px 44px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
+        <div style="font-size: 30px; font-weight: 600; color: #1F1E1B">Confidence intervals for the mean</div>
+        <ul style="margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 12px; font-size: 19px; line-height: 1.4; color: #3B3A36">
+          <li>Interval estimate = point estimate ± margin of error</li>
+          <li>Margin of error grows with confidence level and σ, shrinks with √n</li>
+          <li>σ known: x̄ ± z · σ / √n</li>
+          <li>The 95% refers to the procedure, not to one computed interval</li>
+        </ul>
+      </section>
+
+      <section aria-label="Notes" style="display: flex; flex-direction: column; gap: 6px">
+        <label for="prepare-note-14" style="font-size: 12px; font-weight: 600; color: #5F5C55; text-transform: uppercase; letter-spacing: 0.06em">Notes for slide 14 <span style="text-transform: none; letter-spacing: 0; font-weight: 400">· win over module and global rules</span></label>
+        <textarea id="prepare-note-14" rows="3" style="resize: vertical; padding: 12px 14px; border: 1px solid #C9C4B7; border-radius: 8px; background: #FFFFFF; color: #1F1E1B; line-height: 1.5">Lecturer said the exam asks for the interpretation. One card on the common misinterpretation, no formula card.</textarea>
+      </section>
+    </main>
+
+    <aside aria-label="Ask about these slides" style="flex: 0 1 380px; min-width: 300px; border-left: 1px solid #E2DED3; padding: 18px 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; background: #FBFAF6">
+      <div style="display: flex; justify-content: space-between; align-items: center">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">Ask  <span style="font-weight: 400; color: #5F5C55; font-size: 13px">A</span></h2>
+        <span style="font-size: 12px; color: #5F5C55">Thread on slide 14 · 2 questions</span>
+      </div>
+      <div role="group" aria-label="What Claude sees" style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px">
+        <button type="button" aria-pressed="false" style="min-height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Slide 14</button>
+        <button type="button" aria-pressed="true" style="min-height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #2F5D8C; background: #E3ECF5; color: #244A70; font-weight: 600; cursor: pointer">13 to 15</button>
+        <button type="button" aria-pressed="false" style="min-height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Whole lecture</button>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <div style="align-self: flex-end; max-width: 88%; padding: 8px 12px; border-radius: 10px; background: #EFECE3; font-size: 13px; line-height: 1.45">Why is the 95% about the procedure? Once I have my interval, μ is either in it or not, right?</div>
+        <div style="max-width: 96%; padding: 10px 12px; border-radius: 10px; background: #FFFFFF; border: 1px solid #E2DED3; font-size: 13px; line-height: 1.5; display: flex; flex-direction: column; gap: 8px">
+          <span>Right, and that is the point. μ is fixed, so one computed interval contains it or it doesn't. The 95% describes the method: across many samples, 95% of intervals built this way catch μ. Slide 15 draws exactly that, 20 intervals with one miss.</span>
+          <span style="display: flex; gap: 6px; font-size: 12px"><a href="#" style="padding: 1px 6px; border-radius: 4px; background: #F3F1EB; color: #3B3A36; text-decoration: none">Slide 14</a><a href="#" style="padding: 1px 6px; border-radius: 4px; background: #F3F1EB; color: #3B3A36; text-decoration: none">Slide 15</a></span>
+        </div>
+        <div style="align-self: flex-end; max-width: 88%; padding: 8px 12px; border-radius: 10px; background: #EFECE3; font-size: 13px; line-height: 1.45">So I can't say there's a 95% chance μ is in [4.1, 5.3]?</div>
+        <div style="max-width: 96%; padding: 8px 12px; border-radius: 10px; background: #FFFFFF; border: 1px solid #E2DED3; font-size: 13px; line-height: 1.5">Correct. Say "95% confident", meaning the procedure works 95% of the time.</div>
+      </div>
+
+      <section aria-labelledby="prepare-lp-h" style="border: 1px solid #C9D6E4; background: #F2F6FA; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px">
+        <h3 id="prepare-lp-h" style="margin: 0; font-size: 13px; font-weight: 600; color: #244A70">For your cards, from this chat</h3>
+        <label style="display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.45"><input type="checkbox" checked style="margin-top: 3px">Mixed up "95% chance μ is in this interval" with the confidence level.</label>
+        <label style="display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.45"><input type="checkbox" checked style="margin-top: 3px">The repeated-sampling picture (slide 15) is what made it click.</label>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: #5F5C55">
+          <span style="flex: 1 1 160px">Slide 14 already has cards, so this becomes a revision proposal instead of new cards.</span>
+          <button type="button" style="min-height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid #2F5D8C; background: #FFFFFF; color: #244A70; font-weight: 600; cursor: pointer">Propose update</button>
+        </div>
+      </section>
+
+      <div style="margin-top: auto; display: flex; flex-direction: column; gap: 6px">
+        <label for="prepare-ask-14" style="position: absolute; left: -9999px">Ask about slides 13 to 15</label>
+        <textarea id="prepare-ask-14" rows="2" placeholder="Ask about slides 13 to 15" style="resize: none; padding: 10px 12px; border: 1px solid #C9C4B7; border-radius: 8px; background: #FFFFFF; line-height: 1.4"></textarea>
+        <span style="font-size: 12px; color: #5F5C55">⌘↩ send · questions you ask here shape the next cards</span>
+      </div>
+    </aside>
+  </div>
+
+  <footer role="status" style="display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 24px; border-top: 1px solid #E2DED3; background: #FFFFFF">
+    <div aria-hidden="true" style="width: 160px; height: 6px; border-radius: 3px; background: #EEEBE3; overflow: hidden"><div style="width: 60%; height: 6px; background: #3E5C41"></div></div>
+    <div style="font-weight: 600">Writing cards from 27 slides</div>
+    <div style="display: flex; gap: 14px; font-size: 13px; color: #5F5C55">
+      <span>Sent ✓</span><span style="color: #1F1E1B; font-weight: 500">Writing</span><span>Checking</span>
+    </div>
+    <div style="font-size: 13px; color: #5F5C55">You can keep editing; the job uses a snapshot.</div>
+    <button type="button" style="margin-left: auto; min-height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Cancel</button>
+  </footer>
+</div>
+</div>
+  </div>
+</section>
+<section id="generate" class="screen" aria-labelledby="generate-h">
+  <div class="screen-head">
+    <h2 id="generate-h">3 · Generate sheet</h2>
+    <p>Defaults to slides without cards, so regenerating never duplicates. Shows exactly what gets sent with the slides, including learning points from your questions.</p>
+  </div>
+  <div class="frame" style="max-width: 560px; margin: 0 auto">
+    <div class="frame-inner fixed">
+
+<div style="width: 560px; height: 560px; box-sizing: border-box; padding: 24px; background: #E9E6DD; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 14px; color: #1F1E1B">
+  <section role="dialog" aria-labelledby="generate-gen-title" style="height: 100%; box-sizing: border-box; background: #FFFFFF; border: 1px solid #D6D2C7; border-radius: 14px; padding: 28px; display: flex; flex-direction: column; gap: 20px">
+    <h1 id="generate-gen-title" style="margin: 0; font-family: Newsreader, Georgia, serif; font-size: 26px; font-weight: 600">Generate cards</h1>
+
+    <fieldset style="margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 10px">
+      <legend style="font-size: 12px; font-weight: 600; color: #5F5C55; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px">Scope</legend>
+      <label style="display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 2px solid #3E5C41; border-radius: 10px; background: #F3F7F2">
+        <input type="radio" name="generate-scope" checked style="margin-top: 3px">
+        <span><span style="font-weight: 600">Slides without cards (27)</span><br><span style="color: #5F5C55; font-size: 13px">Recommended. Never duplicates cards you already have.</span></span>
+      </label>
+      <label style="display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid #D6D2C7; border-radius: 10px">
+        <input type="radio" name="generate-scope" style="margin-top: 3px">
+        <span><span style="font-weight: 600">All selected slides (31)</span><br><span style="color: #5F5C55; font-size: 13px">Adds new cards next to the existing 6. Asks to confirm.</span></span>
+      </label>
+    </fieldset>
+
+    <div style="display: flex; flex-direction: column; gap: 8px">
+      <div style="font-size: 12px; font-weight: 600; color: #5F5C55; text-transform: uppercase; letter-spacing: 0.06em">Sent with the slides</div>
+      <ul style="margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; line-height: 1.45">
+        <li>Global rules · Flashcards v9</li>
+        <li>Module instructions · Statistics II</li>
+        <li>9 slide notes, which take precedence</li>
+        <li>5 learning points from your questions on 3 slides</li>
+        <li>87 existing module cards, marked as already covered</li>
+      </ul>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 10px; background: #F7F5EF; font-size: 13px">
+      <span>Claude CLI · Opus · your subscription</span>
+      <a href="#" style="font-weight: 500">Change</a>
+    </div>
+
+    <div style="margin-top: auto; display: flex; justify-content: flex-end; gap: 10px">
+      <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Cancel</button>
+      <a href="#prepare" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 8px; background: #3E5C41; color: #FFFFFF; font-weight: 600; text-decoration: none">Start  ⌘↩</a>
+    </div>
+  </section>
+</div>
+</div>
+  </div>
+</section>
+<section id="review" class="screen" aria-labelledby="review-h">
+  <div class="screen-head">
+    <h2 id="review-h">4 · Review with a proposal</h2>
+    <p>You sent card 19 back with feedback; Claude&#x27;s rewrite has landed. Blue box = proposal as a diff (orange struck = removed, blue = added). Right: the source slides and an Ask thread. Bottom: the usual verdict bar.</p>
+  </div>
+  <div class="frame" style="width: 100%">
+    <div class="frame-inner">
+
+<div style="display: flex; flex-direction: column; min-height: 900px; background: #F7F5EF; color: #1F1E1B; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 14px">
+  <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 24px; border-bottom: 1px solid #E2DED3; background: #FBFAF6">
+    <a href="#main" style="font-weight: 500; text-decoration: none">Statistics II</a>
+    <div style="font-family: Newsreader, Georgia, serif; font-size: 20px; font-weight: 600">03 Distributions</div>
+    <div role="group" aria-label="Mode" style="display: flex; border: 1px solid #C9C4B7; border-radius: 8px; overflow: hidden">
+      <a href="#prepare" style="display: flex; align-items: center; min-height: 36px; padding: 0 14px; color: #1F1E1B; text-decoration: none; background: #FFFFFF">Prepare</a>
+      <button type="button" aria-pressed="true" style="min-height: 36px; padding: 0 14px; border: 0; background: #3E5C41; color: #FFFFFF; font-weight: 600">Review</button>
+    </div>
+    <div style="display: flex; align-items: center; gap: 10px; flex: 1 1 260px; min-width: 220px">
+      <span style="white-space: nowrap; color: #5F5C55">18 / 41 reviewed</span>
+      <div aria-hidden="true" style="flex: 1 1 auto; display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #E2DED3">
+        <div style="width: 34%; background: #3F7A4A"></div>
+        <div style="width: 7%; background: #A9661A"></div>
+        <div style="width: 3%; background: #B3412E"></div>
+      </div>
+    </div>
+    <span style="font-size: 13px; color: #5F5C55">Saved on this Mac</span>
+    <a href="#export" style="display: inline-flex; align-items: center; min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; color: #1F1E1B; text-decoration: none">Export</a>
+  </header>
+
+  <div style="display: flex; flex-wrap: wrap; flex: 1 1 auto">
+    <nav aria-label="Cards" style="flex: 0 1 270px; min-width: 240px; border-right: 1px solid #E2DED3; padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 14px">
+      <div role="group" aria-label="Filters" style="display: flex; flex-direction: column; gap: 2px">
+        
+          <button type="button" style="display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 34px; padding: 0 10px; border-radius: 6px; border: 0; cursor: pointer; text-align: left; background: transparent"><span>All</span><span style="color: #5F5C55">41</span></button>
+        
+          <button type="button" style="display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 34px; padding: 0 10px; border-radius: 6px; border: 0; cursor: pointer; text-align: left; background: transparent"><span>AI flagged</span><span style="color: #5F5C55">5</span></button>
+        
+          <button type="button" style="display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 34px; padding: 0 10px; border-radius: 6px; border: 0; cursor: pointer; text-align: left; background: #FFFFFF; font-weight: 600; box-shadow: inset 0 0 0 1px #E2DED3"><span>Proposals ready</span><span style="color: #5F5C55">2</span></button>
+        
+          <button type="button" style="display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 34px; padding: 0 10px; border-radius: 6px; border: 0; cursor: pointer; text-align: left; background: transparent"><span>Unreviewed</span><span style="color: #5F5C55">23</span></button>
+        
+          <button type="button" style="display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 34px; padding: 0 10px; border-radius: 6px; border: 0; cursor: pointer; text-align: left; background: transparent"><span>Good</span><span style="color: #5F5C55">14</span></button>
+        
+          <button type="button" style="display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 34px; padding: 0 10px; border-radius: 6px; border: 0; cursor: pointer; text-align: left; background: transparent"><span>Needs adjustment</span><span style="color: #5F5C55">3</span></button>
+        
+          <button type="button" style="display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 34px; padding: 0 10px; border-radius: 6px; border: 0; cursor: pointer; text-align: left; background: transparent"><span>Bad</span><span style="color: #5F5C55">1</span></button>
+        
+      </div>
+      <div style="height: 1px; background: #E2DED3"></div>
+      <ol style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px">
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: transparent">
+              <span style="color: #5F5C55; width: 22px; flex: none">17</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">When is the median preferred over the mean?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #E7EFE6; color: #2F5F38">Good</span>
+            </button>
+          </li>
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: transparent">
+              <span style="color: #5F5C55; width: 22px; flex: none">18</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">What does df mean for the t-distribution?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #F6EBDD; color: #7A4810">Adjust</span>
+            </button>
+          </li>
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: #FFFFFF; box-shadow: inset 0 0 0 2px #2F5D8C">
+              <span style="color: #5F5C55; width: 22px; flex: none">19</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">Why does the t-distribution have heavier tails?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #E3ECF5; color: #244A70">Proposal</span>
+            </button>
+          </li>
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: transparent">
+              <span style="color: #5F5C55; width: 22px; flex: none">20</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">When does a binomial look approximately normal?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #EFECE3; color: #5F5C55">Flagged</span>
+            </button>
+          </li>
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: transparent">
+              <span style="color: #5F5C55; width: 22px; flex: none">21</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">What does the CLT say about sample means?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #F3F1EB; color: #5F5C55">New</span>
+            </button>
+          </li>
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: transparent">
+              <span style="color: #5F5C55; width: 22px; flex: none">22</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">Why standardise a normal variable?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #F3F1EB; color: #5F5C55">New</span>
+            </button>
+          </li>
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: transparent">
+              <span style="color: #5F5C55; width: 22px; flex: none">23</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">Poisson vs. binomial: when to use which?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #E3ECF5; color: #244A70">Proposal</span>
+            </button>
+          </li>
+        
+          <li>
+            <button type="button" style="display: flex; gap: 8px; align-items: center; width: 100%; min-height: 36px; padding: 0 8px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; border: 0; background: transparent">
+              <span style="color: #5F5C55; width: 22px; flex: none">24</span>
+              <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">What is a quantile of a distribution?</span>
+              <span style="flex: none; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #F3F1EB; color: #5F5C55">New</span>
+            </button>
+          </li>
+        
+      </ol>
+    </nav>
+
+    <main style="flex: 999 1 520px; min-width: 0; padding: 24px 32px 0; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px">
+      <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px">
+        <span style="font-weight: 600">Card 19</span>
+        <span style="color: #5F5C55">from slides 8 and 9</span>
+        <span style="padding: 3px 10px; border-radius: 999px; background: #F6EBDD; color: #7A4810; font-weight: 500">Needs adjustment</span>
+        <span style="padding: 3px 10px; border-radius: 999px; background: #E3ECF5; color: #244A70; font-weight: 500">Proposal ready</span>
+      </div>
+
+      <section aria-label="Card" style="background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 12px; overflow: hidden">
+        <div style="padding: 20px 24px; display: flex; flex-direction: column; gap: 8px">
+          <label for="review-front" style="font-size: 12px; font-weight: 600; color: #5F5C55; text-transform: uppercase; letter-spacing: 0.06em">Front</label>
+          <textarea id="review-front" rows="2" style="border: 0; resize: none; padding: 0; font-size: 21px; line-height: 1.45; color: #1F1E1B; background: transparent">Why does the t-distribution have heavier tails than the standard normal?</textarea>
+        </div>
+        <div style="height: 1px; background: #EEEBE3"></div>
+        <div style="padding: 20px 24px; display: flex; flex-direction: column; gap: 8px">
+          <label for="review-back" style="font-size: 12px; font-weight: 600; color: #5F5C55; text-transform: uppercase; letter-spacing: 0.06em">Back</label>
+          <textarea id="review-back" rows="2" style="border: 0; resize: none; padding: 0; font-size: 21px; line-height: 1.45; color: #1F1E1B; background: transparent">Because with n = 10 we estimate σ from the sample, e.g. s = 2.3, which adds uncertainty.</textarea>
+        </div>
+        <div style="padding: 12px 24px; background: #FBF6EE; border-top: 1px solid #EEEBE3; font-size: 13px; color: #5F4110"><span style="font-weight: 600">Your feedback:</span> Too tied to the slide example. Ask for the general reason and how it changes with n.</div>
+      </section>
+
+      <section aria-label="Revision proposal" style="background: #FFFFFF; border: 2px solid #2F5D8C; border-radius: 12px; padding: 18px 24px; display: flex; flex-direction: column; gap: 12px">
+        <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px">
+          <div style="font-weight: 600; color: #244A70">Revision proposal</div>
+          <div style="font-size: 13px; color: #5F5C55">Compared with your current text · front unchanged</div>
+        </div>
+        <p style="margin: 0; font-size: 18px; line-height: 1.6"><span style="font-size: 12px; font-weight: 600; color: #5F5C55; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 8px">Back</span>Because <del style="background: #FBE6D5; color: #8A3D0B">with n = 10 we estimate σ from the sample, e.g. s = 2.3,</del> <ins style="background: #DCE8F5; color: #1F4470; text-decoration: none; border-bottom: 2px solid #2F5D8C">σ is estimated by s,</ins> which adds uncertainty<ins style="background: #DCE8F5; color: #1F4470; text-decoration: none; border-bottom: 2px solid #2F5D8C">; the tails shrink toward the normal as n grows</ins>.</p>
+        <p style="margin: 0; font-size: 13px; color: #5F5C55">Why: removed the slide's numbers so the card transfers, added the dependence on n you asked for.</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 10px">
+          <button type="button" style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #2F5D8C; background: #2F5D8C; color: #FFFFFF; font-weight: 600; cursor: pointer">Accept and approve ⇧↩</button>
+          <button type="button" style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #2F5D8C; background: #FFFFFF; color: #244A70; cursor: pointer">Accept ↩</button>
+          <button type="button" style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Edit first</button>
+          <button type="button" style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Discard X</button>
+        </div>
+      </section>
+    </main>
+
+    <aside aria-label="Source and questions" style="flex: 0 1 330px; min-width: 280px; border-left: 1px solid #E2DED3; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 16px; background: #FBFAF6">
+      <div style="display: flex; justify-content: space-between; align-items: center">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">Source</h2>
+        <a href="#prepare" style="font-size: 13px; font-weight: 500">Open in Prepare  G</a>
+      </div>
+      <figure style="margin: 0; display: flex; flex-direction: column; gap: 6px">
+        <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border: 2px solid #2F5D8C; border-radius: 8px; padding: 14px 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px">
+          <div style="font-weight: 600; font-size: 14px">The t-distribution</div>
+          <div style="font-size: 11px; color: #3B3A36; line-height: 1.45">σ unknown → standardise with s<br>t = (x̄ − μ) / (s / √n), df = n − 1<br>Example: n = 10, s = 2.3</div>
+        </div>
+        <figcaption style="font-size: 12px; color: #5F5C55">Slide 8 · note: "exam asks about tails"</figcaption>
+      </figure>
+      <figure style="margin: 0; display: flex; flex-direction: column; gap: 6px">
+        <div style="aspect-ratio: 16 / 9; background: #FFFFFF; border: 1px solid #E2DED3; border-radius: 8px; padding: 14px 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px">
+          <div style="font-weight: 600; font-size: 14px">t vs. normal for small n</div>
+          <svg role="img" aria-label="Two bell curves, the t curve with heavier tails" viewBox="0 0 200 60" style="width: 100%; height: 56px"><path d="M0 58 C60 58 70 6 100 6 C130 6 140 58 200 58" fill="none" stroke="#3B3A36" stroke-width="1.5"/><path d="M0 55 C55 52 72 14 100 14 C128 14 145 52 200 55" fill="none" stroke="#2F5D8C" stroke-width="1.5" stroke-dasharray="4 3"/></svg>
+        </div>
+        <figcaption style="font-size: 12px; color: #5F5C55">Slide 9</figcaption>
+      </figure>
+
+      <div style="height: 1px; background: #E2DED3"></div>
+
+      <section aria-label="Ask about this card" style="display: flex; flex-direction: column; gap: 10px">
+        <div style="display: flex; justify-content: space-between; align-items: center"><h2 style="margin: 0; font-size: 15px; font-weight: 600">Ask  <span style="font-weight: 400; color: #5F5C55; font-size: 13px">A</span></h2><span style="font-size: 12px; color: #5F5C55">Same thread as slide 8 in Prepare</span></div>
+        <div style="align-self: flex-end; max-width: 90%; padding: 8px 12px; border-radius: 10px; background: #EFECE3; font-size: 13px; line-height: 1.45">Is the t-distribution only for n below 30?</div>
+        <div style="max-width: 95%; padding: 8px 12px; border-radius: 10px; background: #FFFFFF; border: 1px solid #E2DED3; font-size: 13px; line-height: 1.45">No. Use t whenever σ is unknown. For large n it is almost identical to the normal, so the 30 rule is about the approximation, not the method.</div>
+        <button type="button" style="align-self: flex-start; min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; font-size: 13px; cursor: pointer">Use as feedback</button>
+        <label for="review-ask" style="position: absolute; left: -9999px">Ask a question about this card</label>
+        <input id="review-ask" type="text" placeholder="Ask about this card and its slides" style="min-height: 40px; padding: 0 12px; border: 1px solid #C9C4B7; border-radius: 8px; background: #FFFFFF">
+      </section>
+    </aside>
+  </div>
+
+  <footer style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 24px; border-top: 1px solid #E2DED3; background: #FFFFFF">
+    <button type="button" style="min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">← Previous</button>
+    <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #3F7A4A; background: #E7EFE6; color: #24502C; font-weight: 600; cursor: pointer">Good  1</button>
+    <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #B3412E; background: #F8E6E2; color: #7E2B1D; font-weight: 600; cursor: pointer">Bad  2</button>
+    <button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 8px; border: 1px solid #A9661A; background: #F6EBDD; color: #6B3F0E; font-weight: 600; cursor: pointer">Needs adjustment  3</button>
+    <button type="button" style="min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Next →</button>
+    <span style="margin-left: auto; font-size: 13px; color: #5F5C55">S source · A ask · ⌘↩ send feedback to AI</span>
+    <button type="button" style="min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Undo  U</button>
+  </footer>
+</div>
+</div>
+  </div>
+</section>
+<section id="export" class="screen" aria-labelledby="export-h">
+  <div class="screen-head">
+    <h2 id="export-h">5 · Export to Anki</h2>
+    <p>Default exports only cards new or changed since the last export. GUID column keeps Anki from creating duplicates; ambiguous math must be resolved first.</p>
+  </div>
+  <div class="frame" style="width: 100%">
+    <div class="frame-inner">
+
+<div style="min-height: 900px; background: #F7F5EF; color: #1F1E1B; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 14px">
+  <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 24px; border-bottom: 1px solid #E2DED3; background: #FBFAF6">
+    <a href="#main" style="font-weight: 500; text-decoration: none">Statistics II</a>
+    <div style="font-family: Newsreader, Georgia, serif; font-size: 20px; font-weight: 600">Export to Anki</div>
+  </header>
+
+  <div style="max-width: 1120px; margin: 0 auto; padding: 32px 24px; display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 20px">
+      <fieldset style="margin: 0; padding: 20px 24px; border: 1px solid #E2DED3; border-radius: 12px; background: #FFFFFF; display: flex; flex-direction: column; gap: 10px">
+        <legend style="padding: 0 6px; font-weight: 600">What to export</legend>
+        <label style="display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 2px solid #3E5C41; border-radius: 10px; background: #F3F7F2">
+          <input type="radio" name="export-what" checked style="margin-top: 3px">
+          <span><span style="font-weight: 600">New and changed since last export · 20 cards</span><br><span style="color: #5F5C55; font-size: 13px">14 new, 6 edited after export. Edited cards keep their ID, so Anki won't create duplicates.</span></span>
+        </label>
+        <label style="display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid #D6D2C7; border-radius: 10px">
+          <input type="radio" name="export-what" style="margin-top: 3px">
+          <span><span style="font-weight: 600">All approved cards · 101 cards</span><br><span style="color: #5F5C55; font-size: 13px">For a fresh deck or a new Anki profile.</span></span>
+        </label>
+      </fieldset>
+
+      <section aria-label="Included per lecture" style="border: 1px solid #E2DED3; border-radius: 12px; background: #FFFFFF; overflow-x: auto">
+        <table style="width: 100%; border-collapse: collapse; min-width: 520px">
+          <thead>
+            <tr style="text-align: left; color: #5F5C55; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em">
+              <th style="padding: 12px 20px; font-weight: 600">Lecture</th>
+              <th style="padding: 12px 20px; font-weight: 600">Included</th>
+              <th style="padding: 12px 20px; font-weight: 600">Left out</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-top: 1px solid #EEEBE3"><td style="padding: 14px 20px">01 Descriptive statistics</td><td style="padding: 14px 20px">0</td><td style="padding: 14px 20px; color: #5F5C55">All exported already</td></tr>
+            <tr style="border-top: 1px solid #EEEBE3"><td style="padding: 14px 20px">02 Probability</td><td style="padding: 14px 20px">6 changed</td><td style="padding: 14px 20px; color: #5F5C55">None</td></tr>
+            <tr style="border-top: 1px solid #EEEBE3"><td style="padding: 14px 20px">03 Distributions</td><td style="padding: 14px 20px">14 new</td><td style="padding: 14px 20px; color: #7A4810">23 unreviewed, 3 need adjustment, 1 bad</td></tr>
+            <tr style="border-top: 1px solid #EEEBE3"><td style="padding: 14px 20px">04 Estimation</td><td style="padding: 14px 20px">0</td><td style="padding: 14px 20px; color: #5F5C55">Generating</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section aria-label="File preview" style="border: 1px solid #E2DED3; border-radius: 12px; background: #FFFFFF; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600">Preview of the file</h2>
+        <div style="overflow-x: auto">
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px; min-width: 620px">
+            <thead>
+              <tr style="text-align: left; color: #5F5C55">
+                <th style="padding: 8px 10px; font-weight: 600; border-bottom: 1px solid #E2DED3">Front</th>
+                <th style="padding: 8px 10px; font-weight: 600; border-bottom: 1px solid #E2DED3">Back</th>
+                <th style="padding: 8px 10px; font-weight: 600; border-bottom: 1px solid #E2DED3">Tags</th>
+                <th style="padding: 8px 10px; font-weight: 600; border-bottom: 1px solid #E2DED3">GUID</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td style="padding: 8px 10px; vertical-align: top">Why does the t-distribution have heavier tails than the standard normal?</td><td style="padding: 8px 10px; vertical-align: top">Because σ is estimated by s, which adds uncertainty; the tails shrink toward the normal as n grows.</td><td style="padding: 8px 10px; vertical-align: top; color: #5F5C55">Statistics_II::03</td><td style="padding: 8px 10px; vertical-align: top; color: #5F5C55; font-family: ui-monospace, Menlo, monospace">7c1e…a94</td></tr>
+              <tr style="border-top: 1px solid #EEEBE3"><td style="padding: 8px 10px; vertical-align: top">What does the CLT say about sample means?</td><td style="padding: 8px 10px; vertical-align: top">Their distribution approaches \(N(\mu, \sigma^2/n)\) as n grows, whatever the population's shape.</td><td style="padding: 8px 10px; vertical-align: top; color: #5F5C55">Statistics_II::03</td><td style="padding: 8px 10px; vertical-align: top; color: #5F5C55; font-family: ui-monospace, Menlo, monospace">b30d…1f2</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <aside style="flex: 1 1 300px; display: flex; flex-direction: column; gap: 16px">
+      <div style="border: 1px solid #E2DED3; border-radius: 12px; background: #FFFFFF; padding: 20px 24px; display: flex; flex-direction: column; gap: 14px">
+        <div style="font-family: Newsreader, Georgia, serif; font-size: 32px; font-weight: 600">20 cards</div>
+        <div style="color: #5F5C55; line-height: 1.5">Anki text file · Front, Back, Tags, GUID · math adapted to \( \) delimiters</div>
+        <div role="alert" style="padding: 10px 12px; border-radius: 8px; background: #FBF6EE; border: 1px solid #EBD8BC; font-size: 13px; line-height: 1.45; color: #5F4110">1 card has an ambiguous $ sign. <a href="#review" style="font-weight: 600">Resolve it</a> before downloading.</div>
+        <button type="button" style="min-height: 48px; border-radius: 8px; border: 1px solid #3E5C41; background: #3E5C41; color: #FFFFFF; font-weight: 600; cursor: pointer">Download for Anki</button>
+        <p style="margin: 0; font-size: 13px; color: #5F5C55; line-height: 1.5">In Anki: File › Import, pick the file, choose your deck. Cards are then marked exported here.</p>
+      </div>
+      <button type="button" style="min-height: 44px; border-radius: 8px; border: 1px solid #C9C4B7; background: #FFFFFF; cursor: pointer">Download module backup</button>
+    </aside>
+  </div>
+</div>
+</div>
+  </div>
+</section>
+<footer class="page">Static mockups for v1. Sample content is a made-up statistics module. Companion spec: learning-app-v1-design.md.</footer>
+</body>
+</html>

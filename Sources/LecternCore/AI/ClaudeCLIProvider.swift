@@ -1,0 +1,522 @@
+import Foundation
+import Darwin
+
+/// Uses an already-installed Claude Code CLI. `--safe-mode` preserves its
+/// first-party subscription login while disabling user/project customizations.
+public struct ClaudeCLIProvider: AIProvider {
+    public let backend: AIBackend = .claudeCLI
+
+    private let executableURL: URL
+    private let defaultModel: String
+    private let timeout: TimeInterval
+    private let maximumOutputBytes = 16 * 1_024 * 1_024
+    private let maximumErrorBytes = 64 * 1_024
+
+    public init(executableURL: URL? = nil,
+                settings: AISettings = .default,
+                timeout: TimeInterval = 1_200) {
+        self.executableURL = executableURL ?? Self.resolveExecutable(configuredPath: settings.claudeCLIPath)
+        self.defaultModel = settings.cliModel
+        self.timeout = max(1, timeout)
+    }
+
+    public func execute(_ request: AIRequest, onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        try Task.checkCancellation()
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw AIError.configuration("Claude Code CLI was not found at \(executableURL.path). Install it or set its path in AI settings.")
+        }
+
+        try await Self.requireSubscriptionLogin(executableURL: executableURL)
+        try Task.checkCancellation()
+        let pdfURL = Self.pdfURL(for: request)
+        let pdfSize = request.pdf?.count ?? (pdfURL.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int } ?? 0)
+        if pdfURL != nil, pdfSize > 96 * 1_024 * 1_024 {
+            throw AIError.limit("The PDF is too large for a CLI job. Reduce its size or selected pages.")
+        }
+        if let pdfURL, !pdfURL.isFileURL {
+            throw AIError.configuration("The job PDF must be a local file.")
+        }
+
+        let inputDirectory = request.workingDirectory.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: inputDirectory.path) else {
+            throw AIError.configuration("The job working directory does not exist.")
+        }
+        if let pdfURL {
+            let expected = inputDirectory.appendingPathComponent("input.pdf").standardizedFileURL
+            guard pdfURL.standardizedFileURL == expected,
+                  FileManager.default.fileExists(atPath: expected.path) else {
+                throw AIError.configuration("The CLI may read only the job's scoped input.pdf.")
+            }
+        }
+
+        let promptDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LecternPrompt-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: promptDirectory,
+                                                    withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+        } catch {
+            throw AIError.configuration("Could not create a private prompt file: \(error.localizedDescription)")
+        }
+        defer { try? FileManager.default.removeItem(at: promptDirectory) }
+        let promptURL = promptDirectory.appendingPathComponent("prompt.txt")
+        do {
+            try Data(request.prompt.utf8).write(to: promptURL, options: .atomic)
+        } catch {
+            throw AIError.configuration("Could not write the private prompt file: \(error.localizedDescription)")
+        }
+
+        let arguments = try Self.arguments(for: request,
+                                           model: request.model.isEmpty ? defaultModel : request.model,
+                                           pdfURL: pdfURL)
+        onEvent(.stage("Starting Claude"))
+        let invocation = CLIInvocation(executableURL: executableURL,
+                                       arguments: arguments,
+                                       workingDirectory: inputDirectory,
+                                       promptURL: promptURL,
+                                       streaming: request.kind == .ask,
+                                       outputLimit: maximumOutputBytes,
+                                       errorLimit: maximumErrorBytes,
+                                       timeout: timeout,
+                                       onText: { text in onEvent(.text(text)) })
+        let result = try await withTaskCancellationHandler {
+            try await invocation.run()
+        } onCancel: {
+            invocation.cancel()
+        }
+        try Task.checkCancellation()
+        if result.wasCancelled { throw CancellationError() }
+        if result.timedOut { throw AIError.limit("Claude Code exceeded the \(Int(timeout)) second time limit.") }
+        if result.outputExceeded { throw AIError.limit("Claude Code output exceeded Lectern's 16 MB response limit.") }
+        guard result.terminationStatus == 0 else {
+            let message = Self.message(from: result.stdout, stderr: result.stderr,
+                                       fallback: "Claude Code exited with status \(result.terminationStatus).")
+            if Self.looksLikeLimit(message) { throw AIError.limit(message) }
+            throw AIError.transport(message)
+        }
+
+        onEvent(.stage("Writing"))
+        if request.kind == .ask {
+            let response = try Self.parseStreamResult(result.stdout)
+            if !result.emittedText { onEvent(.text(response.content)) }
+            return response
+        }
+        return try Self.parseStructuredResult(result.stdout)
+    }
+
+    /// Read-only status check used to ensure the CLI is authenticated through a
+    /// Claude subscription/OAuth login, not a paid API-key or third-party route.
+    static func requireSubscriptionLogin(executableURL: URL) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LecternAuth-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let invocation = CLIInvocation(executableURL: executableURL, arguments: ["auth", "status"],
+            workingDirectory: directory, promptURL: URL(fileURLWithPath: "/dev/null"), streaming: false,
+            outputLimit: 64 * 1_024, errorLimit: 64 * 1_024, timeout: 10, onText: { _ in })
+        let result = try await withTaskCancellationHandler {
+            try await invocation.run()
+        } onCancel: { invocation.cancel() }
+        try Task.checkCancellation()
+        if result.wasCancelled { throw CancellationError() }
+        if result.timedOut { throw AIError.transport("Claude Code sign-in status check timed out.") }
+        guard result.terminationStatus == 0, !result.outputExceeded,
+              let status = try? JSONSerialization.jsonObject(with: result.stdout) as? [String: Any] else {
+            throw AIError.configuration("Sign in to Claude Code with your Claude subscription before using Lectern's CLI provider.")
+        }
+        try validateSubscriptionStatus(status)
+    }
+
+    static func validateSubscriptionStatus(_ status: [String: Any]) throws {
+        let method = (status["authMethod"] as? String ?? "").lowercased()
+        let provider = (status["apiProvider"] as? String ?? "").lowercased()
+        let plan = (status["subscriptionType"] as? String ?? "").lowercased()
+        // Console OAuth is keyless but API-billed. OAuth alone does not prove subscription billing.
+        guard status["loggedIn"] as? Bool == true, method == "claude.ai",
+              ["firstparty", "first-party"].contains(provider), ["pro", "max", "ultra", "team", "enterprise"].contains(plan) else {
+            throw AIError.configuration("Lectern could not verify a Claude subscription profile. Sign in to Claude Code with your Claude account. Console OAuth/API-key profiles are billed separately and are not allowed by the subscription backend.")
+        }
+    }
+
+    static func arguments(for request: AIRequest, model: String, pdfURL: URL?) throws -> [String] {
+        var arguments = [
+            "-p",
+            "--safe-mode",
+            "--no-session-persistence",
+            "--no-chrome",
+            "--disable-slash-commands",
+            "--permission-mode", "dontAsk",
+            "--system-prompt", request.systemPrompt,
+            "--model", model,
+            "--effort", effort(for: request.kind),
+            "--tools", pdfURL == nil ? "" : "Read"
+        ]
+        if let pdfURL {
+            let path = String(pdfURL.standardizedFileURL.path.dropFirst())
+            arguments += ["--allowedTools", "Read(//\(path))"]
+        }
+        if request.kind == .ask {
+            arguments += ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+        } else {
+            guard let schema = AIOutputSchema.json(for: request.kind) else {
+                throw AIError.configuration("No output schema is available for this structured CLI job.")
+            }
+            arguments += ["--output-format", "json", "--json-schema", schema]
+        }
+        return arguments
+    }
+
+    static func parseStructuredResult(_ data: Data) throws -> AIResponse {
+        guard data.count <= 16 * 1_024 * 1_024,
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIError.invalidResponse("Claude Code returned an invalid JSON response envelope.")
+        }
+        if envelope["is_error"] as? Bool == true {
+            let text = envelope["result"] as? String ?? "Claude Code reported an error."
+            if looksLikeLimit(text) { throw AIError.limit(text) }
+            throw AIError.transport(text)
+        }
+        if envelope["subtype"] as? String == "error_max_turns" {
+            throw AIError.limit(envelope["result"] as? String ?? "Claude Code reached its turn limit.")
+        }
+        try validateStopReason(envelope["stop_reason"] as? String,
+                               response: envelope["result"] as? String ?? "")
+        guard let structured = envelope["structured_output"] else {
+            let result = envelope["result"] as? String ?? ""
+            if looksLikeLimit(result) { throw AIError.limit(result) }
+            throw AIError.invalidResponse("Claude Code did not include structured_output in its JSON response.")
+        }
+        let content: String
+        if let string = structured as? String {
+            content = string
+        } else if JSONSerialization.isValidJSONObject(structured),
+                  let data = try? JSONSerialization.data(withJSONObject: structured, options: [.sortedKeys, .fragmentsAllowed]),
+                  let string = String(data: data, encoding: .utf8) {
+            content = string
+        } else {
+            throw AIError.invalidResponse("Claude Code returned a malformed structured_output value.")
+        }
+        return AIResponse(content: content, usage: usage(from: envelope))
+    }
+
+    static func parseStreamResult(_ data: Data) throws -> AIResponse {
+        guard data.count <= 16 * 1_024 * 1_024 else {
+            throw AIError.limit("Claude Code stream exceeded Lectern's 16 MB response limit.")
+        }
+        let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+        var finalResult: [String: Any]?
+        for line in lines {
+            guard let lineData = String(line).data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+            if event["type"] as? String == "result" { finalResult = event }
+        }
+        guard let envelope = finalResult else {
+            throw AIError.invalidResponse("Claude Code stream ended without a result event.")
+        }
+        if envelope["is_error"] as? Bool == true || (envelope["subtype"] as? String)?.hasPrefix("error") == true {
+            let text = envelope["result"] as? String ?? "Claude Code reported an error."
+            if looksLikeLimit(text) { throw AIError.limit(text) }
+            throw AIError.transport(text)
+        }
+        try validateStopReason(envelope["stop_reason"] as? String,
+                               response: envelope["result"] as? String ?? "")
+        guard let text = envelope["result"] as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AIError.invalidResponse("Claude Code returned an empty Ask response.")
+        }
+        return AIResponse(content: text, usage: usage(from: envelope))
+    }
+
+    static func usage(from envelope: [String: Any]) -> AIUsage {
+        var usage: [String: Any] = envelope["usage"] as? [String: Any] ?? [:]
+        if let modelUsage = envelope["modelUsage"] as? [String: Any] {
+            for raw in modelUsage.values {
+                guard let item = raw as? [String: Any] else { continue }
+                for (key, value) in item where usage[key] == nil { usage[key] = value }
+            }
+        }
+        let input = integer(usage["input_tokens"] ?? usage["inputTokens"] ?? envelope["input_tokens"])
+        let output = integer(usage["output_tokens"] ?? usage["outputTokens"] ?? envelope["output_tokens"])
+        let cost = number(envelope["total_cost_usd"] ?? usage["total_cost_usd"])
+        return AIUsage(inputTokens: input, outputTokens: output, costUSD: cost)
+    }
+
+    static func effort(for kind: JobKind) -> String {
+        switch kind {
+        case .generate: "high"
+        case .revise, .ask: "medium"
+        case .distil: "low"
+        }
+    }
+
+    public static func resolveExecutable(configuredPath: String? = nil) -> URL {
+        if let configuredPath, !configuredPath.isEmpty {
+            return URL(fileURLWithPath: (configuredPath as NSString).expandingTildeInPath)
+        }
+        for path in [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/claude").path, "/opt/homebrew/bin/claude", "/usr/local/bin/claude"] where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        for directory in (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":") {
+            let path = String(directory) + "/claude"
+            if FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
+        }
+        return URL(fileURLWithPath: "/opt/homebrew/bin/claude")
+    }
+
+    private static func pdfURL(for request: AIRequest) -> URL? {
+        let path = request.workingDirectory.appendingPathComponent("input.pdf", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
+        return path
+    }
+
+    fileprivate static func sanitizedEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        for key in Array(environment.keys) {
+            if key.hasPrefix("ANTHROPIC_") || key.hasPrefix("CLAUDE_CODE_USE_") ||
+                key.hasPrefix("AWS_") || key.hasPrefix("GOOGLE_") ||
+                key.hasPrefix("AZURE_") || key.hasPrefix("VERTEX_") || key == "CLAUDE_CODE_OAUTH_TOKEN" {
+                environment.removeValue(forKey: key)
+            }
+        }
+        environment["CLAUDE_CODE_SAFE_MODE"] = "1"
+        return environment
+    }
+
+    private static func message(from stdout: Data, stderr: Data, fallback: String) -> String {
+        guard let envelope = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any] else {
+            let detail = String(decoding: stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty ? fallback : String(detail.prefix(1_024))
+        }
+        let result = envelope["result"] as? String
+        let errors = envelope["errors"] as? [String]
+        return result?.isEmpty == false ? String(result!.prefix(1_024)) : errors?.first.map { String($0.prefix(1_024)) } ?? fallback
+    }
+
+    private static func looksLikeLimit(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("rate limit") || lower.contains("overloaded") ||
+            lower.contains("usage limit") || lower.contains("weekly limit") ||
+            lower.contains("capacity")
+    }
+
+    private static func validateStopReason(_ reason: String?, response: String) throws {
+        switch reason {
+        case nil, "end_turn", "stop_sequence": return
+        case "refusal": throw AIError.refusal(response.isEmpty ? "Claude declined the request." : response)
+        case "max_tokens", "model_context_window_exceeded", "pause_turn":
+            throw AIError.limit(response.isEmpty ? "Claude stopped before completing the response (\(reason!))." : response)
+        case "tool_use": throw AIError.invalidResponse("Claude requested a tool after the scoped tool call ended.")
+        default: throw AIError.invalidResponse("Claude returned an unsupported stop reason: \(reason!).")
+        }
+    }
+
+    private static func integer(_ value: Any?) -> Int {
+        if let number = value as? NSNumber { return max(0, number.intValue) }
+        if let string = value as? String, let value = Int(string) { return max(0, value) }
+        return 0
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber { return max(0, number.doubleValue) }
+        if let string = value as? String, let number = Double(string) { return max(0, number) }
+        return nil
+    }
+}
+
+private struct CLIProcessResult: Sendable {
+    var terminationStatus: Int32
+    var stdout: Data
+    var stderr: Data
+    var wasCancelled: Bool
+    var timedOut: Bool
+    var outputExceeded: Bool
+    var emittedText: Bool
+}
+
+/// Owns one child process and drains both output pipes immediately. The CLI gets
+/// no API-key environment variables, and all process termination is idempotent.
+private final class CLIInvocation: @unchecked Sendable {
+    private let process = Process()
+    private let stdoutPipe = Pipe()
+    private let stderrPipe = Pipe()
+    private let lock = NSLock()
+    private let streaming: Bool
+    private let outputLimit: Int
+    private let errorLimit: Int
+    private let timeout: TimeInterval
+    private let onText: @Sendable (String) -> Void
+    private var stdout = Data()
+    private var stderr = Data()
+    private var partialLine = Data()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var didTerminate = false
+    private var cancelled = false
+    private var timedOut = false
+    private var outputExceeded = false
+    private var emittedText = false
+    private var outputReadClosed = false
+    private var errorReadClosed = false
+
+    init(executableURL: URL,
+         arguments: [String],
+         workingDirectory: URL,
+         promptURL: URL,
+         streaming: Bool,
+         outputLimit: Int,
+         errorLimit: Int,
+         timeout: TimeInterval,
+         onText: @escaping @Sendable (String) -> Void) {
+        self.streaming = streaming
+        self.outputLimit = outputLimit
+        self.errorLimit = errorLimit
+        self.timeout = timeout
+        self.onText = onText
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.currentDirectoryURL = workingDirectory
+        process.environment = ClaudeCLIProvider.sanitizedEnvironment()
+        process.standardInput = FileHandle(forReadingAtPath: promptURL.path) ?? FileHandle.nullDevice
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.terminationHandler = { [weak self] _ in self?.terminated() }
+    }
+
+    func run() async throws -> CLIProcessResult {
+        if Task.isCancelled { throw CancellationError() }
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let bytes = handle.availableData
+            if bytes.isEmpty { self?.closedOutput(); return }
+            self?.receiveOutput(bytes)
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let bytes = handle.availableData
+            if bytes.isEmpty { self?.closedError(); return }
+            self?.receiveError(bytes)
+        }
+        do { try process.run() }
+        catch { throw AIError.configuration("Claude Code could not start: \(error.localizedDescription)") }
+        if Task.isCancelled { cancel() }
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [weak self] in
+            self?.timeoutReached()
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if didTerminate { lock.unlock(); continuation.resume() }
+            else { self.continuation = continuation; lock.unlock() }
+        }
+
+        // Process termination closes the parent's pipe endpoints. Handlers can
+        // still have one final callback queued, so synchronize before snapshot.
+        waitForPipesToDrain(until: Date().addingTimeInterval(2))
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        return snapshotResult()
+    }
+
+    func cancel() { stop(asTimeout: false, outputLimit: false) }
+
+    private func timeoutReached() { stop(asTimeout: true, outputLimit: false) }
+
+    private func stop(asTimeout: Bool, outputLimit: Bool) {
+        lock.lock()
+        if didTerminate { lock.unlock(); return }
+        cancelled = cancelled || (!asTimeout && !outputLimit)
+        timedOut = timedOut || asTimeout
+        outputExceeded = outputExceeded || outputLimit
+        let pid = process.processIdentifier
+        lock.unlock()
+
+        guard pid > 0 else { return }
+        _ = kill(pid, SIGINT)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, self.isRunning else { return }
+            _ = kill(pid, SIGTERM)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, self.isRunning else { return }
+                _ = kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    private var isRunning: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !didTerminate
+    }
+
+    private func snapshotResult() -> CLIProcessResult {
+        lock.lock(); defer { lock.unlock() }
+        return CLIProcessResult(terminationStatus: process.terminationStatus,
+                                stdout: stdout,
+                                stderr: stderr,
+                                wasCancelled: cancelled,
+                                timedOut: timedOut,
+                                outputExceeded: outputExceeded,
+                                emittedText: emittedText)
+    }
+
+    private func pipesDrained() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return outputReadClosed && errorReadClosed
+    }
+
+    private func waitForPipesToDrain(until deadline: Date) {
+        while Date() < deadline {
+            if pipesDrained() { return }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+    }
+
+    private func terminated() {
+        lock.lock()
+        didTerminate = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    private func receiveOutput(_ bytes: Data) {
+        lock.lock(); defer { lock.unlock() }
+        guard stdout.count + bytes.count <= outputLimit else {
+            outputExceeded = true
+            lock.unlock()
+            stop(asTimeout: false, outputLimit: true)
+            lock.lock()
+            return
+        }
+        stdout.append(bytes)
+        guard streaming else { return }
+        partialLine.append(bytes)
+        while let newline = partialLine.firstIndex(of: 0x0A) {
+            let line = Data(partialLine[..<newline])
+            partialLine.removeSubrange(...newline)
+            emitTextDelta(from: line)
+        }
+    }
+
+    private func emitTextDelta(from line: Data) {
+        guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let type = message["type"] as? String else { return }
+        let event = type == "stream_event" ? message["event"] as? [String: Any] : message
+        guard let event, event["type"] as? String == "content_block_delta",
+              let delta = event["delta"] as? [String: Any],
+              delta["type"] as? String == "text_delta",
+              let text = delta["text"] as? String else { return }
+        emittedText = true
+        onText(text)
+    }
+
+    private func receiveError(_ bytes: Data) {
+        lock.lock(); defer { lock.unlock() }
+        stderr.append(bytes)
+        if stderr.count > errorLimit { stderr.removeFirst(stderr.count - errorLimit) }
+    }
+
+    private func closedOutput() {
+        lock.lock(); defer { lock.unlock() }
+        outputReadClosed = true
+        if streaming, !partialLine.isEmpty { emitTextDelta(from: partialLine); partialLine.removeAll() }
+    }
+
+    private func closedError() { lock.lock(); errorReadClosed = true; lock.unlock() }
+}

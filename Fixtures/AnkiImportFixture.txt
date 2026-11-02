@@ -1,0 +1,8 @@
+"Unicode Café 漢字" == "Zażółć gęślą jaźń — λ"
+"Tabs\tand a \"quote\"" == "Second\tfield"
+"Multiline" == "line one\nline \"two\""
+"HTML <tag> & attr" == "literal < and &"
+"Inline math $x^2 + y^2$" == "Pythagorean theorem"
+"Display math $$\\frac{a}{b}$$" == "fraction"
+"Existing wrapper \\(x \\neq y\\)" == "literal TeX"
+"Currency $5 and $10" == "Keep as currency"

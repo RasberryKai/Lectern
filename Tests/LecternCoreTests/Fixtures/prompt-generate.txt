@@ -1,0 +1,23 @@
+TASK: generate
+
+GLOBAL CARD RULES (lowest content precedence):
+One idea per card.
+
+MODULE INSTRUCTIONS:
+"Interpretation over formulas."
+
+INCLUDED LEARNING POINTS (the student found this hard; test it without duplicating covered cards):
+[{"pages":[1],"text":"Parameter vs statistic."}]
+
+SLIDE NOTES (highest content precedence):
+[{"slide":1,"text":"Test confidence, not arithmetic."}]
+
+ALREADY COVERED (non-Bad, non-superseded module card fronts; write only genuinely new content):
+["A question","Z question"]
+
+SOURCE CONTEXT: lecture "Inference"; original source slides [1]. Read input.pdf, if supplied. It contains source labels and the same slide notes, and may include notes continuation pages.
+
+Generate atomic, transferable study cards. Every supplied source slide must be accounted for by a card or a skipped entry with a reason. Set flag when unsure or an unavoidable rule exception exists. Never invent source slide numbers.
+
+OUTPUT CONTRACT: return only JSON conforming to:
+{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]}}}},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}

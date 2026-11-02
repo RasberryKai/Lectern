@@ -1,0 +1,301 @@
+import Foundation
+import Darwin
+import Testing
+@testable import LecternCore
+
+@Suite(.serialized)
+struct ProviderTests {
+    @Test func cliUsesPrivateStdinAndParsesStructuredEnvelope() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cli = try fakeCLI(in: root, body: #"""
+        if [ "$1" = "auth" ]; then
+          printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+          exit 0
+        fi
+        count=$(wc -c | tr -d '[:space:]')
+        printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"promptBytes":%s},"usage":{"input_tokens":11,"output_tokens":7},"total_cost_usd":0.12}\n' "$count"
+        """#)
+        let prompt = String(repeating: "ä", count: 100_000)
+        let request = AIRequest(jobID: UUID(), kind: .generate, model: "opus", prompt: prompt,
+                                pdf: nil, workingDirectory: root, systemPrompt: "Private app instructions.")
+        let provider = ClaudeCLIProvider(executableURL: cli, timeout: 3)
+        let response = try await provider.execute(request, onEvent: { _ in })
+        #expect(response.content == #"{"promptBytes":200000}"#)
+        #expect(response.usage.inputTokens == 11)
+        #expect(response.usage.outputTokens == 7)
+        #expect(response.usage.costUSD == 0.12)
+    }
+
+    @Test func subscriptionGateRejectsConsoleOAuthAndUnknownBillingProfiles() throws {
+        try ClaudeCLIProvider.validateSubscriptionStatus(["loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "max"])
+        for status: [String: Any] in [
+            ["loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty"],
+            ["loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty"],
+            ["loggedIn": true, "authMethod": "api_key", "apiProvider": "firstParty", "subscriptionType": "max"],
+            ["loggedIn": true, "authMethod": "claude.ai", "apiProvider": "bedrock", "subscriptionType": "max"]
+        ] { #expect(throws: AIError.self) { try ClaudeCLIProvider.validateSubscriptionStatus(status) } }
+    }
+
+    @Test func cliAskStreamsTextAndReadsFinalResult() throws {
+        let event = #"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}"#
+        let result = #"{"type":"result","subtype":"success","result":"Hello [slide 1]","usage":{"input_tokens":4,"output_tokens":2}}"#
+        let data = Data((event + "\n" + result + "\n").utf8)
+        let response = try ClaudeCLIProvider.parseStreamResult(data)
+        #expect(response.content == "Hello [slide 1]")
+        #expect(response.usage.inputTokens == 4)
+    }
+
+    @Test func cliArgumentsIsolateCustomizationsAndScopeRead() throws {
+        let root = URL(fileURLWithPath: "/tmp/Lectern Job")
+        let pdf = root.appendingPathComponent("input.pdf")
+        let structured = try ClaudeCLIProvider.arguments(
+            for: AIRequest(jobID: UUID(), kind: .generate, model: "opus", prompt: "p", pdf: nil, workingDirectory: root),
+            model: "opus", pdfURL: pdf)
+        #expect(structured.contains("--safe-mode"))
+        #expect(structured.contains("--no-session-persistence"))
+        #expect(structured.contains("--no-chrome"))
+        #expect(structured.contains("--disable-slash-commands"))
+        #expect(structured.contains("--permission-mode"))
+        #expect(structured.contains("dontAsk"))
+        #expect(structured.contains("--system-prompt"))
+        #expect(structured.contains(PromptBuilder.systemPrompt))
+        #expect(structured.contains("--tools"))
+        #expect(structured.contains("Read"))
+        #expect(structured.contains("Read(//tmp/Lectern Job/input.pdf)"))
+        #expect(structured.contains("--json-schema"))
+        #expect(!structured.contains("--bare"))
+        #expect(!structured.contains("--append-system-prompt"))
+        #expect(!structured.contains("--mcp-config"))
+        #expect(!structured.contains("--plugin-dir"))
+        #expect(!structured.contains("--add-dir"))
+
+        let ask = try ClaudeCLIProvider.arguments(
+            for: AIRequest(jobID: UUID(), kind: .ask, model: "opus", prompt: "q", pdf: nil, workingDirectory: root),
+            model: "opus", pdfURL: nil)
+        #expect(ask.contains("stream-json"))
+        #expect(ask.contains("--include-partial-messages"))
+        #expect(ask.contains(""))
+    }
+
+    @Test func cliCancellationSendsInterruptAndReapsFakeProcess() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pidURL = root.appendingPathComponent("pid")
+        let cli = try fakeCLI(in: root, body: #"""
+        if [ "$1" = "auth" ]; then
+          printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+          exit 0
+        fi
+        trap 'printf caught > interrupt; exit 130' INT TERM
+        printf '%s' "$$" > pid
+        while :; do sleep 0.02; done
+        """#)
+
+        let request = AIRequest(jobID: UUID(), kind: .generate, model: "opus", prompt: "test",
+                                pdf: nil, workingDirectory: root)
+        let provider = ClaudeCLIProvider(executableURL: cli, timeout: 20)
+        let startup = ProviderStartupRecorder()
+        let task = Task {
+            do { return try await provider.execute(request, onEvent: { _ in }) }
+            catch { startup.record(error.localizedDescription); throw error }
+        }
+        try await waitUntil { FileManager.default.fileExists(atPath: pidURL.path) || startup.failure != nil }
+        guard FileManager.default.fileExists(atPath: pidURL.path) else {
+            task.cancel()
+            _ = try await task.value
+            throw AIError.configuration("Fake CLI never started: \(startup.failure ?? "startup deadline")")
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("interrupt").path))
+        let pid = try #require(Int32(String(contentsOf: pidURL, encoding: .utf8)))
+        #expect(kill(pid, 0) == -1)
+    }
+
+    @Test func cancellingDuringAuthNeverStartsInference() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let pidURL = root.appendingPathComponent("authpid")
+        // Auth runs in its own private directory; use explicit fixture-owned paths for observation.
+        let cli = try fakeCLI(in: root, body: """
+        if [ "$1" = "auth" ]; then
+          trap 'exit 130' INT TERM
+          printf '%s' "$$" > '\(pidURL.path)'
+          while :; do sleep 0.02; done
+        fi
+        printf started > '\(root.appendingPathComponent("inference").path)'
+        """)
+        let request = AIRequest(jobID: UUID(), kind: .generate, model: "opus", prompt: "test", pdf: nil, workingDirectory: root)
+        let task = Task { try await ClaudeCLIProvider(executableURL: cli).execute(request, onEvent: { _ in }) }
+        try await waitUntil { FileManager.default.fileExists(atPath: pidURL.path) }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        let pid = try #require(Int32(String(contentsOf: pidURL, encoding: .utf8)))
+        #expect(kill(pid, 0) == -1)
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("inference").path))
+    }
+
+    @Test func messagesRequestUsesBearerPDFAndSanitizedStructuredSchema() throws {
+        let prompt = "TASK: generate\n\nGLOBAL CARD RULES\n" + String(repeating: "stable context ", count: 200) +
+            "\n\nINCLUDED LEARNING POINTS\n[]"
+        let systemPrompt = "Test-only system instructions."
+        let pdf = Data("%PDF-fixture".utf8)
+        let request = try MessagesAPIProvider.makeURLRequest(prompt: prompt, kind: .revise, pdf: pdf,
+                                                             systemPrompt: systemPrompt,
+                                                             apiKey: "test-only-key", model: "claude-opus-5-5",
+                                                             apiVersion: "2026-10-21",
+                                                             endpoint: URL(string: "https://api.example.test/v1/messages")!,
+                                                             maxOutputTokens: 30_000)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-only-key")
+        #expect(request.value(forHTTPHeaderField: "anthropic-version") == "2026-10-21")
+        let bodyData = try #require(request.httpBody)
+        let body = try #require(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        #expect(body["model"] as? String == "claude-opus-5-5")
+        #expect((body["system"] as? [[String: Any]])?.first?["text"] as? String == systemPrompt)
+        #expect(body["max_tokens"] as? Int == 8_192)
+        let messages = try #require(body["messages"] as? [[String: Any]])
+        let content = try #require(messages.first?["content"] as? [[String: Any]])
+        #expect(content.contains { $0["cache_control"] != nil })
+        #expect(content.contains { (($0["source"] as? [String: Any])?["data"] as? String) == pdf.base64EncodedString() })
+        let outputConfig = try #require(body["output_config"] as? [String: Any])
+        let format = try #require(outputConfig["format"] as? [String: Any])
+        let schema = try #require(format["schema"] as? [String: Any])
+        let properties = try #require(schema["properties"] as? [String: Any])
+        let cards = try #require(properties["cards"] as? [String: Any])
+        #expect(cards["maxItems"] == nil)
+        #expect(cards["minItems"] == nil)
+        #expect(MessagesAPIProvider.effort(for: .generate) == "high")
+        #expect(MessagesAPIProvider.effort(for: .distil) == "low")
+    }
+
+    @Test func messagesRejectsRefusalsAndTruncatedResponses() {
+        let refusal = Data(#"{"type":"message","stop_reason":"refusal","content":[{"type":"refusal","refusal":"Cannot answer."}]}"#.utf8)
+        #expect(throws: AIError.self) { try MessagesAPIProvider.parseMessageResponse(refusal) }
+        let truncated = Data(#"{"type":"message","stop_reason":"max_tokens","content":[{"type":"text","text":"partial"}]}"#.utf8)
+        #expect(throws: AIError.self) { try MessagesAPIProvider.parseMessageResponse(truncated) }
+    }
+
+    @Test func messagesAPIHandlesSSEAndUnauthorizedResponsesOffline() async throws {
+        let sse = """
+        event: content_block_delta
+        data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Answer"}}
+
+        event: message_stop
+        data: {"type":"message_stop"}
+
+        """
+        let session = URLSessionStub.makeSession(status: 200, body: Data(sse.utf8))
+        let provider = MessagesAPIProvider(apiKey: { "test-only-key" }, session: session,
+                                           endpoint: URL(string: "https://api.example.test/v1/messages")!)
+        let request = AIRequest(jobID: UUID(), kind: .ask, model: "claude-opus-5-5", prompt: "Question",
+                                pdf: nil, workingDirectory: FileManager.default.temporaryDirectory)
+        let eventRecorder = ProviderEventRecorder()
+        let response = try await provider.execute(request) { event in eventRecorder.append(event) }
+        #expect(response.content == "Answer")
+        #expect(eventRecorder.text == "Answer")
+        #expect(URLSessionStub.state.lastRequest()?.value(forHTTPHeaderField: "Authorization") == "Bearer test-only-key")
+
+        let unauthorizedSession = URLSessionStub.makeSession(status: 401,
+            body: Data(#"{"error":{"type":"authentication_error","message":"invalid test key"}}"#.utf8))
+        let unauthorizedProvider = MessagesAPIProvider(apiKey: { "test-only-key" }, session: unauthorizedSession,
+                                                       endpoint: URL(string: "https://api.example.test/v1/messages")!)
+        await #expect(throws: AIError.self) {
+            _ = try await unauthorizedProvider.execute(request) { _ in }
+        }
+    }
+
+    @Test func settingsCodableClampsLimitsAndHasNoCredentialField() throws {
+        let settings = AISettings(backend: .messagesAPI, cliModel: "opus", messagesAPIModel: "claude-opus-5-5",
+                                  claudeCLIPath: "/test/claude", maxOutputTokens: 999_999)
+        let encoded = try JSONEncoder().encode(settings)
+        let loaded = try JSONDecoder().decode(AISettings.self, from: encoded)
+        #expect(loaded.maxOutputTokens == 128_000)
+        #expect(loaded.messagesAPIModel == "claude-opus-5-5")
+        #expect(!String(decoding: encoded, as: UTF8.self).lowercased().contains("apikey"))
+    }
+}
+
+private func temporaryDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-provider-tests-\(UUID())", isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
+}
+
+private func fakeCLI(in directory: URL, body: String) throws -> URL {
+    let url = directory.appendingPathComponent("fake-claude")
+    let script = "#!/bin/sh\nset -eu\n" + body + "\n"
+    try Data(script.utf8).write(to: url)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    return url
+}
+
+private final class ProviderEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var content = ""
+    var text: String { lock.lock(); defer { lock.unlock() }; return content }
+    func append(_ event: AIEvent) {
+        lock.lock(); defer { lock.unlock() }
+        if case .text(let value) = event { content += value }
+    }
+}
+
+private final class ProviderStartupRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+    var failure: String? { lock.withLock { value } }
+    func record(_ failure: String) { lock.withLock { value = failure } }
+}
+
+private func waitUntil(_ condition: () -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(12)
+    while !condition() && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(condition())
+}
+
+private final class URLSessionStubState: @unchecked Sendable {
+    static let shared = URLSessionStubState()
+    private let lock = NSLock()
+    private var status = 200
+    private var body = Data()
+    private var request: URLRequest?
+    private var stopped = false
+
+    func configure(status: Int, body: Data) {
+        lock.lock(); defer { lock.unlock() }
+        self.status = status; self.body = body; request = nil; stopped = false
+    }
+    func snapshot() -> (Int, Data) {
+        lock.lock(); defer { lock.unlock() }
+        return (status, body)
+    }
+    func capture(_ request: URLRequest) { lock.lock(); self.request = request; lock.unlock() }
+    func lastRequest() -> URLRequest? { lock.lock(); defer { lock.unlock() }; return request }
+    func markStopped() { lock.lock(); stopped = true; lock.unlock() }
+    func isStopped() -> Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+}
+
+private enum URLSessionStub {
+    static var state: URLSessionStubState { .shared }
+    static func makeSession(status: Int, body: Data) -> URLSession {
+        state.configure(status: status, body: body)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+}
+
+private final class StubURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "api.example.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        URLSessionStub.state.capture(request)
+        let (status, body) = URLSessionStub.state.snapshot()
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                                       headerFields: ["content-type": "application/json"] )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        guard !URLSessionStub.state.isStopped() else { return }
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() { URLSessionStub.state.markStopped() }
+}
