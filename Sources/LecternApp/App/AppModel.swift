@@ -16,6 +16,23 @@ nonisolated enum SidebarItem: Hashable {
     case settings
 }
 
+/// Files picked or dropped together, shown in the import sheet before they are merged into one lecture.
+nonisolated struct PendingPDFImport: Identifiable, Sendable {
+    nonisolated struct File: Identifiable, Sendable {
+        var id: URL { url }
+        let url: URL
+        let pageCount: Int
+        /// Why the file can't be imported (locked, unreadable). It must be left out to continue.
+        let problem: String?
+    }
+    let id = UUID()
+    let moduleID: UUID
+    /// The lecture number this import becomes.
+    let slot: Int
+    var files: [File]
+    var name: String
+}
+
 /// One library per app: one store, one runner (global AI concurrency), one service.
 @Observable
 final class AppModel {
@@ -44,6 +61,8 @@ final class AppModel {
     var errorMessage: String? = nil
     var showNewModule = false
     var settingsModuleID: UUID? = nil
+    /// Two or more PDFs waiting in the import sheet.
+    var pendingImport: PendingPDFImport? = nil
     /// Lecture windows read and clear this to switch mode when "Review"/"Open" targets an open window.
     var requestedModes: [UUID: LectureMode] = [:]
 
@@ -180,13 +199,22 @@ final class AppModel {
         try await reloadNow()
     }
 
+    /// One PDF imports straight away. Two or more open the import sheet, which merges them into one lecture.
     func importPDFs(_ urls: [URL], into moduleID: UUID) async {
+        let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+        let skipped = urls.count - pdfs.count
+        let skippedNote = skipped > 0 ? "Only PDF files can be imported; \(Format.count(skipped, "other file")) left out." : nil
+        if pdfs.count >= 2 {
+            await openImportSheet(pdfs, into: moduleID)
+            if let skippedNote { errorMessage = skippedNote }
+            return
+        }
         var failures: [String] = []
-        for url in urls where url.pathExtension.lowercased() == "pdf" {
+        if let url = pdfs.first {
             do { _ = try await store.importPDF(from: url, moduleID: moduleID) }
             catch { failures.append("\(url.lastPathComponent): \(error.localizedDescription)") }
         }
-        if urls.contains(where: { $0.pathExtension.lowercased() != "pdf" }) { failures.append("Only PDF files can be imported.") }
+        if let skippedNote { failures.append(skippedNote) }
         try? await reloadNow()
         if !failures.isEmpty { errorMessage = failures.joined(separator: "\n") }
     }
@@ -196,9 +224,31 @@ final class AppModel {
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.message = "Choose lecture slides. Each PDF fills the next planned slot."
+        panel.message = "Choose lecture slides. Several PDFs become one lecture; you set the order next."
+        panel.prompt = "Import"
         guard panel.runModal() == .OK else { return }
         await importPDFs(panel.urls, into: moduleID)
+    }
+
+    private func openImportSheet(_ urls: [URL], into moduleID: UUID) async {
+        let ordered = PDFMerge.naturalOrder(urls)
+        let files = await Task.detached(priority: .userInitiated) {
+            ordered.map { url -> PendingPDFImport.File in
+                do { return .init(url: url, pageCount: try PDFMerge.pageCount(of: url), problem: nil) }
+                catch { return .init(url: url, pageCount: 0, problem: error.localizedDescription) }
+            }
+        }.value
+        let lectureCount = (try? await store.lectures(in: moduleID).count) ?? 0
+        pendingImport = PendingPDFImport(moduleID: moduleID, slot: lectureCount + 1, files: files,
+                                         name: PDFMerge.suggestedName(for: ordered.map(\.lastPathComponent)))
+    }
+
+    /// Merges the sheet's files in order into one lecture and opens it in Prepare.
+    func importMerged(_ urls: [URL], name: String, into moduleID: UUID) async throws {
+        let lecture = try await store.importPDFs(urls, name: name, moduleID: moduleID)
+        try? await reloadNow()
+        selection = .module(moduleID)
+        openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: .prepare)
     }
 
     /// Lectures with durable running or queued jobs. Archive refuses these.

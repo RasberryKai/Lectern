@@ -49,6 +49,7 @@ Run bootstrap once before opening lecture windows. It replays pending export jou
 | Append feedback as module rule | `library.makeModuleRule(moduleID:feedback:)` |
 | List lectures | `store.lectures(in:)`, in module order |
 | Import a dropped/picked PDF | `store.importPDF(from:moduleID:)` |
+| Import several PDFs as one lecture (merged in the given order) | `store.importPDFs(_:name:moduleID:)`; sheet helpers in `PDFMerge` (`pageCount(of:)`, `naturalOrder(_:)`, `suggestedName(for:)`) |
 | Open lecture | `store.loadLecture(moduleID:lectureID:)` |
 | Edit global card rules | `loadRules()` / `saveRules(_:)`; version is the content hash |
 | Import friend's old files | `LegacyImporter(store:).importProjects(from:)` / `.importReviewer(from:)` |

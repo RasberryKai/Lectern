@@ -187,6 +187,23 @@ public actor LibraryStore {
         guard let pdf = PDFDocument(url: url), !pdf.isLocked, pdf.pageCount > 0 else { throw LibraryError.invalid("The selected PDF is empty, locked or unreadable.") }
         return try createLecture(Lecture(moduleID: moduleID, name: url.deletingPathExtension().lastPathComponent, sourceFilename: url.lastPathComponent, pageCount: pdf.pageCount), sourceURL: url)
     }
+    /// Imports several PDFs, in the given order, as ONE lecture whose `source.pdf` is their merge.
+    /// A locked or unreadable file is named in the error, and nothing is imported.
+    public func importPDFs(_ urls: [URL], name: String, moduleID: UUID) throws -> Lecture {
+        guard let first = urls.first else { throw LibraryError.invalid("Choose at least one PDF.") }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lectureName = trimmed.isEmpty ? PDFMerge.suggestedName(for: urls.map(\.lastPathComponent)) : trimmed
+        if urls.count == 1 {
+            // Left with one file in the sheet: keep the original bytes instead of a re-written copy.
+            let scoped = first.startAccessingSecurityScopedResource(); defer { if scoped { first.stopAccessingSecurityScopedResource() } }
+            let pageCount = try PDFMerge.pageCount(of: first)
+            return try createLecture(Lecture(moduleID: moduleID, name: lectureName, sourceFilename: first.lastPathComponent, pageCount: pageCount), sourceURL: first)
+        }
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-merge-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let pageCount = try PDFMerge.merge(urls, to: temp)
+        return try createLecture(Lecture(moduleID: moduleID, name: lectureName, sourceFilename: first.lastPathComponent, pageCount: pageCount), sourceURL: temp)
+    }
     public func loadRules() throws -> String { try locked {
         let url = rootURL.appendingPathComponent("rules.md")
         if FileManager.default.fileExists(atPath: url.path) { return try String(contentsOf: url, encoding: .utf8) }

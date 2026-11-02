@@ -30,6 +30,7 @@ struct LibraryWindow: View {
             ModuleSettingsSheet(moduleID: item.id)
         }
         .sheet(isPresented: $model.showBootstrapReport) { BootstrapReportSheet() }
+        .sheet(item: $model.pendingImport) { pending in ImportPDFsSheet(pending: pending) }
         .alert("Something went wrong", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK", role: .cancel) { model.errorMessage = nil }
         } message: {
