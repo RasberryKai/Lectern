@@ -19,10 +19,10 @@ rm -rf "$APP_DIR"
 mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources"
 cp "$EXECUTABLE" "$CONTENTS_DIR/MacOS/LecternApp"
 cp "$ROOT_DIR/Assets/Brand/Lectern.icns" "$CONTENTS_DIR/Resources/Lectern.icns"
-# SwiftPM resource bundles (MathJax, bundled card rules). SwiftPM's generated Bundle.module
-# accessor for executables looks next to Bundle.main.bundleURL, i.e. the .app root.
+# SwiftPM resource bundles (MathJax, bundled card rules). Bundle.module finds them via
+# Bundle.main.resourceURL; at the .app root the app crashes at launch (checked on macOS).
 for bundle in "$BIN_DIR"/Lectern_*.bundle; do
-  [ -d "$bundle" ] && cp -R "$bundle" "$APP_DIR/"
+  [ -d "$bundle" ] && cp -R "$bundle" "$CONTENTS_DIR/Resources/"
 done
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'

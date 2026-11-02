@@ -21,13 +21,13 @@
 - **Archived modules** show a read-only banner; edits, imports, AI and retry are disabled, export and backup stay available. Archiving flushes open windows first and, if jobs are running, asks before cancelling them.
 - **Keys.** Prepare: arrows move focus, Space toggles selection, typing opens the note with the first character kept, ⌘J notes, ⌘B thumbnails, ⇧⌘A Ask, ⌘G Generate. Review: 1/2/3 verdicts, ←/→ cards, ↩ accept, ⇧↩ accept and approve, X discard, S cycle source, Space enlarge, A ask, G open in Prepare, E edit, U undo, ⌘↩ send feedback. ⌘1/⌘2 switch mode. Esc leaves any editor.
 - **CLI status** in the sidebar says whether the `claude` executable exists. Whether it is logged in is only known when a job runs; the job's error says so.
-- **App target** is a SwiftPM executable (like Flashcard Reviewer) instead of a hand-maintained `.xcodeproj`: it builds with `swift build`, and `scripts/package-app.sh` wraps it into `Lectern.app` with the icon in `Assets/Brand`. The bundle is unsigned (local use); SwiftPM's resource bundles sit at the `.app` root where its `Bundle.module` accessor looks.
+- **App target** is a SwiftPM executable (like Flashcard Reviewer) instead of a hand-maintained `.xcodeproj`: it builds with `swift build`, and `scripts/package-app.sh` wraps it into `Lectern.app` with the icon in `Assets/Brand`. The bundle is unsigned (local use); SwiftPM's resource bundles go in `Contents/Resources`, where `Bundle.module` finds them (at the `.app` root it crashes at launch).
 
 ## Still to check on a Mac
 
 This frontend was written without a macOS build in the loop. Before relying on it:
 
-1. `swift build --product LecternApp` and fix any compile errors (SwiftUI/AppKit were not type-checked when this was written).
+1. Done: `swift build --product LecternApp` is clean and `swift test` passes on macOS; the app launches. Not yet clicked through by hand.
 2. Run the handoff's frontend gate with a real deck: import → curate/note → Generate → review with sources → revise while continuing → diff/accept → export → Anki import → edit/re-export.
 3. Close a lecture window and quit during a pending edit; archive with an open window and a running job; unarchive.
 4. Compare Overview and Module settings with `Docs/Design/*.png`, and the other screens with `learning-app-v1-screens.html`, in light and dark mode.
