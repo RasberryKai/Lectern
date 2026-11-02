@@ -3,7 +3,6 @@ import SwiftUI
 
 struct OverviewView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ScrollView {
@@ -91,7 +90,6 @@ struct OverviewView: View {
 
 struct ModuleProgressCard: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
     let progress: ModuleProgress
 
     var body: some View {
@@ -108,7 +106,7 @@ struct ModuleProgressCard: View {
                 }
                 SlotStrip(slots: progress.slots) { slot in
                     if let lectureID = slot.lectureID {
-                        model.openLecture(LectureRef(moduleID: progress.module.id, lectureID: lectureID), mode: slot.status == .toReview ? .review : nil, openWindow: openWindow)
+                        model.openLecture(LectureRef(moduleID: progress.module.id, lectureID: lectureID), mode: slot.status == .toReview ? .review : nil)
                     } else {
                         model.selection = .module(progress.module.id)
                     }
@@ -127,7 +125,7 @@ struct ModuleProgressCard: View {
                     HStack {
                         Text(line.text).font(Theme.body).lineLimit(1)
                         Spacer(minLength: 12)
-                        Button(line.action) { NextUpRouter.perform(action, model: model, openWindow: openWindow) }
+                        Button(line.action) { NextUpRouter.perform(action, model: model) }
                             .buttonStyle(LinkButtonStyle())
                     }
                 }
@@ -140,17 +138,17 @@ struct ModuleProgressCard: View {
 
 /// Routes typed Next-up actions by ID; never by label.
 enum NextUpRouter {
-    static func perform(_ action: NextUpAction, model: AppModel, openWindow: OpenWindowAction) {
+    static func perform(_ action: NextUpAction, model: AppModel) {
         switch action {
         case .review(let lectureID, _):
             guard let moduleID = moduleID(of: lectureID, model: model) else { return }
-            model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: .review, openWindow: openWindow)
+            model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: .review)
         case .export(let moduleID, _, _, _):
             model.selection = .export(moduleID)
         case .prepare(let lectureID, let reasons):
             guard let moduleID = moduleID(of: lectureID, model: model) else { return }
             let sourceless = reasons.contains(.addCards)
-            model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: sourceless ? .review : .prepare, openWindow: openWindow)
+            model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: sourceless ? .review : .prepare)
         case .importLecture(let moduleID, _):
             model.selection = .module(moduleID)
             Task { await model.chooseAndImportPDFs(into: moduleID) }

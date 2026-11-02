@@ -14,7 +14,7 @@ struct AskPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if cardID == nil { contextChips }
+            contextChips
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
@@ -62,10 +62,8 @@ struct AskPanel: View {
 
     private var contextChips: some View {
         let current = model.askContext(for: page)
-        let low = max(1, page - 1), high = min(model.lecture.pageCount, page + 1)
         return HStack(spacing: 6) {
-            chip("Slide \(page)", .slide, current)
-            if high > low { chip("\(low) to \(high)", .neighbours(1), current) }
+            chip("Current slide", .slide, current)
             chip("Whole lecture", .lecture, current)
         }
     }
@@ -170,7 +168,7 @@ struct AskPanel: View {
 
     private var input: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField(cardID == nil ? "Ask about \(contextLabel)" : "Ask about this card and its slides",
+            TextField("Ask about \(contextLabel)",
                       text: Binding(get: { model.askDrafts[page] ?? "" }, set: { model.askDrafts[page] = $0 }),
                       axis: .vertical)
                 .lineLimit(2...6)

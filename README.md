@@ -72,4 +72,4 @@ Anki export uses a stable **first regular field** `LecternID`, not a fabricated 
 - `Sources/LecternTool`: runnable workflows and offline demo.
 - `Tests/LecternCoreTests`: legacy regression, storage/migration, prompt golden, concurrency, process/HTTP, lifecycle, and opt-in live checks.
 
-No SwiftUI app target or new screen implementation is delivered in this backend stage. Do not claim live Claude PDF generation or Anki import passed based on fixture tests.
+The SwiftUI app target is delivered and has passed the local smoke checks in [the QA report](Docs/QA-2026-11-02.md). Live Claude PDF generation and actual Anki import remain unverified by fixture tests.

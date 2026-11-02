@@ -6,16 +6,24 @@ struct LibraryWindow: View {
 
     var body: some View {
         @Bindable var model = model
-        HStack(spacing: 0) {
-            Sidebar()
-                .frame(width: 236)
-                .background(Theme.sidebar)
-            Rectangle().fill(Theme.border).frame(width: 1)
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.canvas)
+        Group {
+            if let ref = model.activeLecture {
+                LectureWindow(ref: ref).id(ref)
+            } else {
+                HStack(spacing: 0) {
+                    Sidebar()
+                        .frame(width: 236)
+                        .background(Theme.sidebar)
+                    Rectangle().fill(Theme.border).frame(width: 1)
+                    detail
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Theme.canvas)
+                }
+            }
         }
+        .background(WindowCloseGuard { await model.closeAllLectureWindows() })
         .foregroundStyle(Theme.ink)
+        .sheet(item: $model.renamingLecture) { ref in RenameLectureSheet(ref: ref) }
         .sheet(isPresented: $model.showNewModule) { NewModuleSheet() }
         .sheet(item: Binding(get: { model.settingsModuleID.map(IdentifiedUUID.init) },
                              set: { model.settingsModuleID = $0?.id })) { item in

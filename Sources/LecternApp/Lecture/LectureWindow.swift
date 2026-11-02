@@ -2,7 +2,7 @@ import AppKit
 import LecternCore
 import SwiftUI
 
-/// Root of a lecture window: waits for the library, opens one LectureSession, and guards close.
+/// In-window lecture destination; the library root guards window close.
 struct LectureWindow: View {
     @Environment(AppModel.self) private var app
     let ref: LectureRef
@@ -13,7 +13,6 @@ struct LectureWindow: View {
         Group {
             if let model {
                 LectureWorkspace(model: model)
-                    .background(WindowCloseGuard { await close(model) })
             } else if let loadError {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("This lecture can't be opened").font(Theme.serif(24))
@@ -31,11 +30,15 @@ struct LectureWindow: View {
     }
 
     private func load() async {
-        // Restored windows can appear before bootstrap finishes; sessions must open after it.
-        while app.phase == .loading { try? await Task.sleep(for: .milliseconds(100)) }
+        // Sessions must open after library bootstrap finishes.
+        while app.phase == .loading {
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         if case .failed(let message) = app.phase { loadError = message; return }
         do {
             let lecture = try await app.store.loadLecture(moduleID: ref.moduleID, lectureID: ref.lectureID)
+            guard !Task.isCancelled, app.activeLecture == ref else { return }
             let session = LectureSession(lecture: lecture, store: app.store, runner: app.runner)
             session.startObserving()
             let windowModel = LectureWindowModel(ref: ref, session: session, app: app)
@@ -46,34 +49,20 @@ struct LectureWindow: View {
             loadError = error.localizedDescription
         }
     }
-
-    private func close(_ model: LectureWindowModel) async -> Bool {
-        do {
-            try await model.closeAndFlush()
-            return true
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "Your last edits couldn't be saved"
-            alert.informativeText = "\(LectureWindowModel.describe(error))\n\nThe window stays open so nothing is lost. Try closing again."
-            alert.runModal()
-            return false
-        }
-    }
 }
 
 nonisolated enum EditorField: Hashable {
-    case note, front, back, sources, feedback, ask
+    case note, front, back, sources, feedback, ask, title
 }
 
 struct LectureWorkspace: View {
     @Environment(AppModel.self) private var app
-    @Environment(\.openWindow) private var openWindow
     @Bindable var model: LectureWindowModel
     @FocusState private var focus: EditorField?
 
     var body: some View {
         VStack(spacing: 0) {
-            LectureTopBar(model: model)
+            LectureTopBar(model: model, focus: $focus)
             if model.readOnly && !model.isClosing { ReadOnlyBanner() }
             if let message = model.errorMessage ?? (model.session.lastError != model.dismissedSessionError ? model.session.lastError : nil) {
                 ErrorBanner(message: message) {
@@ -117,6 +106,12 @@ struct LectureWorkspace: View {
     private func handleKey(_ event: NSEvent, editing: Bool) -> Bool {
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
+        if model.titleDraft != nil && editing { return false }
+        if modifiers == [.command, .option], letter == "b" {
+            model.askVisible.toggle()
+            if !model.askVisible, focus == .ask { focus = nil }
+            return true
+        }
 
         // Window-wide command shortcuts work even while typing.
         if modifiers == .command {
@@ -259,15 +254,19 @@ private struct EnlargedSlideSheet: View {
 
 struct LectureTopBar: View {
     @Environment(AppModel.self) private var app
-    @Environment(\.openWindow) private var openWindow
     @Bindable var model: LectureWindowModel
+    var focus: FocusState<EditorField?>.Binding
 
     var body: some View {
         HStack(spacing: 18) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(model.moduleName).font(Theme.body).foregroundStyle(Theme.accentText).lineLimit(1)
-                Text(model.lecture.name).font(Theme.serif(20)).lineLimit(1)
+            Button {
+                Task { await app.returnToLibrary() }
+            } label: {
+                Label("Back to library", systemImage: "chevron.left")
             }
+            .buttonStyle(SecondaryButtonStyle())
+            .disabled(app.leavingLecture)
+            presentationTitle
             SegmentedControl(options: [(LectureMode.prepare, "Prepare"), (LectureMode.review, "Review")],
                              selection: Binding(get: { model.mode }, set: { model.setMode($0) }))
                 .help("⌘1 Prepare · ⌘2 Review")
@@ -278,10 +277,64 @@ struct LectureTopBar: View {
             }
             Spacer(minLength: 10)
             if model.mode == .prepare { prepareTrailing } else { reviewTrailing }
+            Button {
+                model.askVisible.toggle()
+            } label: {
+                Image(systemName: "sidebar.right")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.askVisible ? Theme.accentText : Theme.quiet)
+            .accessibilityLabel("Toggle right sidebar")
+            .help("Toggle right sidebar · ⌘⌥B")
+            .keyboardShortcut("b", modifiers: [.command, .option])
         }
         .padding(.horizontal, 22).padding(.vertical, 12)
         .background(Theme.surface)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
+    }
+
+    @ViewBuilder private var presentationTitle: some View {
+        if model.titleDraft != nil {
+            TextField("Presentation name", text: Binding(
+                get: { model.titleDraft ?? model.lecture.name },
+                set: { model.titleDraft = $0 }
+            ))
+            .font(Theme.serif(20))
+            .textFieldStyle(.plain)
+            .focused(focus, equals: .title)
+            .frame(minWidth: 100, idealWidth: 220, maxWidth: 300)
+            .disabled(model.isSavingTitle)
+            .task {
+                await Task.yield()
+                focus.wrappedValue = .title
+            }
+            .onSubmit { saveTitle() }
+            .onExitCommand { model.titleDraft = nil; focus.wrappedValue = nil }
+            .onChange(of: focus.wrappedValue) { old, current in
+                if old == .title, current != .title, model.titleDraft != nil { saveTitle() }
+            }
+        } else {
+            Button { beginRename() } label: {
+                Text(model.lecture.name).font(Theme.serif(20)).lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .help("Click to rename presentation")
+            .disabled(model.readOnly)
+            .contextMenu {
+                Button("Rename presentation…") { beginRename() }.disabled(model.readOnly)
+            }
+        }
+    }
+
+    private func beginRename() {
+        model.titleDraft = model.lecture.name
+    }
+
+    private func saveTitle() {
+        Task {
+            await model.run { try await model.commitTitle() }
+            if model.titleDraft != nil { focus.wrappedValue = .title }
+        }
     }
 
     @ViewBuilder private var prepareTrailing: some View {
@@ -320,9 +373,7 @@ struct LectureTopBar: View {
         Text("\(model.reviewedCount) / \(model.activeCards.count) reviewed").font(Theme.body).foregroundStyle(Theme.quiet).monospacedDigit()
         Text(model.readOnly ? "Read-only" : "Saved on this Mac").font(Theme.small).foregroundStyle(Theme.faint)
         Button("Export") {
-            Task { await model.flushAll() }
-            app.selection = .export(model.ref.moduleID)
-            openWindow(id: "library")
+            Task { await app.returnToLibrary(destination: .export(model.ref.moduleID)) }
         }
         .buttonStyle(SecondaryButtonStyle())
     }

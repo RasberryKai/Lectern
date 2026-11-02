@@ -21,7 +21,7 @@ struct ReviewView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                if let card = model.selectedCard {
+                if model.askVisible, let card = model.selectedCard {
                     Rectangle().fill(Theme.border).frame(width: 1)
                     SourcePane(model: model, card: card, focus: focus)
                         .frame(width: 340)

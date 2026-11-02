@@ -16,6 +16,10 @@
 
 ## Decisions worth knowing
 
+- **Presentation names and context.** Rename from a lecture row’s context menu or click the open presentation’s title for inline editing. Return or focus loss saves; Escape cancels; navigating away flushes the title. The header omits the module name. The far-right sidebar button and ⌘⌥B toggle Ask in Prepare and Source/Ask in Review. Ask offers Current slide and Whole lecture; older neighbouring-slide scopes fall back to Current slide.
+
+- **Single-window navigation.** Open/Review replaces the library content in the main window. Back returns to the previous library selection after saving notes, card edits and view state; a failed save keeps the lecture visible. Export and ⌘0 Overview use the same guarded navigation. Prepare/Review/source links stay inside the workspace.
+
 - **View state is window-local.** Mode, focused slide, filters and the selected card live in `LectureWindowModel` and are written once with `.setViewPreferences` when the window closes. Arrow-key browsing doesn't write to disk per keystroke or fill the 50-step undo stack, and archived lectures stay navigable without a write.
 - **Saves.** Card text uses `stageCardEdit` (the backend's 500 ms coalescing); notes use the same pattern in the window model. Both flush on focus loss, navigation, before jobs and on close. A lecture window only closes after `closeAndFlush()` succeeds (`WindowCloseGuard` answers `windowShouldClose`); quitting uses `.terminateLater` until every open lecture has saved.
 - **Archived modules** show a read-only banner; edits, imports, AI and retry are disabled, export and backup stay available. Archiving flushes open windows first and, if jobs are running, asks before cancelling them.
@@ -23,11 +27,12 @@
 - **CLI status** in the sidebar says whether the `claude` executable exists. Whether it is logged in is only known when a job runs; the job's error says so.
 - **App target** is a SwiftPM executable (like Flashcard Reviewer) instead of a hand-maintained `.xcodeproj`: it builds with `swift build`, and `scripts/package-app.sh` wraps it into `Lectern.app` with the icon in `Assets/Brand`. The bundle is unsigned (local use); SwiftPM's resource bundles go in `Contents/Resources`, where `Bundle.module` finds them (at the `.app` root it crashes at launch).
 
-## Still to check on a Mac
+## Verification and remaining checks
 
-This frontend was written without a macOS build in the loop. Before relying on it:
+The app builds on macOS, the full offline test suite passes, and the native smoke checks are recorded in [QA-2026-11-02.md](QA-2026-11-02.md). They cover import, edit persistence, single-window navigation, presentation rename, planning/archive controls, and the right sidebar/context UI.
 
-1. Done: `swift build --product LecternApp` is clean and `swift test` passes on macOS; the app launches. Not yet clicked through by hand.
-2. Run the handoff's frontend gate with a real deck: import → curate/note → Generate → review with sources → revise while continuing → diff/accept → export → Anki import → edit/re-export.
-3. Close a lecture window and quit during a pending edit; archive with an open window and a running job; unarchive.
-4. Compare Overview and Module settings with `Docs/Design/*.png`, and the other screens with `learning-app-v1-screens.html`, in light and dark mode.
+Remaining acceptance checks:
+
+1. Run the handoff’s full gate with a real deck and live provider: import → curate/note → Generate → review with sources → revise while continuing → diff/accept → export → Anki import → edit/re-export.
+2. Quit during a live job; archive while generation is running and verify cancellation/unarchive.
+3. Compare the screens with `Docs/Design/*.png` and `learning-app-v1-screens.html` in both light and dark appearance.

@@ -3,7 +3,8 @@ import LecternCore
 import Observation
 import SwiftUI
 
-nonisolated struct LectureRef: Codable, Hashable, Sendable {
+nonisolated struct LectureRef: Codable, Hashable, Sendable, Identifiable {
+    var id: UUID { lectureID }
     var moduleID: UUID
     var lectureID: UUID
 }
@@ -36,6 +37,9 @@ final class AppModel {
     private(set) var apiKeySaved = false
     private(set) var bootstrapReport: BootstrapReport? = nil
     var showBootstrapReport = false
+    var renamingLecture: LectureRef?
+    var activeLecture: LectureRef?
+    private(set) var leavingLecture = false
     var selection: SidebarItem = .overview
     var errorMessage: String? = nil
     var showNewModule = false
@@ -157,6 +161,18 @@ final class AppModel {
         return module
     }
 
+    func renameLecture(_ ref: LectureRef, name: String) async throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw LibraryError.invalid("Give the presentation a name.") }
+        let workspace = lectureWindows[ref.lectureID]
+        try await workspace?.flushAllThrowing()
+        _ = try await store.updateLecture(moduleID: ref.moduleID, lectureID: ref.lectureID) { lecture in
+            lecture.name = trimmed
+        }
+        try await workspace?.session.refresh()
+        try await reloadNow()
+    }
+
     func saveInstructions(moduleID: UUID, instructions: String) async throws {
         var module = try await store.loadModule(moduleID: moduleID)
         module.instructions = instructions
@@ -263,8 +279,26 @@ final class AppModel {
         return true
     }
 
-    func openLecture(_ ref: LectureRef, mode: LectureMode?, openWindow: OpenWindowAction) {
+    /// Keep the workspace visible if saving fails; navigation must never discard edits.
+    func returnToLibrary(destination: SidebarItem? = nil) async {
+        guard !leavingLecture else { return }
+        leavingLecture = true
+        defer { leavingLecture = false }
+        do {
+            if let ref = activeLecture, let workspace = lectureWindows[ref.lectureID] {
+                try await workspace.closeAndFlush()
+            }
+            if let ref = activeLecture { requestedModes.removeValue(forKey: ref.lectureID) }
+            activeLecture = nil
+            if let destination { selection = destination }
+            scheduleReload()
+        } catch {
+            errorMessage = "Your edits could not be saved. The lecture stays open. \(error.localizedDescription)"
+        }
+    }
+
+    func openLecture(_ ref: LectureRef, mode: LectureMode?) {
         if let mode { requestedModes[ref.lectureID] = mode }
-        openWindow(value: ref)
+        activeLecture = ref
     }
 }

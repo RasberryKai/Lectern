@@ -11,7 +11,7 @@ struct LecternApp: App {
         Window("Lectern", id: "library") {
             LibraryWindow()
                 .environment(model)
-                .frame(minWidth: 1040, minHeight: 680)
+                .frame(minWidth: 1100, minHeight: 700)
                 .task { await model.start() }
         }
         .defaultSize(width: 1320, height: 860)
@@ -21,19 +21,10 @@ struct LecternApp: App {
                     .keyboardShortcut("n", modifiers: [.command, .shift])
             }
             CommandGroup(after: .sidebar) {
-                Button("Overview") { model.selection = .overview }
+                Button("Overview") { Task { await model.returnToLibrary(destination: .overview) } }
                     .keyboardShortcut("0", modifiers: [.command])
             }
         }
-
-        WindowGroup("Lecture", id: "lecture", for: LectureRef.self) { $ref in
-            if let ref {
-                LectureWindow(ref: ref)
-                    .environment(model)
-                    .frame(minWidth: 1100, minHeight: 700)
-            }
-        }
-        .defaultSize(width: 1440, height: 900)
 
         Settings {
             SettingsView()

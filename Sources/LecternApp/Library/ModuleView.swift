@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 
 struct ModuleView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
     let moduleID: UUID
 
     @State private var lectures: [Lecture] = []
@@ -100,7 +99,7 @@ struct ModuleView: View {
             }
             ForEach(Array(lectures.enumerated()), id: \.element.id) { index, lecture in
                 LectureRow(index: index, lecture: lecture, progress: progress?.lectures.first { $0.lectureID == lecture.id }, archived: archived) { mode in
-                    model.openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: mode, openWindow: openWindow)
+                    model.openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: mode)
                 }
                 Divider().overlay(Theme.border)
             }
@@ -232,6 +231,9 @@ private struct LectureRow: View {
         .contextMenu {
             Button("Open in Prepare") { open(.prepare) }.disabled(lecture.pageCount == 0)
             Button("Open in Review") { open(.review) }
+            Button("Rename presentation…") {
+                model.renamingLecture = LectureRef(moduleID: lecture.moduleID, lectureID: lecture.id)
+            }.disabled(archived)
             Divider()
             Button("Export Lecture Backup…") { exportBackup() }
             Button("Export Lecture to Anki…") { model.selection = .export(lecture.moduleID) }
@@ -277,6 +279,58 @@ private struct LectureRow: View {
         Task {
             do { try await model.store.exportBackup(moduleID: lecture.moduleID, lectureID: lecture.id, to: url) }
             catch { model.errorMessage = error.localizedDescription }
+        }
+    }
+}
+
+
+struct RenameLectureSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let ref: LectureRef
+    @State private var name = ""
+    @State private var error: String?
+    @State private var saving = false
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Rename presentation").font(Theme.serif(26))
+            TextField("Presentation name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit(save)
+            if let error { ErrorBanner(message: error) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+                    .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(28).frame(width: 440)
+        .background(Theme.surface)
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+        .task {
+            do {
+                name = try await model.store.loadLecture(moduleID: ref.moduleID, lectureID: ref.lectureID).name
+                nameFocused = true
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    private func save() {
+        guard !saving, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        saving = true
+        Task {
+            do {
+                try await model.renameLecture(ref, name: name)
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+            saving = false
         }
     }
 }

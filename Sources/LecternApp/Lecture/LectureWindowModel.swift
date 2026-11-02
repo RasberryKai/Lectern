@@ -27,6 +27,22 @@ final class LectureWindowModel {
     var notesVisible: Bool
     var thumbnailsVisible: Bool
     var askVisible = true
+    var titleDraft: String?
+    private(set) var isSavingTitle = false
+    @ObservationIgnored private var titleSaveTask: Task<Void, Error>?
+
+    func commitTitle() async throws {
+        if let titleSaveTask { try await titleSaveTask.value; return }
+        guard let draft = titleDraft else { return }
+        let name = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != lecture.name else { titleDraft = nil; return }
+        isSavingTitle = true
+        let task = Task { try await app.renameLecture(ref, name: name) }
+        titleSaveTask = task
+        defer { titleSaveTask = nil; isSavingTitle = false }
+        try await task.value
+        titleDraft = nil
+    }
 
     var errorMessage: String? = nil
     var dismissedSessionError: String? = nil
@@ -454,7 +470,9 @@ final class LectureWindowModel {
     }
 
     func askContext(for page: Int) -> ThreadContext {
-        askContexts[page] ?? thread(page: page)?.context ?? .neighbours(1)
+        let context = askContexts[page] ?? thread(page: page)?.context ?? .slide
+        // Older chats may retain a neighbouring-slide scope; use the current slide instead.
+        return context == .lecture ? .lecture : .slide
     }
 
     func ask(page: Int, cardID: UUID? = nil) async {
@@ -543,6 +561,7 @@ final class LectureWindowModel {
 
     /// Saves notes, card edits and view state. Throws so the window can stay open on failure.
     func closeAndFlush() async throws {
+        try await commitTitle()
         try await flushNoteNow()
         if !app.isArchived(ref.moduleID) && currentPreferences != lecture.viewPreferences {
             try await session.dispatch(.setViewPreferences(currentPreferences))
