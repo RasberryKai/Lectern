@@ -80,7 +80,7 @@ extension Color {
 // MARK: - Logo
 
 /// The Lectern mark: an L whose foot rises into a reading desk and an approval tick.
-struct LogoMark: Shape {
+nonisolated struct LogoMark: Shape {
     func path(in rect: CGRect) -> Path {
         let points: [CGPoint] = [.init(x: 50, y: 32), .init(x: 94, y: 32), .init(x: 94, y: 146.4),
                                  .init(x: 184.5, y: 94.2), .init(x: 206.5, y: 132.3), .init(x: 50, y: 222.6)]

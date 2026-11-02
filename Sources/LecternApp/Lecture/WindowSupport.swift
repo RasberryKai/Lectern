@@ -42,7 +42,8 @@ final class CloseGuardView: NSView {
 
 final class WindowDelegateProxy: NSObject, NSWindowDelegate {
     /// Strong: NSWindow.delegate is weak and SwiftUI may only reference its delegate through the window.
-    private let original: NSWindowDelegate?
+    /// Immutable, and read by the Objective-C forwarding overrides, which are nonisolated.
+    nonisolated(unsafe) private let original: NSWindowDelegate?
     var shouldClose: (() async -> Bool)?
     private var allowClose = false
     private var saving = false
@@ -65,11 +66,11 @@ final class WindowDelegateProxy: NSObject, NSWindowDelegate {
         return false
     }
 
-    override func responds(to aSelector: Selector!) -> Bool {
+    nonisolated override func responds(to aSelector: Selector!) -> Bool {
         super.responds(to: aSelector) || (original?.responds(to: aSelector) ?? false)
     }
 
-    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+    nonisolated override func forwardingTarget(for aSelector: Selector!) -> Any? {
         if let original, original.responds(to: aSelector) { return original }
         return super.forwardingTarget(for: aSelector)
     }

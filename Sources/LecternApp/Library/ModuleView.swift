@@ -42,7 +42,7 @@ struct ModuleView: View {
             lectures = try await model.store.lectures(in: moduleID)
             let rules = try await model.store.loadRules()
             rulesSummary = rules.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-                .first { !$0.isEmpty && !$0.hasPrefix("#") }.map(String.init) ?? "Short, self-contained, transferable cards."
+                .first { !$0.isEmpty && !$0.hasPrefix("#") } ?? "Short, self-contained, transferable cards."
         } catch { model.errorMessage = error.localizedDescription }
     }
 
