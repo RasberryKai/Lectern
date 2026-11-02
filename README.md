@@ -2,7 +2,17 @@
 
 Standalone repository: [RasberryKai/Lectern](https://github.com/RasberryKai/Lectern). Local checkout: `/Users/kaikuppers/Documents/Projects/lectern`.
 
-Native macOS 26 / Swift 6 learning backend. No third-party dependencies. The new SwiftUI frontend should consume `LecternCore`; the existing Slide Learning and Flashcard Reviewer applications are unchanged.
+Native macOS 26 / Swift 6 learning app: the `LecternCore` backend and the `LecternApp` SwiftUI frontend that consumes it. No third-party dependencies. The existing Slide Learning and Flashcard Reviewer applications are unchanged.
+
+## Run the app
+
+```sh
+swift run LecternApp                # debug build, runs from the package
+scripts/package-app.sh              # release build at .build/Lectern.app
+open .build/Lectern.app
+```
+
+Or open `Package.swift` in Xcode 26 and run the `LecternApp` scheme. `LECTERN_LIBRARY_ROOT=/tmp/lectern-test` runs against an isolated library; `LECTERN_SKIP_LEGACY_IMPORT=1` skips the first-launch import of Slide Learning / Flashcard Reviewer data. The app target uses Swift 6.2's default MainActor isolation, so the package now needs tools version 6.2 (Xcode 26). See [the frontend notes](Docs/FRONTEND.md) for structure and what still needs live checks.
 
 Start with [the frontend handoff](Docs/FRONTEND_HANDOFF.md). The original design's instruction to use Slide Learning as the host repository is superseded by this standalone checkout. The supplied [design](Docs/learning-app-v1-design.md) and [screen mockups](Docs/learning-app-v1-screens.html) are copied here for a self-contained handoff. [Verification](Docs/VERIFICATION.md) records tests, migration, review, and outstanding checks. [Integration research](Docs/INTEGRATION_RESEARCH.md) distinguishes verified Claude/Anki support from remaining live checks.
 
@@ -58,6 +68,7 @@ Anki export uses a stable **first regular field** `LecternID`, not a fabricated 
 - `Sources/LecternCore/PDF`: ported vector-preserving Slide Learning exporter with source numbers and searchable notes.
 - `Sources/LecternCore/AI`: pure prompts, immutable requests, queue/cancellation/retry, CLI/API providers, Keychain and cost summaries.
 - `Sources/LecternCore/Application`: observable lecture session and library service for SwiftUI.
+- `Sources/LecternApp`: the macOS app (library window, Overview, module, lecture window with Prepare/Review, Export, Settings).
 - `Sources/LecternTool`: runnable workflows and offline demo.
 - `Tests/LecternCoreTests`: legacy regression, storage/migration, prompt golden, concurrency, process/HTTP, lifecycle, and opt-in live checks.
 
