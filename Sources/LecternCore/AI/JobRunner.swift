@@ -115,7 +115,9 @@ public actor JobRunner {
         guard reservations.insert(key).inserted else { throw AIError.configuration("This operation is already being prepared.") }
         defer { reservations.remove(key); schedule() }
         let resolvedModel: String
-        if backend == .messagesAPI {
+        if kind == .distil {
+            resolvedModel = backend == .claudeCLI ? AISettings.learningPointCLIModel : AISettings.learningPointAPIModel
+        } else if backend == .messagesAPI {
             resolvedModel = model == "opus" || model.isEmpty ? AISettings.defaultMessagesAPIModel : model
             guard resolvedModel.hasPrefix("claude-") else { throw AIError.configuration("Messages API needs a full model ID such as claude-opus-5-5.") }
         } else { resolvedModel = model.isEmpty ? AISettings.defaultCLIModel : model }
@@ -155,7 +157,7 @@ public actor JobRunner {
         guard pages.allSatisfy({ $0 > 0 && $0 <= initial.pageCount }) else { throw AIError.configuration("Repair invalid source slide links before sending this request.") }
         let allLectures = try await store.lectures(in: moduleID)
         let fronts = allLectures.flatMap(\.cards).filter { $0.verdict != .bad && !$0.isSuperseded }.map(\.front)
-        let rules = try await store.loadRules()
+        let rules = kind == .generate || kind == .revise ? try await store.loadRules() : ""
         let prompt = try PromptBuilder.build(kind: kind, rules: rules, module: module, lecture: initial,
                                              pages: pages, existingFronts: fronts, card: card, feedback: feedback,
                                              thread: thread, question: question)

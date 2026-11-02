@@ -26,6 +26,8 @@ public struct AISettings: Codable, Equatable, Sendable {
 
     public static let `default` = AISettings()
     public static let defaultCLIModel = "opus"
+    public static let learningPointCLIModel = "sonnet"
+    public static let learningPointAPIModel = "claude-sonnet-5-5"
     public static let defaultMessagesAPIModel = "claude-opus-5-5"
     public static let defaultAPIVersion = "2026-10-21"
 

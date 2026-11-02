@@ -13,8 +13,8 @@ public struct AIRequest: Codable, Equatable, Sendable {
     public var systemPrompt: String
     public var pdf: Data?
     public var workingDirectory: URL
-    public init(jobID: UUID, kind: JobKind, model: String, prompt: String, pdf: Data?, workingDirectory: URL, systemPrompt: String = PromptBuilder.systemPrompt) {
-        self.jobID = jobID; self.kind = kind; self.model = model; self.prompt = prompt; self.systemPrompt = systemPrompt
+    public init(jobID: UUID, kind: JobKind, model: String, prompt: String, pdf: Data?, workingDirectory: URL, systemPrompt: String? = nil) {
+        self.jobID = jobID; self.kind = kind; self.model = model; self.prompt = prompt; self.systemPrompt = systemPrompt ?? PromptBuilder.systemPrompt(for: kind)
         self.pdf = pdf; self.workingDirectory = workingDirectory
     }
 }

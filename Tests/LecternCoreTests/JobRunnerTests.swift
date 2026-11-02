@@ -192,7 +192,42 @@ private actor RetriedAskProvider: AIProvider {
         #expect(saved.cards.isEmpty); #expect(saved.threads.count == 1); #expect(saved.threads[0].messages.count == 2)
         #expect(saved.threads[0].messages[1].citedPages == [1]); #expect(saved.threads[0].learningPoints.count == 1)
         #expect(saved.jobs.count == 2); #expect(saved.jobs.allSatisfy { $0.state == .succeeded })
+        let extraction = try #require(saved.jobs.first { $0.kind == .distil })
+        #expect(extraction.model == "sonnet")
+        let requests = await fake.requests
+        #expect(requests.map(\.model) == ["opus", "sonnet"])
+        #expect(!requests[0].prompt.contains("GLOBAL CARD RULES"))
+        #expect(!requests[1].prompt.contains("GLOBAL CARD RULES"))
     }
+    @Test func cardAskExtractsPointsButRevisionDoesNotAndAPIDistilAlwaysUsesSonnet() async throws {
+        let (store, module, lecture, root) = try await setup(); defer { try? FileManager.default.removeItem(at: root) }
+        let card = Card(sourcePages: [1], front: "Why?", back: "Because.")
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { $0.cards = [card] }
+        let fake = FakeAIProvider(responses: [
+            AIResponse(content: "Explanation [slide 1]."),
+            AIResponse(content: #"{"learningPoints":[]}"#),
+            AIResponse(content: #"{"cards":[{"front":"Clearer?","back":"Yes.","sourceSlides":[1],"flag":null}],"rationale":"Clarified."}"#),
+            AIResponse(content: #"{"learningPoints":[]}"#)
+        ], backend: .messagesAPI)
+        let runner = JobRunner(store: store, providers: [fake])
+        _ = try await runner.ask(moduleID: module.id, lectureID: lecture.id, anchorPage: 1,
+            question: "Explain this card", cardID: card.id, backend: .messagesAPI)
+        await runner.waitUntilIdle()
+        _ = try await runner.revise(moduleID: module.id, lectureID: lecture.id, cardID: card.id,
+            feedback: "Clarify", backend: .messagesAPI)
+        await runner.waitUntilIdle()
+        let requests = await fake.requests
+        #expect(requests.map(\.kind) == [.ask, .distil, .revise])
+        #expect(requests[1].model == "claude-sonnet-5-5")
+        #expect(requests[0].prompt.contains("CURRENT CARD"))
+        #expect(!requests[0].prompt.contains("GLOBAL CARD RULES"))
+        #expect(requests[2].prompt.contains("GLOBAL CARD RULES"))
+        _ = try await runner.distil(moduleID: module.id, lectureID: lecture.id, anchorPage: 1,
+            backend: .messagesAPI, model: "claude-opus-5-5")
+        await runner.waitUntilIdle()
+        #expect(await fake.requests.last?.model == "claude-sonnet-5-5")
+    }
+
     @Test func revisionBasesProposalOnSnapshotAfterManualEdit() async throws {
         let (store, module, lecture, root) = try await setup(); defer { try? FileManager.default.removeItem(at: root) }
         let card = Card(sourcePages: [1], front: "Original front", back: "Original back")

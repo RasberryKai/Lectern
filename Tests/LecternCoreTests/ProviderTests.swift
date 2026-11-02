@@ -46,6 +46,27 @@ struct ProviderTests {
         #expect(response.usage.inputTokens == 4)
     }
 
+    @Test func cliAcceptsCompletedStructuredToolButRejectsIncompleteCalls() throws {
+        let payload = #"{"learningPoints":[{"text":"Profit is revenue minus expenses.","pages":[1]}]}"#
+        let success = Data("""
+        {"type":"result","subtype":"success","is_error":false,"stop_reason":"tool_use","structured_output":\(payload)}
+        """.utf8)
+        let response = try ClaudeCLIProvider.parseStructuredResult(success)
+        let points = try JSONDecoder().decode(DistilledPoints.self, from: Data(response.content.utf8))
+        #expect(points.learningPoints.count == 1)
+        #expect(points.learningPoints.first?.pages == [1])
+
+        let incomplete = Data(#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"tool_use"}"#.utf8)
+        #expect(throws: AIError.self) { try ClaudeCLIProvider.parseStructuredResult(incomplete) }
+        #expect(throws: AIError.self) { try ClaudeCLIProvider.parseStreamResult(success) }
+        for reason in ["refusal", "max_tokens", "model_context_window_exceeded", "pause_turn"] {
+            let stopped = Data("""
+            {"type":"result","subtype":"success","is_error":false,"stop_reason":"\(reason)","structured_output":\(payload)}
+            """.utf8)
+            #expect(throws: AIError.self) { try ClaudeCLIProvider.parseStructuredResult(stopped) }
+        }
+    }
+
     @Test func cliArgumentsIsolateCustomizationsAndScopeRead() throws {
         let root = URL(fileURLWithPath: "/tmp/Lectern Job")
         let pdf = root.appendingPathComponent("input.pdf")
@@ -59,7 +80,16 @@ struct ProviderTests {
         #expect(structured.contains("--permission-mode"))
         #expect(structured.contains("dontAsk"))
         #expect(structured.contains("--system-prompt"))
-        #expect(structured.contains(PromptBuilder.systemPrompt))
+        let systemPromptIndex = try #require(structured.firstIndex(of: "--system-prompt"))
+        let systemPrompt = structured[systemPromptIndex + 1]
+        #expect(systemPrompt.hasPrefix(PromptBuilder.systemPrompt))
+        #expect(systemPrompt == PromptBuilder.systemPrompt)
+        #expect(!systemPrompt.contains(root.path))
+        let input = try ClaudeCLIProvider.inputPrompt(for: AIRequest(jobID: UUID(), kind: .generate,
+            model: "opus", prompt: "reusable context", pdf: nil, workingDirectory: root), pdfURL: pdf)
+        #expect(input.hasPrefix("reusable context\n\nSOURCE PDF:"))
+        #expect(input.contains(#""/tmp/Lectern Job/input.pdf""#))
+        #expect(input.contains("use Read with that exact file_path"))
         #expect(structured.contains("--tools"))
         #expect(structured.contains("Read"))
         #expect(structured.contains("Read(//tmp/Lectern Job/input.pdf)"))
@@ -76,6 +106,37 @@ struct ProviderTests {
         #expect(ask.contains("stream-json"))
         #expect(ask.contains("--include-partial-messages"))
         #expect(ask.contains(""))
+        let askPromptIndex = try #require(ask.firstIndex(of: "--system-prompt"))
+        #expect(ask[askPromptIndex + 1] == PromptBuilder.systemPrompt(for: .ask))
+    }
+
+    @Test func cliPDFPathsChangeOnlyTheInputSuffixAndDistilUsesLowEffort() throws {
+        let first = AIRequest(jobID: UUID(), kind: .distil, model: "sonnet", prompt: "Reusable context",
+            pdf: nil, workingDirectory: URL(fileURLWithPath: "/tmp/first job"))
+        var second = first
+        second.workingDirectory = URL(fileURLWithPath: "/tmp/second job")
+        let firstPDF = first.workingDirectory.appendingPathComponent("input.pdf")
+        let secondPDF = second.workingDirectory.appendingPathComponent("input.pdf")
+        let a = try ClaudeCLIProvider.arguments(for: first, model: first.model, pdfURL: firstPDF)
+        let b = try ClaudeCLIProvider.arguments(for: second, model: second.model, pdfURL: secondPDF)
+        let index = try #require(a.firstIndex(of: "--system-prompt"))
+        #expect(a[index + 1] == b[index + 1])
+        #expect(!a[index + 1].contains("/tmp/"))
+        #expect(ClaudeCLIProvider.effort(for: .distil) == "low")
+        let inputA = try ClaudeCLIProvider.inputPrompt(for: first, pdfURL: firstPDF)
+        let inputB = try ClaudeCLIProvider.inputPrompt(for: second, pdfURL: secondPDF)
+        #expect(inputA.hasPrefix(first.prompt))
+        #expect(inputB.hasPrefix(first.prompt))
+        #expect(inputA.contains(firstPDF.path))
+        #expect(inputB.contains(secondPDF.path))
+        #expect(try ClaudeCLIProvider.inputPrompt(for: first, pdfURL: nil) == first.prompt)
+    }
+
+    @Test func cliRejectsUnGroundedAnswersAndCardsAfterDeniedPDFRead() throws {
+        let envelope = #"{"type":"result","subtype":"success","is_error":false,"result":"I cannot see the slides.","structured_output":{"cards":[],"skipped":[]},"permission_denials":[{"tool_name":"Read","tool_input":{"file_path":"/input.pdf"}}]}"#
+        let data = Data(envelope.utf8)
+        #expect(throws: AIError.self) { try ClaudeCLIProvider.parseStreamResult(data) }
+        #expect(throws: AIError.self) { try ClaudeCLIProvider.parseStructuredResult(data) }
     }
 
     @Test func cliCancellationSendsInterruptAndReapsFakeProcess() async throws {

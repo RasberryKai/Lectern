@@ -61,7 +61,7 @@ public struct ClaudeCLIProvider: AIProvider {
         defer { try? FileManager.default.removeItem(at: promptDirectory) }
         let promptURL = promptDirectory.appendingPathComponent("prompt.txt")
         do {
-            try Data(request.prompt.utf8).write(to: promptURL, options: .atomic)
+            try Data(Self.inputPrompt(for: request, pdfURL: pdfURL).utf8).write(to: promptURL, options: .atomic)
         } catch {
             throw AIError.configuration("Could not write the private prompt file: \(error.localizedDescription)")
         }
@@ -137,6 +137,15 @@ public struct ClaudeCLIProvider: AIProvider {
         }
     }
 
+    /// Keep the job-specific path after reusable study context, never in the system prompt.
+    static func inputPrompt(for request: AIRequest, pdfURL: URL?) throws -> String {
+        guard let pdfURL else { return request.prompt }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let path = String(decoding: try encoder.encode(pdfURL.standardizedFileURL.path), as: UTF8.self)
+        return request.prompt + "\n\nSOURCE PDF: The current request's slide snapshot is at this absolute path: \(path). Before answering, use Read with that exact file_path. Do not resolve input.pdf against the filesystem root. Read this snapshot even if an earlier thread message says the PDF was inaccessible. PDF page positions are distinct from the original source slide labels printed on the pages."
+    }
+
     static func arguments(for request: AIRequest, model: String, pdfURL: URL?) throws -> [String] {
         var arguments = [
             "-p",
@@ -170,6 +179,7 @@ public struct ClaudeCLIProvider: AIProvider {
               let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AIError.invalidResponse("Claude Code returned an invalid JSON response envelope.")
         }
+        try validateFileAccess(envelope)
         if envelope["is_error"] as? Bool == true {
             let text = envelope["result"] as? String ?? "Claude Code reported an error."
             if looksLikeLimit(text) { throw AIError.limit(text) }
@@ -178,8 +188,14 @@ public struct ClaudeCLIProvider: AIProvider {
         if envelope["subtype"] as? String == "error_max_turns" {
             throw AIError.limit(envelope["result"] as? String ?? "Claude Code reached its turn limit.")
         }
-        try validateStopReason(envelope["stop_reason"] as? String,
-                               response: envelope["result"] as? String ?? "")
+        // --json-schema finishes through the CLI's structured-output tool.
+        // Only a successful envelope with a payload proves that tool completed.
+        let completedStructuredTool = envelope["subtype"] as? String == "success" &&
+            envelope["stop_reason"] as? String == "tool_use" && envelope["structured_output"] != nil
+        if !completedStructuredTool {
+            try validateStopReason(envelope["stop_reason"] as? String,
+                                   response: envelope["result"] as? String ?? "")
+        }
         guard let structured = envelope["structured_output"] else {
             let result = envelope["result"] as? String ?? ""
             if looksLikeLimit(result) { throw AIError.limit(result) }
@@ -212,6 +228,7 @@ public struct ClaudeCLIProvider: AIProvider {
         guard let envelope = finalResult else {
             throw AIError.invalidResponse("Claude Code stream ended without a result event.")
         }
+        try validateFileAccess(envelope)
         if envelope["is_error"] as? Bool == true || (envelope["subtype"] as? String)?.hasPrefix("error") == true {
             let text = envelope["result"] as? String ?? "Claude Code reported an error."
             if looksLikeLimit(text) { throw AIError.limit(text) }
@@ -224,6 +241,13 @@ public struct ClaudeCLIProvider: AIProvider {
             throw AIError.invalidResponse("Claude Code returned an empty Ask response.")
         }
         return AIResponse(content: text, usage: usage(from: envelope))
+    }
+
+    private static func validateFileAccess(_ envelope: [String: Any]) throws {
+        let denials = envelope["permission_denials"] as? [[String: Any]] ?? []
+        if denials.contains(where: { $0["tool_name"] as? String == "Read" }) {
+            throw AIError.configuration("Claude could not read the slide PDF because file access was denied. Retry the request. If it persists, check the Claude CLI permissions; no answer was saved.")
+        }
     }
 
     static func usage(from envelope: [String: Any]) -> AIUsage {

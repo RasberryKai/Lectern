@@ -28,6 +28,25 @@ import Testing
                                              pages: [1], existingFronts: [card.front], card: card, feedback: "Explain why.")
         #expect(!prompt.contains("ALREADY COVERED")); #expect(prompt.contains("Original?")); #expect(prompt.contains("Explain why."))
     }
+    @Test func conversationsExcludeCardRulesAndDistillationAvoidsExistingPoints() throws {
+        let module = Module(name: "M")
+        let lecture = Lecture(moduleID: module.id, name: "Lecture", pageCount: 1)
+        let thread = SlideThread(anchorPage: 1, learningPoints: [
+            LearningPoint(text: "Keep this excluded insight excluded.", pages: [1], included: false)
+        ])
+        for kind in [JobKind.ask, .distil] {
+            let prompt = try PromptBuilder.build(kind: kind, rules: "CARD RULE SENTINEL", module: module,
+                lecture: lecture, pages: [1], existingFronts: [], thread: thread, question: "Why?")
+            #expect(!prompt.contains("CARD RULE SENTINEL"))
+            #expect(!prompt.contains("GLOBAL CARD RULES"))
+            #expect(!PromptBuilder.systemPrompt(for: kind).contains("global rules"))
+            if kind == .distil {
+                #expect(prompt.contains("Keep this excluded insight excluded."))
+                #expect(prompt.contains("latest question and answer"))
+                #expect(prompt.contains("empty learningPoints array"))
+            }
+        }
+    }
     @Test func allStructuredSchemasAreValidJSONAndHashChangesWithInput() throws {
         for kind in [JobKind.generate, .revise, .distil] {
             let object = try #require(JSONSerialization.jsonObject(with: Data(AIOutputSchema.json(for: kind)!.utf8)) as? [String: Any])
