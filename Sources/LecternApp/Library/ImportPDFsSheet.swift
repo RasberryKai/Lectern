@@ -3,6 +3,7 @@ import SwiftUI
 
 /// Several PDFs, one lecture: name it, put the files in order, press Import.
 /// The order is final once imported; afterwards it is a normal lecture.
+/// The same sheet adds PDFs after the last slide of an existing lecture.
 struct ImportPDFsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -18,23 +19,36 @@ struct ImportPDFsSheet: View {
 
     private var totalPages: Int { files.reduce(0) { $0 + $1.pageCount } }
     private var blocked: Bool { files.isEmpty || files.contains { $0.problem != nil } }
-    private var slot: String { String(format: "%02d", pending.slot) }
     private var module: Module? { model.module(pending.moduleID) }
+    /// Pages already in the lecture: 0 for a new one.
+    private var existingPages: Int {
+        if case .append(_, _, let pages) = pending.target { return pages }
+        return 0
+    }
+    private var isAppend: Bool { existingPages > 0 }
+
+    private var title: String {
+        switch pending.target {
+        case .newLecture: files.count == 1 ? "Import 1 PDF as a lecture" : "Import \(files.count) PDFs as one lecture"
+        case .append(_, let title, _): "Add \(Format.count(files.count, "PDF")) to \(title)"
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(files.count == 1 ? "Import 1 PDF as a lecture" : "Import \(files.count) PDFs as one lecture")
-                    .font(Theme.serif(26))
+                Text(title).font(Theme.serif(26)).lineLimit(2)
                 Text(subtitle).font(Theme.small).foregroundStyle(Theme.quiet)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Lecture name").font(.system(size: 13, weight: .semibold))
-                TextField("Lecture name", text: $name)
-                    .textFieldStyle(.roundedBorder).controlSize(.large)
-                    .onSubmit(save)
-                Text("From the shared start of the file names.").font(Theme.small).foregroundStyle(Theme.quiet)
+            if !isAppend {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Lecture name").font(.system(size: 13, weight: .semibold))
+                    TextField("Lecture name", text: $name)
+                        .textFieldStyle(.roundedBorder).controlSize(.large)
+                        .onSubmit(save)
+                    Text("From the shared start of the file names.").font(Theme.small).foregroundStyle(Theme.quiet)
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -55,7 +69,7 @@ struct ImportPDFsSheet: View {
                 Button("Cancel") { dismiss() }
                     .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
                 Button(action: save) {
-                    if importing { ProgressView().controlSize(.small).tint(Theme.onAccent) } else { Text("Import") }
+                    if importing { ProgressView().controlSize(.small).tint(Theme.onAccent) } else { Text(isAppend ? "Add" : "Import") }
                 }
                 .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
                 .disabled(blocked || importing)
@@ -74,13 +88,20 @@ struct ImportPDFsSheet: View {
 
     private var subtitle: String {
         let moduleName = module?.name ?? "Module"
-        let planned = module?.plannedLectureCount ?? 0
-        return pending.slot <= planned ? "\(moduleName) · fills planned slot \(slot)" : "\(moduleName) · becomes lecture \(slot)"
+        switch pending.target {
+        case .newLecture(let number):
+            let slot = String(format: "%02d", number)
+            let planned = module?.plannedLectureCount ?? 0
+            return number <= planned ? "\(moduleName) · fills planned slot \(slot)" : "\(moduleName) · becomes lecture \(slot)"
+        case .append(_, _, let pages):
+            return "Added after slide \(pages). Existing slides, notes and cards keep their numbers."
+        }
     }
 
     private var summary: String {
         if let bad = files.first(where: { $0.problem != nil }) { return "Leave out \(bad.url.lastPathComponent) to continue." }
-        if files.isEmpty { return "No files left to import." }
+        if files.isEmpty { return isAppend ? "No files left to add." : "No files left to import." }
+        if isAppend { return "The lecture grows from \(existingPages) to \(existingPages + totalPages) slides. This can't be undone." }
         if files.count == 1 { return "Imported as one \(totalPages)-slide lecture." }
         return "Merged into one \(totalPages)-slide lecture. From here it is a normal lecture."
     }
@@ -153,7 +174,7 @@ struct ImportPDFsSheet: View {
     }
 
     private func range(for index: Int) -> String {
-        let start = files.prefix(index).reduce(0) { $0 + $1.pageCount } + 1
+        let start = existingPages + files.prefix(index).reduce(0) { $0 + $1.pageCount } + 1
         let end = start + files[index].pageCount - 1
         return start == end ? "slide \(start)" : "slides \(start)–\(end)"
     }
@@ -164,7 +185,10 @@ struct ImportPDFsSheet: View {
         let urls = files.map(\.url)
         Task {
             do {
-                try await model.importMerged(urls, name: name, into: pending.moduleID)
+                switch pending.target {
+                case .newLecture: try await model.importMerged(urls, name: name, into: pending.moduleID)
+                case .append(let lectureID, _, _): try await model.appendConfirmed(urls, to: LectureRef(moduleID: pending.moduleID, lectureID: lectureID))
+                }
                 dismiss()
             } catch {
                 self.error = error.localizedDescription
