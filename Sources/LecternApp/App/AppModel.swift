@@ -25,10 +25,15 @@ nonisolated struct PendingPDFImport: Identifiable, Sendable {
         /// Why the file can't be imported (locked, unreadable). It must be left out to continue.
         let problem: String?
     }
+    enum Target: Sendable {
+        /// A new lecture with this number.
+        case newLecture(slot: Int)
+        /// Appended after the last slide of an existing lecture.
+        case append(lectureID: UUID, title: String, existingPages: Int)
+    }
     let id = UUID()
     let moduleID: UUID
-    /// The lecture number this import becomes.
-    let slot: Int
+    let target: Target
     var files: [File]
     var name: String
 }
@@ -232,15 +237,60 @@ final class AppModel {
 
     private func openImportSheet(_ urls: [URL], into moduleID: UUID) async {
         let ordered = PDFMerge.naturalOrder(urls)
-        let files = await Task.detached(priority: .userInitiated) {
-            ordered.map { url -> PendingPDFImport.File in
+        let files = await inspect(ordered)
+        let lectureCount = (try? await store.lectures(in: moduleID).count) ?? 0
+        pendingImport = PendingPDFImport(moduleID: moduleID, target: .newLecture(slot: lectureCount + 1), files: files,
+                                         name: PDFMerge.suggestedName(for: ordered.map(\.lastPathComponent)))
+    }
+
+    private func inspect(_ urls: [URL]) async -> [PendingPDFImport.File] {
+        await Task.detached(priority: .userInitiated) {
+            urls.map { url -> PendingPDFImport.File in
                 do { return .init(url: url, pageCount: try PDFMerge.pageCount(of: url), problem: nil) }
                 catch { return .init(url: url, pageCount: 0, problem: error.localizedDescription) }
             }
         }.value
-        let lectureCount = (try? await store.lectures(in: moduleID).count) ?? 0
-        pendingImport = PendingPDFImport(moduleID: moduleID, slot: lectureCount + 1, files: files,
-                                         name: PDFMerge.suggestedName(for: ordered.map(\.lastPathComponent)))
+    }
+
+    /// Adding to an existing lecture always goes through the sheet, even for one PDF: pages can't be removed again.
+    func appendPDFs(_ urls: [URL], to ref: LectureRef) async {
+        let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+        guard !pdfs.isEmpty else { errorMessage = "Only PDF files can be added."; return }
+        do {
+            let lecture = try await store.loadLecture(moduleID: ref.moduleID, lectureID: ref.lectureID)
+            guard lecture.pageCount > 0 else {
+                errorMessage = "\(lecture.name) has no slides to add to. Import the PDFs as a new lecture instead."
+                return
+            }
+            let index = modules.first { $0.id == ref.moduleID }?.lectureIDs.firstIndex(of: ref.lectureID) ?? 0
+            let ordered = PDFMerge.naturalOrder(pdfs)
+            pendingImport = PendingPDFImport(moduleID: ref.moduleID,
+                                             target: .append(lectureID: ref.lectureID, title: Format.lectureTitle(index: index, name: lecture.name), existingPages: lecture.pageCount),
+                                             files: await inspect(ordered), name: lecture.name)
+            if pdfs.count < urls.count { errorMessage = "Only PDF files can be added; \(Format.count(urls.count - pdfs.count, "other file")) left out." }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func chooseAndAppendPDFs(to ref: LectureRef) async {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.message = "Choose PDFs to add after the lecture's last slide."
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        await appendPDFs(panel.urls, to: ref)
+    }
+
+    /// Appends the sheet's files and opens the lecture in Prepare on the first new slide.
+    func appendConfirmed(_ urls: [URL], to ref: LectureRef) async throws {
+        let workspace = lectureWindows[ref.lectureID]
+        try await workspace?.flushAllThrowing()
+        _ = try await store.appendPDFs(urls, moduleID: ref.moduleID, lectureID: ref.lectureID)
+        if let workspace { await workspace.reloadAfterExternalChange() }
+        try? await reloadNow()
+        selection = .module(ref.moduleID)
+        openLecture(ref, mode: .prepare)
     }
 
     /// Merges the sheet's files in order into one lecture and opens it in Prepare.

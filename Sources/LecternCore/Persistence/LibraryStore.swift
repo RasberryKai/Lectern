@@ -218,6 +218,34 @@ public actor LibraryStore {
         let pageCount = try PDFMerge.merge(urls, to: temp)
         return try createLecture(Lecture(moduleID: moduleID, name: lectureName, sourceFilename: first.lastPathComponent, pageCount: pageCount), sourceURL: temp)
     }
+    /// Appends PDFs, in the given order, after the lecture's last slide. Existing page numbers don't move,
+    /// so cards, notes, chats and jobs stay valid. A locked or unreadable file is named in the error, and
+    /// nothing changes. New slides start selected.
+    public func appendPDFs(_ urls: [URL], moduleID: UUID, lectureID: UUID) throws -> Lecture { try locked {
+        guard !urls.isEmpty else { throw LibraryError.invalid("Choose at least one PDF.") }
+        try requireEditable(moduleUnlocked(moduleID))
+        var lecture = try readLecture(moduleID, lectureID)
+        guard !lecture.isArchived else { throw LibraryError.invalid("Restore this lecture before adding PDFs to it.") }
+        let source = sourceURL(moduleID: moduleID, lectureID: lectureID)
+        guard lecture.pageCount > 0, FileManager.default.fileExists(atPath: source.path) else {
+            throw LibraryError.invalid("This lecture has no slides to add to. Import the PDFs as a new lecture instead.")
+        }
+        let added = try urls.reduce(0) { $0 + (try PDFMerge.pageCount(of: $1)) }
+        let temp = lectureDirectory(moduleID, lectureID).appendingPathComponent("source-append-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let total = try PDFMerge.merge([source] + urls, to: temp)
+        let old = lecture.pageCount
+        guard total == old + added else { throw LibraryError.invalid("The lecture's PDF doesn't match its slide count, so nothing was added.") }
+        lecture.pageCount = total
+        lecture.slides += (old..<total).map { SlideState(pageIndex: $0) }
+        lecture.viewPreferences.focusedPageIndex = old
+        lecture.updatedAt = Date()
+        try validate(lecture)
+        // PDF first: if writing the metadata then fails, the extra pages are simply not part of the lecture yet.
+        _ = try FileManager.default.replaceItemAt(source, withItemAt: temp)
+        try write(lecture, to: lectureDirectory(moduleID, lectureID).appendingPathComponent("lecture.json"))
+        return lecture
+    } }
     public func loadRules() throws -> String { try locked {
         let url = rootURL.appendingPathComponent("rules.md")
         if FileManager.default.fileExists(atPath: url.path) { return try String(contentsOf: url, encoding: .utf8) }

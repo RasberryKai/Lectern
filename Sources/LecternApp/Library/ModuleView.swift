@@ -16,6 +16,9 @@ struct ModuleView: View {
     @State private var instructionsDraft = ""
     /// Number of files hovering over the lecture list, 0 when nothing is dragged over it.
     @State private var dropCount = 0
+    /// The lecture under the cursor while dropping: the files are added to it instead of becoming a new lecture.
+    @State private var dropLectureID: UUID?
+    @State private var rowFrames: [UUID: CGRect] = [:]
     @State private var importing = false
 
     private var module: Module? { model.module(moduleID) }
@@ -104,20 +107,30 @@ struct ModuleView: View {
                     .font(Theme.body).foregroundStyle(Theme.quiet).padding(24)
             }
             ForEach(Array(lectures.enumerated()), id: \.element.id) { index, lecture in
-                LectureRow(index: index, lecture: lecture, progress: progress?.lectures.first { $0.lectureID == lecture.id }, archived: archived) { mode in
+                LectureRow(index: index, lecture: lecture, progress: progress?.lectures.first { $0.lectureID == lecture.id }, archived: archived,
+                           dropCount: dropLectureID == lecture.id ? dropCount : 0) { mode in
                     model.openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: mode)
                 } archive: {
                     setArchived(true, lecture: lecture)
                 }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("lectureTable")) } action: { rowFrames[lecture.id] = $0 }
                 Divider().overlay(Theme.border)
             }
             emptySlots
         }
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border, lineWidth: 1))
-        .onDrop(of: [.fileURL], delegate: PDFDropDelegate(count: $dropCount, enabled: !archived) { urls in
-            Task { await model.importPDFs(urls, into: moduleID) }
+        .coordinateSpace(.named("lectureTable"))
+        .onDrop(of: [.fileURL], delegate: PDFDropDelegate(count: $dropCount, lectureID: $dropLectureID, enabled: !archived,
+                                                          lectureAt: lectureAccepting) { urls, lectureID in
+            if let lectureID { Task { await model.appendPDFs(urls, to: LectureRef(moduleID: moduleID, lectureID: lectureID)) } }
+            else { Task { await model.importPDFs(urls, into: moduleID) } }
         })
+    }
+
+    /// A lecture row under `point` that can take more pages (it has slides).
+    private func lectureAccepting(_ point: CGPoint) -> UUID? {
+        lectures.first { $0.pageCount > 0 && rowFrames[$0.id]?.contains(point) == true }?.id
     }
 
     @ViewBuilder private var lectureArchive: some View {
@@ -169,7 +182,7 @@ struct ModuleView: View {
     @ViewBuilder private var emptySlots: some View {
         let planned = module?.plannedLectureCount ?? 0
         let next = lectures.count + 1
-        if dropCount > 0 {
+        if dropCount > 0 && dropLectureID == nil {
             dropTarget
             if planned > next {
                 Divider().overlay(Theme.border)
@@ -266,16 +279,28 @@ struct ModuleView: View {
 /// "Drop to import 3 PDFs as lecture 05"; one PDF imports directly, several open the import sheet.
 private struct PDFDropDelegate: DropDelegate {
     @Binding var count: Int
+    /// Set while the cursor is over a lecture that can take more pages.
+    @Binding var lectureID: UUID?
     let enabled: Bool
-    let perform: ([URL]) -> Void
+    let lectureAt: (CGPoint) -> UUID?
+    /// The dropped files, and the lecture to add them to (nil: a new lecture).
+    let perform: ([URL], UUID?) -> Void
 
     func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.fileURL]) }
-    func dropEntered(info: DropInfo) { if enabled { count = info.itemProviders(for: [.fileURL]).count } }
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: enabled ? .copy : .forbidden) }
-    func dropExited(info: DropInfo) { count = 0 }
+    func dropEntered(info: DropInfo) {
+        guard enabled else { return }
+        count = info.itemProviders(for: [.fileURL]).count
+        lectureID = lectureAt(info.location)
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        if enabled { let hovered = lectureAt(info.location); if hovered != lectureID { lectureID = hovered } }
+        return DropProposal(operation: enabled ? .copy : .forbidden)
+    }
+    func dropExited(info: DropInfo) { count = 0; lectureID = nil }
 
     func performDrop(info: DropInfo) -> Bool {
-        count = 0
+        let target = lectureAt(info.location)
+        count = 0; lectureID = nil
         guard enabled else { return false }
         let providers = info.itemProviders(for: [.fileURL])
         Task {
@@ -286,7 +311,7 @@ private struct PDFDropDelegate: DropDelegate {
                 }
                 if let url { urls.append(url) }
             }
-            if !urls.isEmpty { perform(urls) }
+            if !urls.isEmpty { perform(urls, target) }
         }
         return true
     }
@@ -298,8 +323,12 @@ private struct LectureRow: View {
     let lecture: Lecture
     let progress: LectureProgress?
     let archived: Bool
+    /// Files hovering over this row, 0 when none.
+    var dropCount: Int = 0
     let open: (LectureMode?) -> Void
     let archive: () -> Void
+
+    private var ref: LectureRef { LectureRef(moduleID: lecture.moduleID, lectureID: lecture.id) }
 
     private var activeCards: [Card] { lecture.cards.filter { !$0.isSuperseded } }
 
@@ -321,18 +350,37 @@ private struct LectureRow: View {
         .font(Theme.body)
         .padding(.horizontal, 20).padding(.vertical, 14)
         .contentShape(Rectangle())
+        .overlay { if dropCount > 0 { dropTarget } }
         .contextMenu {
             Button("Open in Prepare") { open(.prepare) }.disabled(lecture.pageCount == 0)
             Button("Open in Review") { open(.review) }
             Button("Rename presentation…") {
                 model.renamingLecture = LectureRef(moduleID: lecture.moduleID, lectureID: lecture.id)
             }.disabled(archived)
+            Button("Add PDFs…") { Task { await model.chooseAndAppendPDFs(to: ref) } }
+                .disabled(archived || lecture.pageCount == 0)
             Divider()
             Button("Export Lecture Backup…") { exportBackup() }
             Button("Export Lecture to Anki…") { model.selection = .export(lecture.moduleID) }
             Divider()
             Button("Archive Lecture", action: archive).disabled(archived)
         }
+    }
+
+    private var dropTarget: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "plus.rectangle.on.rectangle").font(.system(size: 15, weight: .medium))
+            Text("Drop to add \(Format.count(dropCount, "PDF")) to \(Format.lectureTitle(index: index, name: lecture.name)) after slide \(lecture.pageCount)")
+                .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("You set the order next").font(Theme.small)
+        }
+        .foregroundStyle(Theme.accentText)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.goodWash, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [6, 4])))
+        .padding(.horizontal, 10).padding(.vertical, 4)
     }
 
     private var cardsText: String {

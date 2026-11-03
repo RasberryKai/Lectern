@@ -124,4 +124,68 @@ struct MultiPDFImportTests {
         #expect(PDFMerge.suggestedName(for: ["Intro.pdf", "Exercises.pdf"]) == "Intro")
         #expect(PDFMerge.suggestedName(for: []) == "")
     }
+
+    // MARK: Append
+
+    @Test func appendAddsPagesAfterExistingSlidesWithoutMovingThem() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = try writePDF("Lecture.pdf", pages: 3, width: 100, in: root)
+        let sheet = try writePDF("Exercise.pdf", pages: 2, width: 500, in: root)
+        let late = try writePDF("Errata.pdf", pages: 1, width: 700, in: root)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let lecture = try await store.importPDF(from: original, moduleID: module.id)
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { lecture in
+            lecture.slides[1].isSelected = false
+            lecture.slides[2].note = "keep me"
+            lecture.cards.append(Card(sourcePages: [2], front: "Q", back: "A"))
+        }
+
+        let appended = try await store.appendPDFs([sheet, late], moduleID: module.id, lectureID: lecture.id)
+
+        #expect(appended.pageCount == 6)
+        #expect(appended.slides.map(\.isSelected) == [true, false, true, true, true, true])
+        #expect(appended.slides[2].note == "keep me")
+        #expect(appended.cards.first?.sourcePages == [2])
+        #expect(appended.viewPreferences.focusedPageIndex == 3)
+        #expect(appended.sourceFilename == "Lecture.pdf")
+        #expect(widths(store.sourceURL(moduleID: module.id, lectureID: lecture.id)) == [100, 101, 102, 500, 501, 700])
+        let reloaded = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(reloaded.pageCount == 6 && reloaded.slides == appended.slides && reloaded.cards == appended.cards)
+    }
+
+    @Test func appendWithBadFileChangesNothing() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = try writePDF("Lecture.pdf", pages: 2, width: 100, in: root)
+        let bad = root.appendingPathComponent("Broken.pdf")
+        try Data("not a pdf".utf8).write(to: bad)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let lecture = try await store.importPDF(from: original, moduleID: module.id)
+
+        do {
+            _ = try await store.appendPDFs([bad], moduleID: module.id, lectureID: lecture.id)
+            Issue.record("Append should fail")
+        } catch {
+            #expect(error.localizedDescription.contains("Broken.pdf"))
+        }
+        #expect(try await store.loadLecture(moduleID: module.id, lectureID: lecture.id).pageCount == 2)
+        #expect(widths(store.sourceURL(moduleID: module.id, lectureID: lecture.id)) == [100, 101])
+    }
+
+    @Test func appendRefusesLecturesWithoutSlidesAndArchivedModules() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let extra = try writePDF("Extra.pdf", pages: 1, width: 100, in: root)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let empty = try await store.createLecture(Lecture(moduleID: module.id, name: "From the reviewer"))
+        await #expect(throws: LibraryError.self) { try await store.appendPDFs([extra], moduleID: module.id, lectureID: empty.id) }
+
+        let withSlides = try await store.importPDF(from: extra, moduleID: module.id)
+        try await store.setLectureArchived(moduleID: module.id, lectureID: withSlides.id, archived: true)
+        await #expect(throws: LibraryError.self) { try await store.appendPDFs([extra], moduleID: module.id, lectureID: withSlides.id) }
+        try await store.setLectureArchived(moduleID: module.id, lectureID: withSlides.id, archived: false)
+        try await store.setModuleArchived(moduleID: module.id, archived: true)
+        await #expect(throws: LibraryError.self) { try await store.appendPDFs([extra], moduleID: module.id, lectureID: withSlides.id) }
+    }
 }
