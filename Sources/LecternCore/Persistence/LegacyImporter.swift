@@ -30,7 +30,7 @@ public struct LegacyImporter: Sendable {
             for directory in entries where UUID(uuidString: directory.lastPathComponent) != nil {
                 do {
                     let id = Self.stableID("project:" + directory.resolvingSymlinksInPath().path)
-                    if try await store.lectures(in: moduleID).contains(where: { $0.id == id }) { report.skipped.append(id); continue }
+                    if try await store.lectures(in: moduleID, includingArchived: true).contains(where: { $0.id == id }) { report.skipped.append(id); continue }
                     let source = directory.appendingPathComponent("source.pdf")
                     let metadata = directory.appendingPathComponent("project.json")
                     let lecture: Lecture
@@ -89,7 +89,7 @@ public struct LegacyImporter: Sendable {
                     if tombstones[session.id] != nil { report.skipped.append(session.id); continue }
                     try session.validate()
                     let id = Self.stableID("reviewer:" + source.resolvingSymlinksInPath().path + ":" + session.id.uuidString)
-                    if try await store.lectures(in: moduleID).contains(where: { $0.id == id }) { report.skipped.append(id); continue }
+                    if try await store.lectures(in: moduleID, includingArchived: true).contains(where: { $0.id == id }) { report.skipped.append(id); continue }
                     var cards = session.cards.map { old in
                         var history = [CardRevision(id: Self.stableID(id.uuidString + old.id.uuidString + ":original"), front: old.originalFront, back: old.originalBack, author: .user, reason: "Legacy import", at: session.createdAt)]
                         if old.front != old.originalFront || old.back != old.originalBack { history.append(CardRevision(id: Self.stableID(id.uuidString + old.id.uuidString + ":current"), front: old.front, back: old.back, author: .user, reason: "Legacy edited version", at: session.updatedAt)) }

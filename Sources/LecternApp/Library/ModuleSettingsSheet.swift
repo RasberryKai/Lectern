@@ -119,7 +119,7 @@ struct ModuleSettingsSheet: View {
         do {
             let module = try await model.store.loadModule(moduleID: moduleID)
             name = module.name
-            minimum = module.lectureIDs.count
+            minimum = try await model.store.lectures(in: moduleID).count
             planned = module.plannedLectureCount
             archived = module.isArchived
             if let exam = module.examDate { hasExam = true; examDate = exam.date(in: .current) }
@@ -137,8 +137,8 @@ struct ModuleSettingsSheet: View {
             dismiss()
         } catch {
             // An import may have raced this draft; show the new minimum.
-            if let module = try? await model.store.loadModule(moduleID: moduleID) {
-                minimum = module.lectureIDs.count
+            if let lectures = try? await model.store.lectures(in: moduleID) {
+                minimum = lectures.count
                 planned = max(planned, minimum)
             }
             self.error = error.localizedDescription

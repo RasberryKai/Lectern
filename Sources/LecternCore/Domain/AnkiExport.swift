@@ -34,7 +34,7 @@ public enum AnkiExporter {
     public static func export(lectures: [Lecture], moduleName: String, changedOnly: Bool = true) throws -> AnkiExportResult {
         var rows: [String] = [], ids: [UUID] = []
         var entries: [ExportEntry] = []
-        for lecture in lectures {
+        for lecture in lectures where !lecture.isArchived {
             _ = try lecture.validated()
             for card in lecture.cards where card.verdict == .good && !card.isSuperseded && (!changedOnly || card.exported == nil || card.changedSinceExport) {
                 guard lecture.issues(for: card).isEmpty else { throw LectureError.invalidApproval(card.id) }

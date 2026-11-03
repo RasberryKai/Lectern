@@ -50,12 +50,13 @@ public actor LibraryStore {
         let url = moduleDirectory(id).appendingPathComponent("module.json")
         var module: Module = try read(url)
         guard module.id == id else { throw LibraryError.invalid("Module identity does not match its directory.") }
-        let ids = try lectureFiles(id).map { try readLecture(id, $0) }.map(\.id)
+        let lectures = try lectureFiles(id).map { try readLecture(id, $0) }
+        let ids = lectures.map(\.id)
         guard Set(module.lectureIDs).count == module.lectureIDs.count,
               Set(module.lectureIDs).isSubset(of: Set(ids)) else { throw LibraryError.invalid("A module references duplicate or missing lecture metadata.") }
         let original = module
         module.lectureIDs += ids.filter { !module.lectureIDs.contains($0) }.sorted { $0.uuidString < $1.uuidString }
-        module.plannedLectureCount = max(module.plannedLectureCount, module.lectureIDs.count)
+        module.plannedLectureCount = max(module.plannedLectureCount, lectures.filter { !$0.isArchived }.count)
         // Repair interrupted publication or pre-planning metadata without changing user order.
         if module != original { try write(module, to: url) }
         return module
@@ -65,8 +66,8 @@ public actor LibraryStore {
     }
     /// An early guard for expensive job preparation; every durable mutation checks again under its lock.
     public func assertModuleEditable(moduleID: UUID) throws { try locked { try requireEditable(moduleUnlocked(moduleID)) } }
-    private func validateModule(_ module: Module) throws {
-        guard (0...Module.maximumPlannedLectureCount).contains(module.plannedLectureCount), module.plannedLectureCount >= module.lectureIDs.count, Set(module.lectureIDs).count == module.lectureIDs.count else {
+    private func validateModule(_ module: Module, activeLectureCount: Int = 0) throws {
+        guard (0...Module.maximumPlannedLectureCount).contains(module.plannedLectureCount), module.plannedLectureCount >= activeLectureCount, Set(module.lectureIDs).count == module.lectureIDs.count else {
             throw LibraryError.invalid("Planned lectures cannot be fewer than imported lectures, and lecture order must contain unique identities.")
         }
     }
@@ -99,7 +100,7 @@ public actor LibraryStore {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw LibraryError.invalid("Give the module a name.") }
         module.name = name; module.plannedLectureCount = plannedLectureCount; module.examDate = examDate
-        try validateModule(module)
+        try validateModule(module, activeLectureCount: lectureListUnlocked(in: module).filter { !$0.isArchived }.count)
         try write(module, to: moduleDirectory(moduleID).appendingPathComponent("module.json")); return module
     } }
     /// Archiving does not cancel or discard paid work. Wait/cancel and retry when idle.
@@ -119,12 +120,23 @@ public actor LibraryStore {
         module.instructions += (module.instructions.isEmpty ? "" : "\n") + text
         try write(module, to: url)
     } }
-    public func lectures(in moduleID: UUID) throws -> [Lecture] { try locked {
-        let module = try moduleUnlocked(moduleID)
-        let ids = try lectureFiles(moduleID)
-        guard Set(module.lectureIDs).isSubset(of: Set(ids)) else { throw LibraryError.invalid("A module references missing lecture metadata.") }
-        let ordered = module.lectureIDs + ids.filter { !module.lectureIDs.contains($0) }.sorted { $0.uuidString < $1.uuidString }
-        return try ordered.map { try readLecture(moduleID, $0) }
+    public func lectures(in moduleID: UUID, includingArchived: Bool = false) throws -> [Lecture] { try locked {
+        try lectureListUnlocked(in: moduleUnlocked(moduleID)).filter { includingArchived || !$0.isArchived }
+    } }
+
+    private func lectureListUnlocked(in module: Module) throws -> [Lecture] {
+        try module.lectureIDs.map { try readLecture(module.id, $0) }
+    }
+
+    public func setLectureArchived(moduleID: UUID, lectureID: UUID, archived: Bool, at: Date = Date()) throws { try locked {
+        try requireEditable(moduleUnlocked(moduleID))
+        var lecture = try readLecture(moduleID, lectureID)
+        guard lecture.isArchived != archived else { return }
+        guard !archived || !lecture.jobs.contains(where: { $0.state == .running }) else {
+            throw LibraryError.invalid("Wait for this lecture’s running jobs, or cancel them before archiving.")
+        }
+        lecture.archivedAt = archived ? at : nil
+        try write(lecture, to: lectureDirectory(moduleID, lectureID).appendingPathComponent("lecture.json"))
     } }
     public func loadLecture(moduleID: UUID, lectureID: UUID) throws -> Lecture { try locked { try readLecture(moduleID, lectureID) } }
     public func updateLecture(moduleID: UUID, lectureID: UUID, _ mutation: @Sendable (inout Lecture) throws -> Void) throws -> Lecture {
@@ -136,7 +148,9 @@ public actor LibraryStore {
         try locked {
             try requireEditable(moduleUnlocked(moduleID))
             var lecture = try readLecture(moduleID, lectureID)
+            guard !lecture.isArchived else { throw LibraryError.invalid("Restore this lecture before editing it.") }
             let result = try mutation(&lecture)
+            guard !lecture.isArchived else { throw LibraryError.invalid("Use setLectureArchived to archive a lecture.") }
             guard lecture.id == lectureID, lecture.moduleID == moduleID else { throw LibraryError.invalid("Lecture identity cannot change.") }
             lecture.updatedAt = Date(); try validate(lecture)
             try write(lecture, to: lectureDirectory(moduleID, lectureID).appendingPathComponent("lecture.json"))
@@ -179,7 +193,7 @@ public actor LibraryStore {
         }
         try write(lecture, to: directory.appendingPathComponent("lecture.json"))
         if !module.lectureIDs.contains(lecture.id) { module.lectureIDs.append(lecture.id) }
-        module.plannedLectureCount = max(module.plannedLectureCount, module.lectureIDs.count)
+        module.plannedLectureCount = max(module.plannedLectureCount, try lectureListUnlocked(in: module).filter { !$0.isArchived }.count)
         try write(module, to: moduleURL); return lecture
     }
     public func importPDF(from url: URL, moduleID: UUID) throws -> Lecture {
@@ -251,7 +265,9 @@ public actor LibraryStore {
         if createsModule {
             // Stage the complete new module. Publishing an archived shell first would
             // make a failed restore impossible to retry without unarchiving it.
-            var module = backup.module; module.lectureIDs = [backup.lecture.id]; try validateModule(module)
+            var module = backup.module
+            module.lectureIDs = [backup.lecture.id]
+            try validateModule(module, activeLectureCount: backup.lecture.isArchived ? 0 : 1)
             let target = moduleDirectory(module.id)
             guard !FileManager.default.fileExists(atPath: target.path) else { throw LibraryError.alreadyExists(module.id) }
             let staging = rootURL.appendingPathComponent(".restore-lecture-module-\(UUID())")
@@ -305,7 +321,7 @@ public actor LibraryStore {
         let backup = try Self.decoder().decode(ModuleBackup.self, from: Data(contentsOf: url))
         guard backup.schemaVersion == 1 else { throw LibraryError.unsupportedSchema(backup.schemaVersion) }
         let module = backup.module
-        try validateModule(module)
+        try validateModule(module, activeLectureCount: backup.lectures.filter { !$0.lecture.isArchived }.count)
         guard Set(module.lectureIDs).count == module.lectureIDs.count,
               Set(backup.lectures.map { $0.lecture.id }) == Set(module.lectureIDs),
               backup.lectures.count == module.lectureIDs.count else { throw LibraryError.invalid("Module backup lecture identities do not match its order.") }
@@ -385,6 +401,9 @@ public actor LibraryStore {
     }
     private func validate(_ lecture: Lecture) throws {
         guard lecture.schemaVersion == Lecture.currentSchemaVersion else { throw LibraryError.unsupportedSchema(lecture.schemaVersion) }
+        guard !lecture.isArchived || !lecture.jobs.contains(where: { $0.state == .running }) else {
+            throw LibraryError.invalid("An archived lecture cannot contain running jobs.")
+        }
         _ = try lecture.validated()
     }
     private func read<T: Decodable>(_ url: URL) throws -> T {
