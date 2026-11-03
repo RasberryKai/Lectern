@@ -84,6 +84,35 @@ struct MultiPDFImportTests {
         await #expect(throws: LibraryError.self) { try await store.importPDFs([a, b], name: "X", moduleID: module.id) }
     }
 
+    @Test func archiveHidesLectureAndRestorePreservesItsPDFAndNotes() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let pdf = try writePDF("Lecture.pdf", pages: 1, width: 200, in: root)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let imported = try await store.importPDF(from: pdf, moduleID: module.id)
+        let lecture = try await store.updateLecture(moduleID: module.id, lectureID: imported.id) {
+            $0.slides[0].note = "Keep this note"
+        }
+        let source = store.sourceURL(moduleID: module.id, lectureID: lecture.id)
+
+        try await store.setLectureArchived(moduleID: module.id, lectureID: lecture.id, archived: true)
+        #expect(try await store.lectures(in: module.id).isEmpty)
+        #expect(try await store.lectures(in: module.id, includingArchived: true).first?.isArchived == true)
+        #expect(try await store.dashboard().modules.first?.lectures.isEmpty == true)
+        #expect(try Data(contentsOf: source) == Data(contentsOf: pdf))
+        await #expect(throws: LibraryError.self) {
+            try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { $0.name = "Stale edit" }
+        }
+
+        let replacement = try await store.importPDF(from: pdf, moduleID: module.id)
+        #expect(try await store.loadModule(moduleID: module.id).plannedLectureCount == 1)
+        try await store.setLectureArchived(moduleID: module.id, lectureID: lecture.id, archived: false)
+        let restored = try await store.lectures(in: module.id)
+        #expect(restored.map(\.id) == [lecture.id, replacement.id])
+        #expect(restored.first?.slides == lecture.slides)
+        #expect(try Data(contentsOf: source) == Data(contentsOf: pdf))
+    }
+
     @Test func naturalOrderPutsPart2BeforePart10() {
         let urls = ["Part 10.pdf", "Part 2.pdf", "Part 1.pdf"].map { URL(fileURLWithPath: "/tmp/\($0)") }
         #expect(PDFMerge.naturalOrder(urls).map(\.lastPathComponent) == ["Part 1.pdf", "Part 2.pdf", "Part 10.pdf"])
@@ -153,6 +182,9 @@ struct MultiPDFImportTests {
         await #expect(throws: LibraryError.self) { try await store.appendPDFs([extra], moduleID: module.id, lectureID: empty.id) }
 
         let withSlides = try await store.importPDF(from: extra, moduleID: module.id)
+        try await store.setLectureArchived(moduleID: module.id, lectureID: withSlides.id, archived: true)
+        await #expect(throws: LibraryError.self) { try await store.appendPDFs([extra], moduleID: module.id, lectureID: withSlides.id) }
+        try await store.setLectureArchived(moduleID: module.id, lectureID: withSlides.id, archived: false)
         try await store.setModuleArchived(moduleID: module.id, archived: true)
         await #expect(throws: LibraryError.self) { try await store.appendPDFs([extra], moduleID: module.id, lectureID: withSlides.id) }
     }

@@ -140,7 +140,7 @@ public enum DashboardBuilder {
     }
 
     private static func moduleProgress(_ module: Module, lectures: [Lecture], now: Date, timeZone: TimeZone) -> ModuleProgress {
-        let progress = lectures.map(lectureProgress)
+        let progress = lectures.filter { !$0.isArchived }.map(lectureProgress)
         // Persisted plans are validated by the store. Keep standalone invalid inputs from
         // allocating unbounded empty slots, while never dropping an imported lecture.
         let planned = max(min(module.plannedLectureCount, Module.maximumPlannedLectureCount), progress.count)

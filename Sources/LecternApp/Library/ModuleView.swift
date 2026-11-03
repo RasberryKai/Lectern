@@ -6,7 +6,11 @@ struct ModuleView: View {
     @Environment(AppModel.self) private var model
     let moduleID: UUID
 
-    @State private var lectures: [Lecture] = []
+    @State private var allLectures: [Lecture] = []
+    @State private var showArchive = false
+
+    private var lectures: [Lecture] { allLectures.filter { !$0.isArchived } }
+    private var archivedLectures: [Lecture] { allLectures.filter(\.isArchived) }
     @State private var rulesSummary = ""
     @State private var editingInstructions = false
     @State private var instructionsDraft = ""
@@ -28,6 +32,7 @@ struct ModuleView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     header
                     table
+                    lectureArchive
                     HStack(alignment: .top, spacing: 18) {
                         instructions.frame(maxWidth: .infinity)
                         globalRules.frame(width: 380)
@@ -42,7 +47,7 @@ struct ModuleView: View {
 
     private func load() async {
         do {
-            lectures = try await model.store.lectures(in: moduleID)
+            allLectures = try await model.store.lectures(in: moduleID, includingArchived: true)
             let rules = try await model.store.loadRules()
             rulesSummary = rules.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
                 .first { !$0.isEmpty && !$0.hasPrefix("#") } ?? "Short, self-contained, transferable cards."
@@ -105,6 +110,8 @@ struct ModuleView: View {
                 LectureRow(index: index, lecture: lecture, progress: progress?.lectures.first { $0.lectureID == lecture.id }, archived: archived,
                            dropCount: dropLectureID == lecture.id ? dropCount : 0) { mode in
                     model.openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: mode)
+                } archive: {
+                    setArchived(true, lecture: lecture)
                 }
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("lectureTable")) } action: { rowFrames[lecture.id] = $0 }
                 Divider().overlay(Theme.border)
@@ -124,6 +131,35 @@ struct ModuleView: View {
     /// A lecture row under `point` that can take more pages (it has slides).
     private func lectureAccepting(_ point: CGPoint) -> UUID? {
         lectures.first { $0.pageCount > 0 && rowFrames[$0.id]?.contains(point) == true }?.id
+    }
+
+    @ViewBuilder private var lectureArchive: some View {
+        if !archivedLectures.isEmpty {
+            DisclosureGroup(isExpanded: $showArchive) {
+                ForEach(archivedLectures) { lecture in
+                    HStack {
+                        Text(lecture.name)
+                        Spacer()
+                        Button("Restore") { setArchived(false, lecture: lecture) }
+                            .buttonStyle(LinkButtonStyle())
+                            .disabled(archived)
+                    }
+                    .padding(.vertical, 8)
+                }
+            } label: {
+                Text("Archived lectures (\(archivedLectures.count))")
+            }
+        }
+    }
+
+    private func setArchived(_ archived: Bool, lecture: Lecture) {
+        Task {
+            await model.perform {
+                try await model.store.setLectureArchived(moduleID: moduleID, lectureID: lecture.id, archived: archived)
+                await load()
+                try await model.reloadNow()
+            }
+        }
     }
 
     /// The next slot as a dashed drop target while files hover over the list.
@@ -290,6 +326,7 @@ private struct LectureRow: View {
     /// Files hovering over this row, 0 when none.
     var dropCount: Int = 0
     let open: (LectureMode?) -> Void
+    let archive: () -> Void
 
     private var ref: LectureRef { LectureRef(moduleID: lecture.moduleID, lectureID: lecture.id) }
 
@@ -325,6 +362,8 @@ private struct LectureRow: View {
             Divider()
             Button("Export Lecture Backup…") { exportBackup() }
             Button("Export Lecture to Anki…") { model.selection = .export(lecture.moduleID) }
+            Divider()
+            Button("Archive Lecture", action: archive).disabled(archived)
         }
     }
 

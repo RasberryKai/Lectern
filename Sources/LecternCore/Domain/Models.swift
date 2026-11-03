@@ -203,6 +203,8 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
     public var threads: [SlideThread]
     public var jobs: [Job]
     public var skippedSlides: [SkippedSlide]
+    public var archivedAt: Date?
+    public var isArchived: Bool { archivedAt != nil }
     public var viewPreferences: ViewPreferences
     public init(id: UUID = UUID(), moduleID: UUID, name: String, sourceFilename: String = "", pageCount: Int = 0, createdAt: Date = Date(), updatedAt: Date? = nil, slides: [SlideState]? = nil, cards: [Card] = [], threads: [SlideThread] = [], jobs: [Job] = [], skippedSlides: [SkippedSlide] = [], viewPreferences: ViewPreferences = .default, schemaVersion: Int = 1) {
         self.schemaVersion = schemaVersion; self.id = id; self.moduleID = moduleID; self.name = name; self.sourceFilename = sourceFilename; self.pageCount = pageCount; self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt; self.slides = slides ?? (0..<max(0, pageCount)).map { SlideState(pageIndex: $0) }; self.cards = cards; self.threads = threads; self.jobs = jobs; self.skippedSlides = skippedSlides; self.viewPreferences = viewPreferences
