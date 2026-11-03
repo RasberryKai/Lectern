@@ -86,18 +86,19 @@ struct ImportPDFsSheet: View {
     }
 
     private var fileList: some View {
-        List {
-            ForEach(Array(files.enumerated()), id: \.element.id) { index, file in
-                row(index: index, file: file)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 6))
-                    .listRowBackground(Theme.surface)
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(files.enumerated()), id: \.element.id) { index, file in
+                    row(index: index, file: file)
+                        .padding(.leading, 4)
+                        .padding(.trailing, 6)
+                        .overlay(alignment: .bottom) {
+                            if index < files.count - 1 { Divider().padding(.leading, 54) }
+                        }
+                }
             }
-            .onMove { files.move(fromOffsets: $0, toOffset: $1) }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, Self.rowHeight)
-        .frame(height: CGFloat(min(max(files.count, 1), 6)) * (Self.rowHeight + 1) + 2)
+        .frame(height: CGFloat(min(max(files.count, 1), 6)) * Self.rowHeight + 2)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
@@ -109,6 +110,13 @@ struct ImportPDFsSheet: View {
                 .foregroundStyle(Theme.faint)
                 .frame(width: 24, height: 36)
                 .help("Drag to reorder")
+                .contentShape(Rectangle())
+                .gesture(DragGesture(coordinateSpace: .global).onEnded { drag in
+                    let rows = Int((drag.translation.height / Self.rowHeight).rounded())
+                    let target = min(max(index + rows, 0), files.count - 1)
+                    guard target != index else { return }
+                    files.move(fromOffsets: IndexSet(integer: index), toOffset: target > index ? target + 1 : target)
+                })
                 .accessibilityHidden(true)
             Text("\(index + 1)")
                 .font(.system(size: 12, weight: .semibold))
