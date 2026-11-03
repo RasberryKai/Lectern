@@ -10,7 +10,8 @@ struct ModuleView: View {
     @State private var rulesSummary = ""
     @State private var editingInstructions = false
     @State private var instructionsDraft = ""
-    @State private var dropTargeted = false
+    /// Number of files hovering over the lecture list, 0 when nothing is dragged over it.
+    @State private var dropCount = 0
     @State private var importing = false
 
     private var module: Module? { model.module(moduleID) }
@@ -58,7 +59,7 @@ struct ModuleView: View {
             Button {
                 Task { importing = true; await model.chooseAndImportPDFs(into: moduleID); importing = false }
             } label: {
-                if importing { ProgressView().controlSize(.small) } else { Text("Import PDF") }
+                if importing { ProgressView().controlSize(.small) } else { Text("Import PDFs…") }
             }
             .buttonStyle(SecondaryButtonStyle())
             .disabled(archived || importing)
@@ -94,7 +95,7 @@ struct ModuleView: View {
             .padding(.horizontal, 20).padding(.vertical, 12)
             Divider().overlay(Theme.border)
             if lectures.isEmpty && (module?.plannedLectureCount ?? 0) == 0 {
-                Text("No lectures yet. Drop lecture PDFs here or use Import PDF.")
+                Text("No lectures yet. Drop lecture PDFs here or use Import PDFs….")
                     .font(Theme.body).foregroundStyle(Theme.quiet).padding(24)
             }
             ForEach(Array(lectures.enumerated()), id: \.element.id) { index, lecture in
@@ -106,18 +107,39 @@ struct ModuleView: View {
             emptySlots
         }
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(dropTargeted ? Theme.accent : Theme.border, lineWidth: dropTargeted ? 2 : 1))
-        .dropDestination(for: URL.self) { urls, _ in
-            guard !archived else { model.errorMessage = "This module is archived. Unarchive it to import lectures."; return false }
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border, lineWidth: 1))
+        .onDrop(of: [.fileURL], delegate: PDFDropDelegate(count: $dropCount, enabled: !archived) { urls in
             Task { await model.importPDFs(urls, into: moduleID) }
-            return true
-        } isTargeted: { dropTargeted = $0 }
+        })
+    }
+
+    /// The next slot as a dashed drop target while files hover over the list.
+    private var dropTarget: some View {
+        let slot = String(format: "%02d", lectures.count + 1)
+        let what = dropCount == 1 ? "Drop to import as lecture \(slot)" : "Drop to import \(dropCount) PDFs as lecture \(slot)"
+        return HStack(spacing: 12) {
+            Image(systemName: "arrow.down.to.line").font(.system(size: 15, weight: .medium))
+            Text(slot).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink)
+            Text(what).font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity, alignment: .leading)
+            if dropCount > 1 { Text("You set the order next").font(Theme.small) }
+        }
+        .foregroundStyle(Theme.accentText)
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .background(Theme.goodWash, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [6, 4])))
+        .padding(.horizontal, 10).padding(.vertical, 8)
     }
 
     @ViewBuilder private var emptySlots: some View {
         let planned = module?.plannedLectureCount ?? 0
         let next = lectures.count + 1
-        if planned >= next {
+        if dropCount > 0 {
+            dropTarget
+            if planned > next {
+                Divider().overlay(Theme.border)
+                moreSlotsLine(next: next, planned: planned)
+            }
+        } else if planned >= next {
             HStack(spacing: 0) {
                 HStack(spacing: 6) {
                     Text(String(format: "%02d", next)).font(.system(size: 13, weight: .semibold))
@@ -135,17 +157,21 @@ struct ModuleView: View {
             .padding(.horizontal, 20).padding(.vertical, 14)
             if planned > next {
                 Divider().overlay(Theme.border)
-                Text("\(String(format: "%02d", next + 1)) to \(String(format: "%02d", planned)) · \(Format.count(planned - next, "more planned slot")). Drop a PDF anywhere on this list to fill the next one.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20).padding(.vertical, 12)
+                moreSlotsLine(next: next, planned: planned)
             }
         } else {
-            Text("Drop a PDF anywhere on this list to add the next lecture.")
+            Text("Drop one or several PDFs anywhere on this list to add the next lecture.")
                 .font(Theme.small).foregroundStyle(Theme.quiet)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20).padding(.vertical, 12)
         }
+    }
+
+    private func moreSlotsLine(next: Int, planned: Int) -> some View {
+        Text("\(String(format: "%02d", next + 1)) to \(String(format: "%02d", planned)) · \(Format.count(planned - next, "more planned slot")). Drop one or several PDFs on this list to fill the next one.")
+            .font(Theme.small).foregroundStyle(Theme.quiet)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20).padding(.vertical, 12)
     }
 
     // MARK: Instructions and rules
@@ -197,6 +223,36 @@ struct ModuleView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .panel(padding: 22)
+    }
+}
+
+/// File drops on the lecture list. Reports how many files hover so the next slot can say
+/// "Drop to import 3 PDFs as lecture 05"; one PDF imports directly, several open the import sheet.
+private struct PDFDropDelegate: DropDelegate {
+    @Binding var count: Int
+    let enabled: Bool
+    let perform: ([URL]) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.fileURL]) }
+    func dropEntered(info: DropInfo) { if enabled { count = info.itemProviders(for: [.fileURL]).count } }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: enabled ? .copy : .forbidden) }
+    func dropExited(info: DropInfo) { count = 0 }
+
+    func performDrop(info: DropInfo) -> Bool {
+        count = 0
+        guard enabled else { return false }
+        let providers = info.itemProviders(for: [.fileURL])
+        Task {
+            var urls: [URL] = []
+            for provider in providers {
+                let url: URL? = await withCheckedContinuation { continuation in
+                    _ = provider.loadObject(ofClass: URL.self) { url, _ in continuation.resume(returning: url) }
+                }
+                if let url { urls.append(url) }
+            }
+            if !urls.isEmpty { perform(urls) }
+        }
+        return true
     }
 }
 
