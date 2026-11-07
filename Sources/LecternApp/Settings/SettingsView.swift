@@ -9,6 +9,7 @@ struct SettingsView: View {
             RulesTab().tabItem { Label("Card rules", systemImage: "text.book.closed") }
             UsageTab().tabItem { Label("API usage", systemImage: "dollarsign.circle") }
             LibraryTab().tabItem { Label("Library", systemImage: "books.vertical") }
+            KeyboardShortcutsTab().tabItem { Label("Shortcuts", systemImage: "keyboard") }
         }
         .scenePadding()
     }

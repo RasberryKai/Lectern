@@ -21,12 +21,24 @@ final class LectureWindowModel {
     var mode: LectureMode
     var focusedPageIndex: Int?
     var prepareFilter: PrepareFilter
+    var reviewSearch = ""
     var reviewFilter: ReviewFilter
     var selectedCardID: UUID?
     var thumbnailSize: ThumbnailSize
     var notesVisible: Bool
     var thumbnailsVisible: Bool
     var askVisible = true
+    var panes = LecturePaneState()
+    var chatContext = ChatContext()
+    var chatScrollTarget: UUID?
+    var readOnlyChatID: UUID?
+    var chatDraft = ""
+    var chatDraftAttachments: [ChatAttachment] = []
+    var chatAttachmentError: String?
+    var isImportingChatImages = false
+    var chatPreparationFailure: ChatPreparationFailure?
+    var isStartingChat = false
+    @ObservationIgnored var chatDraftSaveTask: Task<Void, Never>?
     var titleDraft: String?
     private(set) var isSavingTitle = false
     @ObservationIgnored private var titleSaveTask: Task<Void, Error>?
@@ -87,6 +99,8 @@ final class LectureWindowModel {
         notesVisible = prefs.inspectorVisible
         thumbnailsVisible = prefs.sidebarVisible
         if selectedCardID == nil { selectedCardID = visibleCards.first?.id }
+        chatDraft = lecture.currentChat.draft
+        chatDraftAttachments = lecture.currentChat.draftAttachments
         loadEditor()
     }
 
@@ -139,13 +153,15 @@ final class LectureWindowModel {
     var visibleCards: [Card] {
         var copy = lecture
         copy.viewPreferences.reviewFilter = reviewFilter
-        return copy.visibleCards
+        let cards = reviewFilter == .aiFlagged ? activeCards.filter { $0.flag != nil || $0.proposal != nil } : copy.visibleCards
+        let order = Dictionary(uniqueKeysWithValues: activeCards.enumerated().map { ($0.element.id, $0.offset) })
+        return cards.sorted { (order[$0.id] ?? 0) < (order[$1.id] ?? 0) }.filter { reviewSearch.isEmpty || $0.front.localizedCaseInsensitiveContains(reviewSearch) || $0.back.localizedCaseInsensitiveContains(reviewSearch) }
     }
 
     func count(for filter: ReviewFilter) -> Int {
         var copy = lecture
         copy.viewPreferences.reviewFilter = filter
-        return copy.visibleCards.count
+        return filter == .aiFlagged ? activeCards.filter { $0.flag != nil || $0.proposal != nil }.count : copy.visibleCards.count
     }
 
     var activeCards: [Card] { lecture.cards.filter { !$0.isSuperseded } }
@@ -456,10 +472,14 @@ final class LectureWindowModel {
         guard !readOnly, let card = selectedCard else { return }
         let feedback = feedbackDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !feedback.isEmpty else { errorMessage = "Write what should change first."; return }
+        let previous = visibleCards
+        var started = false
         await run {
             _ = try await session.revise(cardID: card.id, feedback: feedback, backend: backend, model: model)
             try await session.refresh()
+            started = true
         }
+        if started { advance(from: card.id, previous: previous) }
         app.scheduleReload()
     }
 
@@ -545,7 +565,8 @@ final class LectureWindowModel {
 
     func cancel(_ jobID: UUID) async {
         await run {
-            try await app.runner.cancel(moduleID: ref.moduleID, lectureID: ref.lectureID, jobID: jobID)
+            if runningChat?.id == jobID { try await session.stopChat() }
+            else { try await app.runner.cancel(moduleID: ref.moduleID, lectureID: ref.lectureID, jobID: jobID) }
             try await session.refresh()
         }
         app.scheduleReload()
@@ -582,6 +603,8 @@ final class LectureWindowModel {
 
     /// Saves notes, card edits and view state. Throws so the window can stay open on failure.
     func closeAndFlush() async throws {
+        chatDraftSaveTask?.cancel()
+        if !readOnly { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments) }
         try await commitTitle()
         try await flushNoteNow()
         if !app.isArchived(ref.moduleID) && currentPreferences != lecture.viewPreferences {

@@ -198,7 +198,7 @@ public enum LectureReducer {
                 let before = lecture.cards[i]
                 lecture.cards[i].front = edit.front; lecture.cards[i].back = edit.back
                 lecture.cards[i].mathInterpretations = [:]
-                if lecture.cards[i].verdict == .good { lecture.cards[i].verdict = .unreviewed }
+                if lecture.cards[i].verdict == .good || lecture.jobs[j].chatEdits != nil { lecture.cards[i].verdict = .unreviewed }
                 let revision = CardRevision(front: edit.front, back: edit.back, author: .ai, reason: "Chat edit", at: now)
                 lecture.cards[i].history.append(revision)
                 undo.append(ChatEditUndo(cardID: edit.cardID, appliedRevisionID: revision.id,

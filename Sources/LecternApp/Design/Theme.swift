@@ -20,7 +20,7 @@ enum Theme {
     static let onAccent = Color(hex: 0xF7F5EF)
 
     static let ai = dynamic(light: 0x2F5D8C, dark: 0x8DB4DD)
-    static let aiStrong = dynamic(light: 0x244A70, dark: 0x3C6A99)
+    static let aiStrong = dynamic(light: 0x244A70, dark: 0xA9CBEE)
     static let aiWash = dynamic(light: 0xE3ECF5, dark: 0x22303E)
 
     static let good = dynamic(light: 0x3F7A4A, dark: 0x8EC497)

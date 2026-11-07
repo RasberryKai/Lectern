@@ -50,6 +50,10 @@ public struct MessagesAPIProvider: AIProvider {
         let apiKey = try apiKeyProvider().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !apiKey.isEmpty else { throw AIError.configuration("Add an Anthropic API key in Lectern settings to use the Messages API.") }
 
+        if request.kind == .chat, let snapshot = request.chatSnapshot {
+            return try await executeChat(request, snapshot: snapshot, apiKey: apiKey, onEvent: onEvent)
+        }
+
         let pdf = try Self.pdfData(for: request)
         if let pdf, pdf.count > 96 * 1_024 * 1_024 {
             throw AIError.limit("The PDF is too large for an inline Messages API request. Reduce its size or selected pages.")
@@ -85,7 +89,7 @@ public struct MessagesAPIProvider: AIProvider {
                 throw AIError.transport("The Messages API returned a non-HTTP response.")
             }
             guard (200..<300).contains(http.statusCode) else {
-                throw Self.httpError(status: http.statusCode, body: data)
+                throw Self.httpError(status: http.statusCode, body: data, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
             }
             onEvent(.stage("Writing"))
             return try Self.parseMessageResponse(data)
@@ -97,6 +101,150 @@ public struct MessagesAPIProvider: AIProvider {
             if Task.isCancelled { throw CancellationError() }
             throw AIError.transport("Messages API request failed: \(error.localizedDescription)")
         }
+    }
+
+    private func executeChat(_ request: AIRequest, snapshot: ChatSnapshot, apiKey: String,
+                             onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        let context = ChatProviderContext(request: request, snapshot: snapshot)
+        let initial = try context.initialContent()
+        var read = initial.refs
+        for ref in read { onEvent(.read(ref)) }
+        var messages: [[String: Any]] = [["role": "user", "content": initial.blocks]]
+        var total = AIUsage()
+        var proposed: [ChatCardEdit] = []
+        var searched = false
+        for _ in 0..<16 {
+            try Task.checkCancellation()
+            var urlRequest = try Self.makeURLRequest(prompt: request.prompt, kind: .chat, pdf: nil,
+                systemPrompt: request.systemPrompt, apiKey: apiKey,
+                model: request.model.hasPrefix("claude-") ? request.model : model,
+                apiVersion: apiVersion, endpoint: endpoint, maxOutputTokens: maxOutputTokens)
+            var body = try JSONSerialization.jsonObject(with: urlRequest.httpBody!) as! [String: Any]
+            body["messages"] = messages
+            body["stream"] = true
+            body["tools"] = Self.chatTools
+            urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+            urlRequest.setValue("text/event-stream", forHTTPHeaderField: "accept")
+            guard urlRequest.httpBody!.count <= maximumRequestBytes else { throw AIError.limit("The chat exceeds the Messages API request limit.") }
+            let round = try await chatRound(urlRequest, onEvent: onEvent)
+            total.inputTokens += round.usage.inputTokens; total.outputTokens += round.usage.outputTokens
+            total.cacheCreationInputTokens = (total.cacheCreationInputTokens ?? 0) + (round.usage.cacheCreationInputTokens ?? 0)
+            total.cacheReadInputTokens = (total.cacheReadInputTokens ?? 0) + (round.usage.cacheReadInputTokens ?? 0)
+            let blocks = round.blocks
+            let tools = blocks.filter { $0["type"] as? String == "tool_use" }
+            if tools.isEmpty {
+                let text = blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
+                try Self.validateStopReason(round.stopReason, response: text)
+                var reply: ChatReply
+                do { reply = try JSONDecoder().decode(ChatReply.self, from: Data(text.utf8)) }
+                catch { throw AIError.invalidResponse("Claude returned invalid structured chat JSON.") }
+                // Tool calls propose changes; JobRunner validates/apply rules against frozen revisions.
+                for edit in proposed { reply.edits.removeAll { $0.cardID == edit.cardID }; reply.edits.append(edit) }
+                var response = AIResponse(content: String(decoding: try JSONEncoder().encode(reply), as: UTF8.self), usage: total)
+                response.read = read; response.searchedLecture = searched
+                return response
+            }
+            guard round.stopReason == "tool_use" else { throw AIError.invalidResponse("Claude returned unfinished chat tool calls.") }
+            messages.append(["role": "assistant", "content": blocks])
+            var results: [[String: Any]] = []
+            for tool in tools {
+                try Task.checkCancellation()
+                guard let id = tool["id"] as? String, let name = tool["name"] as? String,
+                      let input = tool["input"] as? [String: Any] else { throw AIError.invalidResponse("Malformed chat tool call.") }
+                var content: [[String: Any]]
+                switch name {
+                case "read_slides":
+                    guard let pages = input["pages"] as? [Int], !pages.isEmpty, pages.count <= 100 else { throw AIError.invalidResponse("read_slides requires 1–100 page numbers.") }
+                    onEvent(.stage("Reading slides…")); content = try context.slides(pages)
+                    for page in pages { let ref = ContextRef.slide(page); if !read.contains(ref) { read.append(ref) }; onEvent(.read(ref)) }
+                    if pages.contains(where: { !initial.refs.contains(.slide($0)) }) { searched = true }
+                case "get_cards":
+                    guard let strings = input["ids"] as? [String], !strings.isEmpty, strings.count <= 100,
+                          strings.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw AIError.invalidResponse("get_cards requires valid card IDs.") }
+                    let ids = strings.compactMap(UUID.init(uuidString:))
+                    content = [["type": "text", "text": try context.cards(ids)]]
+                    for id in ids { let ref = ContextRef.card(id); if !read.contains(ref) { read.append(ref) }; onEvent(.read(ref)) }
+                    if !initial.refs.contains(.allCards), ids.contains(where: { !initial.refs.contains(.card($0)) }) { searched = true }
+                case "read_images":
+                    guard let strings = input["ids"] as? [String], !strings.isEmpty, strings.count <= 4,
+                          strings.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw AIError.invalidResponse("read_images requires 1–4 valid uploaded image IDs.") }
+                    onEvent(.stage("Reading uploaded images…"))
+                    content = try context.uploadedImages(strings.compactMap(UUID.init(uuidString:)))
+                case "edit_cards":
+                    guard let edits = input["edits"], JSONSerialization.isValidJSONObject(edits) else { throw AIError.invalidResponse("edit_cards requires edits.") }
+                    let decoded = try JSONDecoder().decode([ChatCardEdit].self, from: JSONSerialization.data(withJSONObject: edits))
+                    guard !decoded.isEmpty, decoded.allSatisfy({ edit in snapshot.cards.contains { $0.id == edit.cardID && $0.currentRevisionID == edit.baseRevisionID } }) else { throw AIError.invalidResponse("Card edit does not match the frozen card revision.") }
+                    proposed += decoded
+                    content = [["type": "text", "text": "Changes proposed for review. Do not repeat card contents in the answer."]]
+                default: throw AIError.invalidResponse("Unknown chat tool: \(name).")
+                }
+                results.append(["type": "tool_result", "tool_use_id": id, "content": content])
+            }
+            messages.append(["role": "user", "content": results])
+        }
+        throw AIError.limit("Claude reached the chat lookup limit. Ask a more focused question.")
+    }
+
+    private static var chatTools: [[String: Any]] {
+        let array: (String, [String: Any]) -> [String: Any] = { key, items in
+            ["type": "object", "additionalProperties": false, "required": [key], "properties": [key: ["type": "array", "items": items]]]
+        }
+        let edit = ["type": "object", "additionalProperties": false, "required": ["cardID", "baseRevisionID", "front", "back"],
+                    "properties": Dictionary(uniqueKeysWithValues: ["cardID", "baseRevisionID", "front", "back"].map { ($0, ["type": "string"]) })] as [String: Any]
+        return [
+            ["name": "read_slides", "description": "Read frozen lecture slide PNGs and extracted text.", "input_schema": array("pages", ["type": "integer"])],
+            ["name": "read_images", "description": "Read uploaded images from the frozen image index by UUID, including prior-turn uploads.", "input_schema": array("ids", ["type": "string"])],
+            ["name": "get_cards", "description": "Read full frozen cards by UUID.", "input_schema": array("ids", ["type": "string"])],
+            ["name": "edit_cards", "description": "Propose edits using each card's frozen base revision ID. Does not modify cards.", "input_schema": array("edits", edit)]
+        ]
+    }
+
+    private func chatRound(_ request: URLRequest, onEvent: @escaping @Sendable (AIEvent) -> Void) async throws
+        -> (blocks: [[String: Any]], usage: AIUsage, stopReason: String?) {
+        do {
+            onEvent(.stage("Sending"))
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else { throw AIError.transport("Non-HTTP chat response.") }
+            guard (200..<300).contains(http.statusCode) else {
+                var body = Data()
+                for try await byte in bytes { if body.count >= 1_048_576 { break }; body.append(byte) }
+                throw Self.httpError(status: http.statusCode, body: body, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+            }
+            var blocks: [Int: [String: Any]] = [:], partialInputs: [Int: String] = [:]
+            var usage = AIUsage(), stop: String?, stopped = false, size = 0
+            var preview = ChatMessageStream()
+            for try await line in bytes.lines {
+                try Task.checkCancellation(); size += line.utf8.count
+                guard size <= 16 * 1_024 * 1_024 else { throw AIError.limit("Chat response exceeded 16 MB.") }
+                guard line.hasPrefix("data:"), let event = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(5).utf8)) as? [String: Any], let type = event["type"] as? String else { continue }
+                let index = event["index"] as? Int ?? 0
+                switch type {
+                case "message_start": usage = Self.usage(from: (event["message"] as? [String: Any])?["usage"] as? [String: Any] ?? [:])
+                case "content_block_start": blocks[index] = event["content_block"] as? [String: Any]
+                case "content_block_delta":
+                    let delta = event["delta"] as? [String: Any] ?? [:]
+                    if let text = delta["text"] as? String {
+                        blocks[index, default: ["type": "text"]]["text"] = (blocks[index]?["text"] as? String ?? "") + text
+                        let visible = preview.append(text); if !visible.isEmpty { onEvent(.text(visible)) }
+                    }
+                    if let json = delta["partial_json"] as? String { partialInputs[index, default: ""] += json }
+                case "content_block_stop":
+                    if let input = partialInputs[index] { blocks[index]?["input"] = try JSONSerialization.jsonObject(with: Data(input.utf8)) }
+                case "message_delta":
+                    usage = Self.usage(from: event["usage"] as? [String: Any] ?? [:], previous: usage)
+                    stop = (event["delta"] as? [String: Any])?["stop_reason"] as? String
+                case "message_stop": stopped = true
+                case "error":
+                    let error = event["error"] as? [String: Any] ?? [:]
+                    throw Self.httpError(status: (error["type"] as? String ?? "").contains("rate_limit") ? 429 : 500, body: try JSONSerialization.data(withJSONObject: ["error": error]))
+                default: break
+                }
+            }
+            guard stopped else { throw AIError.transport("Chat stream ended before message_stop.") }
+            return (blocks.keys.sorted().compactMap { blocks[$0] }, usage, stop)
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as AIError { throw error }
+        catch { if Task.isCancelled { throw CancellationError() }; throw AIError.transport("Chat request failed: \(error.localizedDescription)") }
     }
 
     /// Request builder is internal so tests can inspect the exact payload without network access.
@@ -235,7 +383,7 @@ public struct MessagesAPIProvider: AIProvider {
                 guard size <= 1_048_576 else { break }
                 lines.append(line)
             }
-            throw Self.httpError(status: http.statusCode, body: Data(lines.joined(separator: "\n").utf8))
+            throw Self.httpError(status: http.statusCode, body: Data(lines.joined(separator: "\n").utf8), retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
         }
 
         onEvent(.stage("Writing"))
@@ -381,14 +529,15 @@ public struct MessagesAPIProvider: AIProvider {
         return nil
     }
 
-    private static func httpError(status: Int, body: Data) -> AIError {
+    private static func httpError(status: Int, body: Data, retryAfter: String? = nil) -> AIError {
         let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
         let errorObject = object?["error"] as? [String: Any]
         let message = errorObject?["message"] as? String ?? String(decoding: body.prefix(1_024), as: UTF8.self)
         let type = errorObject?["type"] as? String ?? ""
         if status == 429 || status == 529 || type.contains("rate_limit") || type.contains("overloaded") {
-            return .limit(message.isEmpty ? "Messages API rate or capacity limit reached (HTTP \(status))." : message)
+            return .limit((message.isEmpty ? "Messages API rate or capacity limit reached (HTTP \(status))." : message) + (retryAfter.map { " Retry after: \($0)." } ?? ""))
         }
+        if status == 401 || status == 403 { return .configuration(message.isEmpty ? "Check your Anthropic API key in Settings." : message) }
         return .transport(message.isEmpty ? "Messages API returned HTTP \(status)." : message)
     }
 

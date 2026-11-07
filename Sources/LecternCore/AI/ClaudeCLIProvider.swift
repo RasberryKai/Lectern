@@ -28,7 +28,7 @@ public struct ClaudeCLIProvider: AIProvider {
 
         try await Self.requireSubscriptionLogin(executableURL: executableURL)
         try Task.checkCancellation()
-        let pdfURL = Self.pdfURL(for: request)
+        let pdfURL = request.chatSnapshot == nil ? Self.pdfURL(for: request) : nil
         let pdfSize = request.pdf?.count ?? (pdfURL.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int } ?? 0)
         if pdfURL != nil, pdfSize > 96 * 1_024 * 1_024 {
             throw AIError.limit("The PDF is too large for a CLI job. Reduce its size or selected pages.")
@@ -70,15 +70,18 @@ public struct ClaudeCLIProvider: AIProvider {
                                            model: request.model.isEmpty ? defaultModel : request.model,
                                            pdfURL: pdfURL)
         onEvent(.stage("Starting Claude"))
+        let preview = ChatPreviewEmitter(onEvent: onEvent)
+        let tracker = request.chatSnapshot.map { ChatCLIReadTracker(context: ChatProviderContext(request: request, snapshot: $0), onEvent: onEvent) }
         let invocation = CLIInvocation(executableURL: executableURL,
                                        arguments: arguments,
                                        workingDirectory: inputDirectory,
                                        promptURL: promptURL,
-                                       streaming: request.kind == .ask,
+                                       streaming: request.kind == .ask || request.chatSnapshot != nil,
                                        outputLimit: maximumOutputBytes,
                                        errorLimit: maximumErrorBytes,
                                        timeout: timeout,
-                                       onText: { text in onEvent(.text(text)) })
+                                       onText: { text in if request.chatSnapshot == nil { onEvent(.text(text)) } else { preview.append(text) } },
+                                       onLine: { tracker?.receive($0) })
         let result = try await withTaskCancellationHandler {
             try await invocation.run()
         } onCancel: {
@@ -96,6 +99,9 @@ public struct ClaudeCLIProvider: AIProvider {
         }
 
         onEvent(.stage("Writing"))
+        if let snapshot = request.chatSnapshot {
+            return try Self.parseChatStream(result.stdout, request: request, snapshot: snapshot, emitFinalText: !preview.emitted, onEvent: onEvent)
+        }
         if request.kind == .ask {
             let response = try Self.parseStreamResult(result.stdout)
             if !result.emittedText { onEvent(.text(response.content)) }
@@ -139,6 +145,25 @@ public struct ClaudeCLIProvider: AIProvider {
 
     /// Keep the job-specific path after reusable study context, never in the system prompt.
     static func inputPrompt(for request: AIRequest, pdfURL: URL?) throws -> String {
+        if let snapshot = request.chatSnapshot {
+            let context = ChatProviderContext(request: request, snapshot: snapshot)
+            let root = request.workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+            var required = snapshot.initialRefs.flatMap { ref -> [String] in
+                switch ref {
+                case .slide(let page): return [String(format: "slides/%03d.png", page), String(format: "slides/%03d.txt", page)]
+                case .card(let id): return ["cards/\(id.uuidString).json"] + (snapshot.cards.first(where: { $0.id == id })?.sourcePages.flatMap { [String(format: "slides/%03d.png", $0), String(format: "slides/%03d.txt", $0)] } ?? [])
+                case .allCards: return context.hasVerifiedInlineDeck ? [] : ["cards.json"]
+                case .allSlides: return snapshot.slides.map { String(format: "slides/%03d.txt", $0.page) }
+                }
+            }
+            required += (snapshot.images ?? []).filter(\.isCurrent).map(\.relativePath)
+            for path in context.allowedFiles { _ = try context.file(path) }
+            let paths = required.map { root.appendingPathComponent($0).path }
+            return request.prompt + "\n\nFROZEN CHAT FILES: Read only files in " + root.path +
+                ". Slides are slides/007.png and slides/007.txt (three-digit original page number); individual cards are cards/<UUID>.json and the full deck is cards.json. Read the full deck only when the question needs it or All cards is attached. Never read a PDF or any other filesystem location. Before answering, Read these attached context files: " +
+                String(decoding: try JSONEncoder().encode(Array(Set(paths)).sorted()), as: UTF8.self) +
+                ". Look up other frozen slides/cards or indexed prior uploaded images only when needed. Return strict chat JSON including message, edits and quiz. Card edits are proposals in edits, using the frozen base revision ID."
+        }
         guard let pdfURL else { return request.prompt }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -157,8 +182,19 @@ public struct ClaudeCLIProvider: AIProvider {
             "--system-prompt", request.systemPrompt,
             "--model", model,
             "--effort", effort(for: request.kind),
-            "--tools", pdfURL == nil ? "" : "Read"
+            "--tools", pdfURL == nil && request.chatSnapshot == nil ? "" : "Read"
         ]
+        if let snapshot = request.chatSnapshot {
+            let context = ChatProviderContext(request: request, snapshot: snapshot)
+            for relative in context.allowedFiles {
+                let path = try context.file(relative).path
+                // Permission patterns must remain exact, even for unusual job directory names.
+                guard !path.contains(where: { "*?[]()\n\r".contains($0) }) else { throw AIError.configuration("The chat job path contains CLI permission pattern characters.") }
+                arguments += ["--allowedTools", "Read(/" + path + ")"]
+            }
+            arguments += ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--json-schema", AIOutputSchema.json(for: .chat)!]
+            return arguments
+        }
         if let pdfURL {
             let path = String(pdfURL.standardizedFileURL.path.dropFirst())
             arguments += ["--allowedTools", "Read(//\(path))"]
@@ -172,6 +208,67 @@ public struct ClaudeCLIProvider: AIProvider {
             arguments += ["--output-format", "json", "--json-schema", schema]
         }
         return arguments
+    }
+
+    static func parseChatStream(_ data: Data, request: AIRequest, snapshot: ChatSnapshot,
+                                emitFinalText: Bool = true, onEvent: @escaping @Sendable (AIEvent) -> Void) throws -> AIResponse {
+        let context = ChatProviderContext(request: request, snapshot: snapshot)
+        var pending: [String: String] = [:], read: [ContextRef] = [], final: [String: Any]?
+        var completedFiles = Set<String>()
+        for line in String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline) {
+            guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            if event["type"] as? String == "result" { final = event }
+            let message = event["message"] as? [String: Any] ?? [:]
+            for block in message["content"] as? [[String: Any]] ?? [] {
+                if block["type"] as? String == "tool_use", block["name"] as? String == "Read",
+                   let id = block["id"] as? String, let input = block["input"] as? [String: Any], let path = input["file_path"] as? String {
+                    let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : request.workingDirectory.appendingPathComponent(path)
+                    let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
+                    let matching = context.allowedFiles.first { request.workingDirectory.appendingPathComponent($0).standardizedFileURL.resolvingSymlinksInPath() == canonical }
+                    guard let matching, try context.file(matching) == canonical else { throw AIError.configuration("Claude attempted to read outside its frozen chat context.") }
+                    pending[id] = matching
+                }
+                if block["type"] as? String == "tool_result", block["is_error"] as? Bool != true,
+                   let id = block["tool_use_id"] as? String, let path = pending.removeValue(forKey: id) {
+                    completedFiles.insert(path)
+                    if let ref = context.reference(for: path), !read.contains(ref) { read.append(ref); onEvent(.read(ref)) }
+                } else if block["type"] as? String == "tool_result", block["is_error"] as? Bool == true {
+                    throw AIError.configuration("Claude could not read a frozen chat context file. Retry the request.")
+                }
+            }
+        }
+        if snapshot.initialRefs.contains(.allCards), context.hasVerifiedInlineDeck, !read.contains(.allCards) {
+            // Supplied context is evidence too, as with initial Messages API attachments.
+            read.append(.allCards); onEvent(.read(.allCards))
+        }
+        for image in (snapshot.images ?? []).filter(\.isCurrent) {
+            guard completedFiles.contains(image.relativePath) else { throw AIError.invalidResponse("Claude did not read the uploaded image. Retry the request.") }
+        }
+        for ref in snapshot.initialRefs {
+            let complete: Bool
+            switch ref {
+            case .slide(let page): complete = read.contains(.slide(page))
+            case .card(let id): complete = read.contains(.card(id)) || read.contains(.allCards)
+            case .allCards: complete = read.contains(.allCards) || (!snapshot.cards.isEmpty && snapshot.cards.allSatisfy { read.contains(.card($0.id)) })
+            case .allSlides: complete = snapshot.slides.allSatisfy { read.contains(.slide($0.page)) }
+            }
+            guard complete else { throw AIError.slideRead("Claude did not read the attached chat context. Retry the request.") }
+        }
+        guard let final else { throw AIError.invalidResponse("Claude chat stream ended without a result.") }
+        var response = try parseStructuredResult(JSONSerialization.data(withJSONObject: final))
+        response.read = read
+        let initial = Set(snapshot.initialRefs.flatMap { ref -> [ContextRef] in
+            switch ref {
+            case .card(let id): return [.card(id)] + (snapshot.cards.first(where: { $0.id == id })?.sourcePages.map(ContextRef.slide) ?? [])
+            case .allSlides: return snapshot.slides.map { .slide($0.page) }
+            case .allCards: return [.allCards] + snapshot.cards.map { .card($0.id) }
+            default: return [ref]
+            }
+        })
+        response.searchedLecture = read.contains { !initial.contains($0) }
+        let reply = try JSONDecoder().decode(ChatReply.self, from: Data(response.content.utf8))
+        if emitFinalText { onEvent(.text(reply.message)) }
+        return response
     }
 
     static func parseStructuredResult(_ data: Data) throws -> AIResponse {
@@ -251,17 +348,22 @@ public struct ClaudeCLIProvider: AIProvider {
     }
 
     static func usage(from envelope: [String: Any]) -> AIUsage {
-        var usage: [String: Any] = envelope["usage"] as? [String: Any] ?? [:]
-        if let modelUsage = envelope["modelUsage"] as? [String: Any] {
-            for raw in modelUsage.values {
-                guard let item = raw as? [String: Any] else { continue }
-                for (key, value) in item where usage[key] == nil { usage[key] = value }
+        let usage = envelope["usage"] as? [String: Any] ?? [:]
+        var input = integer(usage["input_tokens"] ?? usage["inputTokens"] ?? envelope["input_tokens"])
+        var output = integer(usage["output_tokens"] ?? usage["outputTokens"] ?? envelope["output_tokens"])
+        var creation = integer(usage["cache_creation_input_tokens"] ?? usage["cacheCreationInputTokens"])
+        var cached = integer(usage["cache_read_input_tokens"] ?? usage["cacheReadInputTokens"])
+        if usage.isEmpty, let models = envelope["modelUsage"] as? [String: [String: Any]] {
+            for item in models.values {
+                input += integer(item["inputTokens"] ?? item["input_tokens"])
+                output += integer(item["outputTokens"] ?? item["output_tokens"])
+                creation += integer(item["cacheCreationInputTokens"] ?? item["cache_creation_input_tokens"])
+                cached += integer(item["cacheReadInputTokens"] ?? item["cache_read_input_tokens"])
             }
         }
-        let input = integer(usage["input_tokens"] ?? usage["inputTokens"] ?? envelope["input_tokens"])
-        let output = integer(usage["output_tokens"] ?? usage["outputTokens"] ?? envelope["output_tokens"])
-        let cost = number(envelope["total_cost_usd"] ?? usage["total_cost_usd"])
-        return AIUsage(inputTokens: input, outputTokens: output, costUSD: cost)
+        return AIUsage(inputTokens: input + creation + cached, outputTokens: output,
+                       costUSD: number(envelope["total_cost_usd"] ?? usage["total_cost_usd"]),
+                       cacheCreationInputTokens: creation, cacheReadInputTokens: cached)
     }
 
     static func effort(for kind: JobKind) -> String {
@@ -376,6 +478,7 @@ private final class CLIInvocation: @unchecked Sendable {
     private let errorLimit: Int
     private let timeout: TimeInterval
     private let onText: @Sendable (String) -> Void
+    private let onLine: @Sendable (Data) -> Void
     private var stdout = Data()
     private var stderr = Data()
     private var partialLine = Data()
@@ -396,12 +499,14 @@ private final class CLIInvocation: @unchecked Sendable {
          outputLimit: Int,
          errorLimit: Int,
          timeout: TimeInterval,
-         onText: @escaping @Sendable (String) -> Void) {
+         onText: @escaping @Sendable (String) -> Void,
+         onLine: @escaping @Sendable (Data) -> Void = { _ in }) {
         self.streaming = streaming
         self.outputLimit = outputLimit
         self.errorLimit = errorLimit
         self.timeout = timeout
         self.onText = onText
+        self.onLine = onLine
         process.executableURL = executableURL
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
@@ -527,6 +632,7 @@ private final class CLIInvocation: @unchecked Sendable {
     }
 
     private func emitTextDelta(from line: Data) {
+        onLine(line)
         guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               let type = message["type"] as? String else { return }
         let event = type == "stream_event" ? message["event"] as? [String: Any] : message

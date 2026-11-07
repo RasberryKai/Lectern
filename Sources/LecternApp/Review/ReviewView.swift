@@ -6,29 +6,19 @@ struct ReviewView: View {
     var focus: FocusState<EditorField?>.Binding
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                CardList(model: model)
-                    .frame(width: 280)
-                    .background(Theme.sidebar)
-                Rectangle().fill(Theme.border).frame(width: 1)
-                ScrollView {
-                    if let card = model.selectedCard {
-                        CardDetail(model: model, card: card, focus: focus)
-                            .padding(.horizontal, 28).padding(.vertical, 22)
-                    } else {
-                        emptyState.padding(40)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                if model.askVisible, let card = model.selectedCard {
-                    Rectangle().fill(Theme.border).frame(width: 1)
-                    SourcePane(model: model, card: card, focus: focus)
-                        .frame(width: 340)
-                        .background(Theme.surface)
-                }
+        LecturePanes(model: model) {
+            CardList(model: model)
+        } stage: {
+            ScrollView {
+                if let card = model.selectedCard {
+                    CardDetail(model: model, card: card, focus: focus)
+                        .frame(maxWidth: 760)
+                        .padding(.horizontal, 28).padding(.vertical, 24)
+                        .frame(maxWidth: .infinity)
+                } else { emptyState.padding(40) }
             }
-            VerdictBar(model: model)
+        } right: {
+            LectureSidePanel(model: model, focus: focus)
         }
     }
 
@@ -58,30 +48,27 @@ private struct CardList: View {
     @Bindable var model: LectureWindowModel
 
     private let filters: [(ReviewFilter, String)] = [
-        (.all, "All"), (.aiFlagged, "AI flagged"), (.proposals, "Proposals ready"), (.unreviewed, "Unreviewed"),
-        (.good, "Good"), (.needsAdjustment, "Needs adjustment"), (.bad, "Bad")
+        (.all, "All"), (.unreviewed, "To review"), (.aiFlagged, "From Claude"),
+        (.needsAdjustment, "Needs work"), (.bad, "Bad"), (.good, "Good"), (.proposals, "Proposals")
     ]
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 1) {
-                ForEach(filters, id: \.0) { filter, title in
-                    let active = model.reviewFilter == filter
-                    Button { model.setReviewFilter(filter) } label: {
-                        HStack {
-                            Text(title).font(.system(size: 13, weight: active ? .semibold : .regular))
-                            Spacer()
-                            Text("\(model.count(for: filter))").font(Theme.small).monospacedDigit().foregroundStyle(Theme.quiet)
-                        }
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(active ? Theme.surface : .clear, in: RoundedRectangle(cornerRadius: 7))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(Theme.faint)
+                    TextField("Search cards", text: $model.reviewSearch).textFieldStyle(.plain).font(Theme.body)
+                        .accessibilityLabel("Search cards")
                 }
-            }
-            .padding(12)
-            Rectangle().fill(Theme.border).frame(height: 1).padding(.horizontal, 12)
+                .padding(8).background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border))
+                ViewThatFits(in: .horizontal) {
+                    filterRows(columns: 3)
+                    filterRows(columns: 2)
+                    filterRows(columns: 1)
+                }
+            }.padding(10)
+            Divider().overlay(Theme.border)
             let numbers = model.cardNumbers
             ScrollViewReader { proxy in
                 ScrollView {
@@ -94,7 +81,7 @@ private struct CardList: View {
                                 .onTapGesture { model.selectCard(card.id) }
                         }
                     }
-                    .padding(12)
+                    .padding(6)
                 }
                 .onChange(of: model.selectedCardID) { _, id in
                     guard let id else { return }
@@ -103,6 +90,31 @@ private struct CardList: View {
             }
         }
     }
+    private func filterRows(columns: Int) -> some View {
+        let shown = filters.filter { $0.0 != .proposals || model.count(for: .proposals) > 0 }
+        return VStack(alignment: .leading, spacing: 5) {
+            ForEach(0..<((shown.count + columns - 1) / columns), id: \.self) { row in
+                HStack(spacing: 5) {
+                    ForEach(Array(shown.dropFirst(row * columns).prefix(columns)), id: \.0) { filter, title in
+                        let active = model.reviewFilter == filter
+                        Button { model.setReviewFilter(filter) } label: {
+                            HStack(spacing: 5) {
+                                if filter == .aiFlagged { Image(systemName: "sparkles").foregroundStyle(active ? Theme.canvas : Theme.ai) }
+                                Text(title)
+                                Text("\(model.count(for: filter))").fontWeight(.semibold)
+                            }
+                            .font(Theme.small).foregroundStyle(active ? Theme.canvas : Theme.quiet)
+                            .padding(.horizontal, 9).padding(.vertical, 3)
+                            .background(active ? Theme.ink : Theme.surface, in: Capsule())
+                            .overlay(Capsule().strokeBorder(active ? Theme.ink : Theme.border))
+                            .fixedSize()
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
 }
 
 private struct CardRow: View {
@@ -125,19 +137,13 @@ private struct CardRow: View {
         .contentShape(Rectangle())
     }
 
-    @ViewBuilder private var tag: some View {
-        if card.proposal != nil { Pill(text: "Proposal", tone: .ai) }
-        else if revising { Pill(text: "Revising", tone: .ai) }
-        else if issues { Pill(text: "Fix", tone: .bad) }
-        else if card.flag != nil && card.verdict == .unreviewed { Pill(text: "Flagged", tone: .amber) }
-        else {
-            switch card.verdict {
-            case .good: Pill(text: "Good", tone: .good)
-            case .needsAdjustment: Pill(text: "Adjust", tone: .amber)
-            case .bad: Pill(text: "Bad", tone: .bad)
-            case .unreviewed: Pill(text: "New", tone: .neutral)
-            }
+    private var tag: some View {
+        HStack(spacing: 5) {
+            if card.proposal != nil || card.flag != nil { Image(systemName: "sparkles").font(.system(size: 11)).foregroundStyle(Theme.ai) }
+            if revising { ProgressView().controlSize(.mini) }
+            else { Circle().fill(issues ? Theme.bad : card.verdict.v2Color).frame(width: 7, height: 7) }
         }
+        .accessibilityLabel(card.verdict.v2Title)
     }
 }
 
@@ -147,60 +153,51 @@ private struct CardDetail: View {
     @Bindable var model: LectureWindowModel
     let card: Card
     var focus: FocusState<EditorField?>.Binding
+    @State private var showSourcePicker = false
 
     var body: some View {
         let issues = model.lecture.issues(for: card)
-        VStack(alignment: .leading, spacing: 16) {
-            header
-            if let flag = card.flag {
-                Label("Claude flagged: \(flag)", systemImage: "flag")
-                    .font(Theme.small).foregroundStyle(Theme.amber)
-                    .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.amberWash, in: RoundedRectangle(cornerRadius: 8))
-            }
-            if !issues.isEmpty { issueList(issues) }
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 0) {
-                side("Front", text: $model.editorFront, field: .front, size: 18)
-                Rectangle().fill(Theme.border).frame(height: 1)
-                side("Back", text: $model.editorBack, field: .back, size: 16)
-                if model.lecture.pageCount > 0 { sources }
-                feedback
-            }
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            MathChoices(model: model, card: card)
-            if model.runningJobs.contains(where: { $0.kind == .revise && $0.targetCardID == card.id }) {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Claude is revising this card. Keep reviewing; the proposal appears here.").font(Theme.small).foregroundStyle(Theme.aiStrong)
+                if let flag = card.flag {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label { Text("**Claude flagged this card.** \(flag)") } icon: { Image(systemName: "sparkles") }
+                            .font(Theme.body).foregroundStyle(Theme.ai)
+                        HStack(spacing: 20) {
+                            Button("Fix it with Claude") { model.fixFlagWithClaude(cardID: card.id); focus.wrappedValue = .ask }
+                                .buttonStyle(LinkButtonStyle(color: Theme.ai))
+                            Button("Dismiss") { model.dismissFlag(cardID: card.id) }
+                                .buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                        }.disabled(model.readOnly)
+                    }
+                    .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.aiWash, in: RoundedRectangle(cornerRadius: 10)).padding(16)
                 }
-                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.aiWash, in: RoundedRectangle(cornerRadius: 10))
+                if !issues.isEmpty { issueList(issues).padding(12) }
+                side("Front", text: $model.editorFront, field: .front, size: 24)
+                Rectangle().fill(Theme.border).frame(height: 1)
+                side("Back", text: $model.editorBack, field: .back, size: 19)
+                if model.runningJobs.contains(where: { $0.kind == .revise && $0.targetCardID == card.id }) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Revising in the background…").font(Theme.small).foregroundStyle(Theme.ai)
+                    }.padding(16)
+                }
+                if let proposal = card.proposal { ProposalCard(model: model, card: card, proposal: proposal).padding(16) }
+                if (card.verdict == .needsAdjustment && card.proposal == nil) || focus.wrappedValue == .feedback { feedback }
+                if model.lecture.pageCount > 0 { sources }
+                VerdictBar(model: model, focus: focus)
             }
-            if let proposal = card.proposal { ProposalCard(model: model, card: card, proposal: proposal) }
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.border))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            MathChoices(model: model, card: card)
+            HStack(spacing: 12) {
+                Text("← → move").font(Theme.caption)
+                Button("U undo") { Task { await model.undo() } }.buttonStyle(.plain).disabled(!model.session.canUndo || model.readOnly)
+                Text("Click text to edit").font(Theme.caption)
+            }.font(Theme.small).foregroundStyle(Theme.faint).frame(maxWidth: .infinity)
             history
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text("Card \(model.cardNumbers[card.id] ?? 0)").font(Theme.serif(22))
-            Text(card.sourcePages.isEmpty ? "no source slide" : "from \(Format.slides(card.sourcePages))")
-                .font(Theme.body).foregroundStyle(Theme.quiet)
-            verdictPill
-            if card.proposal != nil { Pill(text: card.proposalIsStale ? "Proposal on older text" : "Proposal ready", tone: .ai) }
-            if case .splitFrom = card.origin { Pill(text: "Split", tone: .neutral) }
-            Spacer()
-        }
-    }
-
-    @ViewBuilder private var verdictPill: some View {
-        switch card.verdict {
-        case .good: Pill(text: "Good", tone: .good)
-        case .bad: Pill(text: "Bad", tone: .bad)
-        case .needsAdjustment: Pill(text: "Needs adjustment", tone: .amber)
-        case .unreviewed: Pill(text: "Unreviewed", tone: .neutral)
         }
     }
 
@@ -226,10 +223,12 @@ private struct CardDetail: View {
     private func side(_ title: String, text: Binding<String>, field: EditorField, size: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).eyebrow()
-            TextEditor(text: text)
-                .font(.system(size: size))
-                .scrollContentBackground(.hidden)
-                .frame(minHeight: size * 3.2, maxHeight: 260)
+            TextField(title, text: text, axis: .vertical)
+                .font(field == .front ? Theme.serif(size, weight: .medium) : .system(size: size))
+                .lineSpacing(5)
+                .textFieldStyle(.plain)
+                .lineLimit(1...20)
+                .padding(.vertical, 4)
                 .focused(focus, equals: field)
                 .disabled(model.readOnly)
                 .onChange(of: text.wrappedValue) { _, _ in
@@ -237,37 +236,53 @@ private struct CardDetail: View {
                 }
             MathPreviewView(text: text.wrappedValue)
         }
-        .padding(.horizontal, 22).padding(.vertical, 16)
+        .padding(.horizontal, 26).padding(.vertical, 20)
     }
 
     private var sources: some View {
         HStack(spacing: 8) {
-            Text("Source slides").eyebrow()
-            TextField("e.g. 8, 9", text: $model.editorSources)
-                .textFieldStyle(.roundedBorder).frame(width: 140)
-                .focused(focus, equals: .sources)
-                .disabled(model.readOnly)
-                .onChange(of: model.editorSources) { _, _ in
-                    if focus.wrappedValue == .sources { model.editorChanged() }
+            Text("From").foregroundStyle(Theme.quiet)
+            ForEach(card.sourcePages, id: \.self) { page in
+                HStack(spacing: 5) {
+                    Button("Slide \(page)") { model.enlargedPage = page }.buttonStyle(.plain)
+                    Button {
+                        model.editorSources = card.sourcePages.filter { $0 != page }.map(String.init).joined(separator: ", ")
+                        model.editorChanged()
+                    } label: { Image(systemName: "xmark").font(.system(size: 9)).foregroundStyle(Theme.faint) }
+                    .buttonStyle(.plain).disabled(model.readOnly).accessibilityLabel("Remove slide \(page) source")
                 }
-            Text("One-based slide numbers from the original PDF.").font(Theme.caption).foregroundStyle(Theme.faint)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Theme.border))
+            }
+            Button("add") { showSourcePicker = true }.buttonStyle(LinkButtonStyle(color: Theme.quiet)).disabled(model.readOnly)
+                .popover(isPresented: $showSourcePicker) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Source slides").fontWeight(.semibold)
+                        TextField("e.g. 1, 2", text: $model.editorSources).textFieldStyle(.roundedBorder)
+                            .onChange(of: model.editorSources) { _, _ in model.editorChanged() }
+                        Button("Done") { showSourcePicker = false }.buttonStyle(PrimaryButtonStyle())
+                    }.padding(16).frame(width: 220)
+                }
             Spacer()
+            Text(card.history.count > 1 ? "Edited" : "As generated").foregroundStyle(Theme.quiet)
         }
-        .padding(.horizontal, 22).padding(.bottom, 12)
+        .font(Theme.small).padding(.horizontal, 26).padding(.vertical, 10)
+        .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
     private var feedback: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("Your feedback:").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.amber)
-                TextField("What should change? ⌘↩ sends it to Claude; Esc keeps it as a note.", text: $model.feedbackDraft, axis: .vertical)
+                TextField("What should change? Enter sends · Shift+Enter for a new line.", text: $model.feedbackDraft, axis: .vertical)
                     .textFieldStyle(.plain).font(Theme.small).lineLimit(1...6)
                     .focused(focus, equals: .feedback)
                     .disabled(model.readOnly)
             }
             if !model.feedbackDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 HStack(spacing: 10) {
-                    Button("Send to Claude ⌘↩") { Task { await model.sendFeedback() } }
+                    Button("Send to Claude ↩") { Task { await model.sendFeedback() } }
                         .buttonStyle(SecondaryButtonStyle(foreground: Theme.aiStrong, stroke: Theme.ai))
                         .disabled(model.readOnly || card.proposal != nil)
                         .help(card.proposal != nil ? "Resolve the current proposal first." : "Claude rewrites the card; you keep reviewing.")
@@ -346,10 +361,10 @@ private struct ProposalCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text(proposal.cards.count > 1 ? "Revision proposal · split into \(proposal.cards.count) cards" : "Revision proposal")
+                Text(proposal.cards.count > 1 ? "Proposed change · split into \(proposal.cards.count) cards" : "Proposed change")
                     .font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.aiStrong)
                 Spacer()
-                Text(subtitle).font(Theme.small).foregroundStyle(Theme.quiet)
+
             }
             if card.proposalIsStale {
                 Label("You edited this card after asking. The diff compares with your current text.", systemImage: "clock.arrow.circlepath")
@@ -382,25 +397,28 @@ private struct ProposalCard: View {
                 }
             }
             if !proposal.rationale.isEmpty {
-                Text("Why: \(proposal.rationale)").font(Theme.small).foregroundStyle(Theme.quiet)
+                Text(proposal.rationale).font(Theme.small).foregroundStyle(Theme.quiet)
             }
-            HStack(spacing: 10) {
-                if proposal.cards.count == 1 {
-                    Button("Accept and approve ⇧↩") { Task { await model.acceptProposal(approve: true) } }
-                        .buttonStyle(PrimaryButtonStyle(tint: Theme.aiStrong))
-                }
-                Button("Accept ↩") { Task { await model.acceptProposal(approve: false) } }
-                    .buttonStyle(SecondaryButtonStyle(foreground: Theme.aiStrong, stroke: Theme.ai))
-                if proposal.cards.count == 1 {
-                    Button("Edit first") { Task { await model.editProposalFirst() } }.buttonStyle(SecondaryButtonStyle())
-                }
-                Button("Discard X") { Task { await model.discardProposal() } }.buttonStyle(SecondaryButtonStyle())
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { proposalActions }
+                VStack(alignment: .leading, spacing: 8) { proposalActions }
             }
             .disabled(model.readOnly || proposal.state != .ready)
         }
         .padding(18)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.aiStrong, lineWidth: 2))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.ai, lineWidth: 1))
+    }
+
+    @ViewBuilder private var proposalActions: some View {
+        Button("Accept ↩") { Task { await model.acceptProposal(approve: false) } }
+            .buttonStyle(PrimaryButtonStyle())
+        if proposal.cards.count == 1 {
+            Button("Accept and mark Good") { Task { await model.acceptProposal(approve: true) } }
+                .buttonStyle(SecondaryButtonStyle())
+        }
+        Button("Discard") { Task { await model.discardProposal() } }
+            .buttonStyle(.plain).font(Theme.body).foregroundStyle(Theme.quiet)
     }
 
     private var subtitle: String {
@@ -418,15 +436,30 @@ struct DiffText: View {
     let after: String
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(label).eyebrow()
-            Text(attributed).font(.system(size: 16)).lineSpacing(4).textSelection(.enabled)
-        }
+            if survivingFraction < 0.45 {
+                Text(before).strikethrough().foregroundStyle(Theme.diffRemovedText).textSelection(.enabled)
+                Text(after).foregroundStyle(Theme.diffAddedText).textSelection(.enabled)
+            } else { Text(attributed).textSelection(.enabled) }
+        }.font(.system(size: 14)).lineSpacing(4)
+    }
+
+    private var survivingFraction: Double {
+        let tokens = WordDiff.compare(before, after)
+        let total = tokens.filter { $0.kind != .inserted }.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
+        let surviving = tokens.filter { $0.kind == .unchanged }.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count }
+        return total == 0 ? 0 : Double(surviving) / Double(total)
     }
 
     private var attributed: AttributedString {
         var result = AttributedString()
+        var previousCharacter: Character?
         for token in WordDiff.compare(before, after) {
+            // LCS shares whitespace between replacements; separate adjacent old/new words visually.
+            if previousCharacter?.isWhitespace == false, token.text.first?.isWhitespace == false {
+                result.append(AttributedString(" "))
+            }
             var piece = AttributedString(token.text)
             switch token.kind {
             case .unchanged: break
@@ -440,6 +473,7 @@ struct DiffText: View {
                 piece.underlineStyle = Text.LineStyle.single
             }
             result.append(piece)
+            previousCharacter = token.text.last
         }
         return result
     }
@@ -447,92 +481,87 @@ struct DiffText: View {
 
 // MARK: - Source pane
 
-private struct SourcePane: View {
+struct ReviewSourcePane: View {
     @Bindable var model: LectureWindowModel
-    let card: Card
-    var focus: FocusState<EditorField?>.Binding
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Source").font(.system(size: 14, weight: .semibold))
-                    Spacer()
-                    if let page = currentPage {
-                        Button("Open in Prepare  G") { model.jumpToPrepare(page: page) }.buttonStyle(LinkButtonStyle())
-                    }
-                }
-                if card.sourcePages.isEmpty {
-                    Text(model.lecture.pageCount == 0
-                         ? "No source slides. This card came from the reviewer, so G, S and Ask are off."
-                         : "This card has no source slide yet. Add one under the card text.")
-                        .font(Theme.small).foregroundStyle(Theme.quiet)
-                } else {
+                if let card = model.selectedCard, !card.sourcePages.isEmpty {
+                    let index = min(model.sourceIndex, card.sourcePages.count - 1)
+                    let page = card.sourcePages[index]
                     let url = model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID)
-                    ForEach(Array(card.sourcePages.enumerated()), id: \.offset) { index, page in
-                        if (1...max(1, model.lecture.pageCount)).contains(page) && model.lecture.pageCount > 0 {
-                            VStack(alignment: .leading, spacing: 5) {
-                                SlideImage(sourceURL: url, pageIndex: page - 1, width: 300)
-                                    .overlay(RoundedRectangle(cornerRadius: 6)
-                                        .strokeBorder(index == model.sourceIndex ? Theme.ai : Theme.border, lineWidth: index == model.sourceIndex ? 2 : 1))
-                                    .onTapGesture { model.sourceIndex = index; model.enlargedPage = page }
-                                let note = model.noteText(for: page - 1).trimmingCharacters(in: .whitespacesAndNewlines)
-                                Text(note.isEmpty ? "Slide \(page)" : "Slide \(page) · note: “\(note)”")
-                                    .font(Theme.caption).foregroundStyle(Theme.quiet).lineLimit(3)
-                            }
-                        } else {
-                            Text("Slide \(page) isn't in this PDF. Fix the source number on the card.").font(Theme.small).foregroundStyle(Theme.bad)
+                    if page > 0 && page <= model.lecture.pageCount {
+                        SlideImage(sourceURL: url, pageIndex: page - 1, width: 900)
+                            .onTapGesture { model.enlargedPage = page }
+                        HStack {
+                            Text("Slide \(page)").font(Theme.body)
+                            Spacer()
+                            Button("Enlarge") { model.enlargedPage = page }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                            Button("Prepare") { model.jumpToPrepare(page: page) }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
                         }
-                    }
-                    if card.sourcePages.count > 1 {
-                        Text("S cycles sources · Space enlarges").font(Theme.caption).foregroundStyle(Theme.faint)
-                    }
-                }
-                Rectangle().fill(Theme.border).frame(height: 1)
-                AskPanel(model: model, page: currentPage ?? 0, cardID: card.id, focus: focus)
-                    .padding(-16)
-                    .padding(.top, 8)
-            }
-            .padding(18)
+                        if card.sourcePages.count > 1 {
+                            HStack {
+                                Button { model.sourceIndex = (index - 1 + card.sourcePages.count) % card.sourcePages.count } label: { Image(systemName: "chevron.left") }
+                                Text("\(index + 1) of \(card.sourcePages.count) sources · S cycles").font(Theme.caption).foregroundStyle(Theme.faint)
+                                Button { model.sourceIndex = (index + 1) % card.sourcePages.count } label: { Image(systemName: "chevron.right") }
+                            }.buttonStyle(.plain)
+                        }
+                        let note = model.noteText(for: page - 1)
+                        if !note.isEmpty { Text(note).font(Theme.body).foregroundStyle(Theme.quiet) }
+                    } else { Text("This source slide is unavailable. Update its number on the card.").font(Theme.body).foregroundStyle(Theme.bad) }
+                } else { Text("No source slides linked to this card.").font(Theme.body).foregroundStyle(Theme.quiet) }
+            }.padding(16)
         }
-    }
-
-    private var currentPage: Int? {
-        guard !card.sourcePages.isEmpty, model.lecture.pageCount > 0 else { return nil }
-        let page = card.sourcePages[min(model.sourceIndex, card.sourcePages.count - 1)]
-        return (1...model.lecture.pageCount).contains(page) ? page : nil
     }
 }
 
-// MARK: - Verdict bar
-
 private struct VerdictBar: View {
     let model: LectureWindowModel
+    var focus: FocusState<EditorField?>.Binding
 
     var body: some View {
-        let verdict = model.selectedCard?.verdict
-        HStack(spacing: 10) {
-            Button("← Previous") { model.stepCard(-1) }.buttonStyle(SecondaryButtonStyle())
-            verdictButton("Good 1", .good, Theme.good, Theme.goodWash, active: verdict == .good)
-            verdictButton("Bad 2", .bad, Theme.bad, Theme.badWash, active: verdict == .bad)
-            verdictButton("Needs adjustment 3", .needsAdjustment, Theme.amber, Theme.amberWash, active: verdict == .needsAdjustment)
-            Button("Next →") { model.stepCard(1) }.buttonStyle(SecondaryButtonStyle())
-            Spacer()
-            Text("S source · A ask · ⌘↩ send feedback to AI").font(Theme.small).foregroundStyle(Theme.quiet)
-            Button("Undo U") { Task { await model.undo() } }
-                .buttonStyle(SecondaryButtonStyle())
-                .disabled(!model.session.canUndo || model.readOnly)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 7) { pager; Spacer(minLength: 8); verdicts }
+            VStack(alignment: .leading, spacing: 10) { pager; verdicts }
         }
-        .padding(.horizontal, 22).padding(.vertical, 12)
-        .background(Theme.surface)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Theme.inset.opacity(0.5))
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
-        .disabled(model.selectedCard == nil)
     }
 
-    private func verdictButton(_ title: String, _ value: CardVerdict, _ text: Color, _ wash: Color, active: Bool) -> some View {
-        Button(title) { Task { await model.setVerdict(value) } }
-            .buttonStyle(SecondaryButtonStyle(foreground: text, stroke: active ? text : text.opacity(0.45), fill: wash))
-            .fontWeight(active ? .bold : .medium)
-            .disabled(model.readOnly)
+    private var pager: some View {
+        HStack(spacing: 10) {
+            Button { model.stepCard(-1) } label: { Image(systemName: "chevron.left") }.accessibilityLabel("Previous card")
+            Text("\(model.selectedCard.flatMap { model.cardNumbers[$0.id] } ?? 0) / \(model.activeCards.count)")
+                .font(Theme.small).monospacedDigit().foregroundStyle(Theme.quiet)
+            Button { model.stepCard(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next card")
+        }.fixedSize()
+    }
+
+    private var verdicts: some View {
+        HStack(spacing: 6) {
+            verdictButton("Bad", key: "2", value: .bad)
+            verdictButton("Needs work", key: "3", value: .needsAdjustment)
+            verdictButton("Good", key: "1", value: .good)
+        }.fixedSize()
+    }
+
+    private func verdictButton(_ title: String, key: String, value: CardVerdict) -> some View {
+        let active = model.selectedCard?.verdict == value
+        return Button {
+            Task { await model.setVerdict(value) }
+            if value == .needsAdjustment { focus.wrappedValue = .feedback }
+        } label: {
+            HStack(spacing: 6) {
+                Circle().fill(value.v2Color).frame(width: 7, height: 7)
+                Text(title).font(.system(size: 12.5, weight: active ? .semibold : .medium))
+                ShortcutKey(text: key)
+            }
+            .foregroundStyle(active ? value.v2Color : Theme.ink)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(active ? value.v2Color.opacity(0.1) : Theme.surface, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(active ? value.v2Color : Theme.borderStrong))
+        }.disabled(model.readOnly)
     }
 }
