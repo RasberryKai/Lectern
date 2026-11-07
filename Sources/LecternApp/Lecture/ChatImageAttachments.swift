@@ -12,13 +12,16 @@ nonisolated enum ChatImageInput: Sendable {
         let files = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
             .filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
         if !files.isEmpty { return files.map(Self.file) }
-        if let data = pasteboard.data(forType: .png) { return [.data(data, filename: "Pasted image.png")] }
-        if let data = pasteboard.data(forType: .tiff) { return [.data(data, filename: "Pasted image.tiff")] }
-        for type in pasteboard.types ?? [] {
-            guard let imageType = UTType(type.rawValue), imageType.conforms(to: .image),
-                  let data = pasteboard.data(forType: type) else { continue }
-            return [.data(data, filename: "Pasted image." + (imageType.preferredFilenameExtension ?? "png"))]
+        let images = (pasteboard.pasteboardItems ?? []).compactMap { item -> ChatImageInput? in
+            // Read each item separately so a multi-image drop keeps every image.
+            for type in [.png, .tiff] + item.types {
+                guard let imageType = UTType(type.rawValue), imageType.conforms(to: .image),
+                      let data = item.data(forType: type) else { continue }
+                return .data(data, filename: "Image." + (imageType.preferredFilenameExtension ?? "png"))
+            }
+            return nil
         }
+        if !images.isEmpty { return images }
         if let image = pasteboard.readObjects(forClasses: [NSImage.self])?.first as? NSImage,
            let data = image.tiffRepresentation { return [.data(data, filename: "Pasted image.tiff")] }
         return []
@@ -72,7 +75,7 @@ extension LectureWindowModel {
         guard !readOnly, !isImportingChatImages, !isStartingChat else { return }
         let panel = NSOpenPanel()
         panel.title = "Attach images"
-        panel.message = "Up to 4 images per message, 10 MiB total."
+        panel.message = "Any number of images, up to 5 MiB each and 10 MiB total after resizing."
         panel.prompt = "Attach"
         panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = true
@@ -80,75 +83,27 @@ extension LectureWindowModel {
         if panel.runModal() == .OK { Task { await importChatImages(panel.urls.map(ChatImageInput.file)) } }
     }
 
-    func importChatImages(_ inputs: [ChatImageInput]) async {
-        guard !inputs.isEmpty else { return }
-        _ = await prepareChatImages(count: inputs.count) { inputs }
-    }
-
-    func importChatImageProviders(_ providers: [NSItemProvider]) async -> Bool {
-        await prepareChatImages(count: providers.count) {
-            var images: [ChatImageInput] = []
-            for provider in providers {
-                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                    let data = try await Self.imageDropData(provider, type: UTType.fileURL.identifier)
-                    guard let url = URL(dataRepresentation: data, relativeTo: nil), url.isFileURL else {
-                        throw LibraryError.invalid("This dropped image file couldn’t be opened.")
-                    }
-                    images.append(.file(url))
-                } else if let type = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) {
-                    let data = try await Self.imageDropFileData(provider, type: type)
-                    let name = provider.suggestedName ?? "Dropped image.\(UTType(type)?.preferredFilenameExtension ?? "png")"
-                    images.append(.data(data, filename: name))
-                } else { throw LibraryError.invalid("Drop image files to attach them to chat.") }
-            }
-            return images
-        }
-    }
-
-    private static func imageDropData(_ provider: NSItemProvider, type: String) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            provider.loadDataRepresentation(forTypeIdentifier: type) { data, error in
-                if let data, data.count <= 25 * 1_024 * 1_024 { continuation.resume(returning: data) }
-                else if data != nil { continuation.resume(throwing: LibraryError.invalid("Choose an image smaller than 25 MB.")) }
-                else { continuation.resume(throwing: error ?? LibraryError.invalid("This dropped image couldn’t be loaded.")) }
-            }
-        }
-    }
-
-    private static func imageDropFileData(_ provider: NSItemProvider, type: String) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            provider.loadFileRepresentation(forTypeIdentifier: type) { url, error in
-                do {
-                    guard let url else { throw error ?? LibraryError.invalid("This dropped image couldn’t be loaded.") }
-                    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                    guard size <= 25 * 1_024 * 1_024 else { throw LibraryError.invalid("Choose an image smaller than 25 MB.") }
-                    // Item-provider temporary files are valid only inside this callback.
-                    let data = try Data(contentsOf: url, options: .mappedIfSafe)
-                    guard data.count <= 25 * 1_024 * 1_024 else { throw LibraryError.invalid("Choose an image smaller than 25 MB.") }
-                    continuation.resume(returning: data)
-                } catch { continuation.resume(throwing: error) }
-            }
-        }
-    }
-
-    private func prepareChatImages(count: Int, _ load: () async throws -> [ChatImageInput]) async -> Bool {
-        guard canAttachChatImages else { return false }
-        guard count > 0, chatDraftAttachments.count + count <= ChatAttachment.maximumImageCount else {
-            chatAttachmentError = "Attach up to 4 images per message."
-            return false
-        }
+    @discardableResult
+    func importChatImages(_ inputs: [ChatImageInput]) async -> Bool {
+        guard canAttachChatImages, !inputs.isEmpty else { return false }
         let chatID = lecture.currentChat.id
         isImportingChatImages = true
         chatAttachmentError = nil
         chatDraftSaveTask?.cancel()
         defer { isImportingChatImages = false }
         do {
-            let inputs = try await load()
-            guard lecture.currentChat.id == chatID, !isClosing else { return false }
-            guard chatDraftAttachments.count + inputs.count <= ChatAttachment.maximumImageCount else {
-                throw LibraryError.invalid("Attach up to 4 images per message.")
-            }
-            let normalized = try await Task.detached(priority: .userInitiated) { try inputs.map { try $0.normalized() } }.value
+            let existingBytes = chatDraftAttachments.reduce(0) { $0 + $1.byteCount }
+            let normalized = try await Task.detached(priority: .userInitiated) {
+                var totalBytes = existingBytes
+                return try inputs.map { input in
+                    let image = try input.normalized()
+                    totalBytes += image.data.count
+                    guard totalBytes <= ChatAttachment.maximumSelectionBytes else {
+                        throw LibraryError.invalid("Attached images must total at most 10 MiB per message.")
+                    }
+                    return image
+                }
+            }.value
             guard lecture.currentChat.id == chatID, !isClosing else { return false }
             let totalBytes = chatDraftAttachments.reduce(0) { $0 + $1.byteCount } + normalized.reduce(0) { $0 + $1.data.count }
             guard totalBytes <= ChatAttachment.maximumSelectionBytes else { throw LibraryError.invalid("Attached images must total at most 10 MiB per message.") }

@@ -34,7 +34,7 @@ import Testing
         try ClaudeCLIProvider.parseChatStream(data, request: request, snapshot: request.chatSnapshot!, onEvent: { _ in })
     }
 
-    @Test func inlineFullDeckPlusActualImageReadSucceedsForExistingSnapshotFormat() throws {
+    @Test func compactInlineDeckPlusActualImageReadSucceeds() throws {
         let (request, image, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         // No new optional flag is needed: retry requests derive evidence from the frozen prompt.
         let frozen = try JSONDecoder().decode(AIRequest.self, from: JSONEncoder().encode(request))
@@ -51,6 +51,40 @@ import Testing
         request.prompt = "HISTORY:\n\(encoded)\nFROZEN ATTACHED CONTEXT:\n\nLOOKUP: frozen files"
         #expect(!ChatProviderContext(request: request, snapshot: request.chatSnapshot!).hasVerifiedInlineDeck)
         #expect(throws: AIError.self) { try parse(stream(request: request, paths: [image.relativePath]), request) }
+    }
+    @Test func legacyFullCardSnapshotStillRetriesWithoutRedundantDeckRead() throws {
+        var (request, image, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        var snapshot = request.chatSnapshot!
+        for index in snapshot.cards.indices {
+            let path = snapshot.cardPath(at: index)
+            snapshot.assetHashes?.removeValue(forKey: path)
+        }
+        snapshot.cardContextVersion = nil
+        for (index, card) in snapshot.cards.enumerated() {
+            let bytes = try JSONEncoder().encode(card)
+            let path = snapshot.cardPath(at: index)
+            try bytes.write(to: root.appendingPathComponent(path))
+            snapshot.assetHashes?[path] = PromptBuilder.hash(bytes)
+        }
+        request.chatSnapshot = snapshot
+        let legacyDeck = String(decoding: try JSONEncoder().encode(snapshot.cards), as: UTF8.self)
+        request.prompt = "\nFROZEN ATTACHED CONTEXT:\n\(legacyDeck)\nLOOKUP: frozen files"
+        let frozen = try JSONDecoder().decode(AIRequest.self, from: JSONEncoder().encode(request))
+        try ChatProviderContext(request: frozen, snapshot: frozen.chatSnapshot!).verifyAssets()
+        #expect(ChatProviderContext(request: frozen, snapshot: frozen.chatSnapshot!).hasVerifiedInlineDeck)
+        #expect(try parse(stream(request: frozen, paths: [image.relativePath]), frozen).read == [.allCards])
+    }
+    @Test func compactDeckRejectsAlteredAnswersNumberingAndMissingCards() throws {
+        var (request, image, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let expected = ChatCardContent.deck(request.chatSnapshot!.cards)
+        var changed = request.chatSnapshot!.cards
+        changed[0].back = "Tampered answer"
+        let reversed = ChatCardContent.deck(Array(request.chatSnapshot!.cards.reversed()))
+        for cards in [ChatCardContent.deck(changed), Array(expected.prefix(1)), reversed] {
+            request.prompt = "\nFROZEN ATTACHED CONTEXT:\n\(try ChatContextJSON.encode(cards))\nLOOKUP: frozen files"
+            #expect(!ChatProviderContext(request: request, snapshot: request.chatSnapshot!).hasVerifiedInlineDeck)
+            #expect(throws: AIError.self) { try parse(stream(request: request, paths: [image.relativePath]), request) }
+        }
     }
     @Test func tamperedOrPartialInlineDeckCannotSatisfyAllCards() throws {
         var (request, image, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
@@ -70,7 +104,8 @@ import Testing
     @Test func successfulIndividualReadsOfEveryCardSatisfyAllCards() throws {
         var (request, image, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         request.prompt = "\nFROZEN ATTACHED CONTEXT:\n\nLOOKUP: frozen files"
-        let cardFiles = request.chatSnapshot!.cards.map { "cards/\($0.id.uuidString).json" }
+        let snapshot = request.chatSnapshot!
+        let cardFiles = snapshot.cards.indices.map { snapshot.cardPath(at: $0) }
         let response = try parse(stream(request: request, paths: [image.relativePath] + cardFiles), request)
         #expect(response.read == request.chatSnapshot!.cards.map { .card($0.id) })
         #expect(!response.searchedLecture)

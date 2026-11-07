@@ -141,6 +141,8 @@ public struct ChatSlide: Codable, Equatable, Sendable {
     public init(page: Int, text: String, note: String, imagePath: String?) { self.page = page; self.text = text; self.note = note; self.imagePath = imagePath }
 }
 public struct ChatSnapshot: Codable, Equatable, Sendable {
+    /// Nil preserves the original model payload and asset paths for frozen retries.
+    public var cardContextVersion: Int? = nil
     /// SHA-256 digests of every frozen file. Nil on snapshots written before asset verification.
     public var assetHashes: [String: String]? = nil
     /// Upload metadata only; image bytes live in immutable, hash-verified job assets.

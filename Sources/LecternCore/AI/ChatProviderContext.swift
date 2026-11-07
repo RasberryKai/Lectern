@@ -8,7 +8,7 @@ struct ChatProviderContext {
     private func assetURL(_ relative: String) throws -> URL {
         let root = request.workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
         let url = root.appendingPathComponent(relative).standardizedFileURL
-        guard (snapshot.images ?? []).contains(where: { $0.relativePath == relative }) || relative == "cards.json" || snapshot.cards.contains(where: { relative == "cards/\($0.id.uuidString).json" }) || snapshot.slides.contains(where: {
+        guard (snapshot.images ?? []).contains(where: { $0.relativePath == relative }) || relative == "cards.json" || snapshot.cards.indices.contains(where: { relative == snapshot.cardPath(at: $0) }) || snapshot.slides.contains(where: {
             relative == String(format: "slides/%03d.png", $0.page) || relative == String(format: "slides/%03d.txt", $0.page)
         }), url.resolvingSymlinksInPath() == url,
               url.path.hasPrefix(root.path + "/"), FileManager.default.fileExists(atPath: url.path) else {
@@ -57,20 +57,24 @@ struct ChatProviderContext {
         }
     }
     func cards(_ ids: [UUID]) throws -> String {
-        let cards = try ids.map { id -> Card in
-            guard let card = snapshot.cards.first(where: { $0.id == id }) else { throw AIError.invalidResponse("Unknown card \(id).") }
-            return card
+        let payload = try ids.map { id -> ChatCardContent in
+            guard let index = snapshot.cards.firstIndex(where: { $0.id == id }) else { throw AIError.invalidResponse("Unknown card \(id).") }
+            return ChatCardContent(snapshot.cards[index], number: index + 1, includeEditIDs: true)
         }
-        let payload = try cards.map { card -> [String: Any] in
-            var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(card)) as! [String: Any]
-            object["cardID"] = card.id.uuidString
-            object["baseRevisionID"] = card.currentRevisionID?.uuidString
-            return object
+        return try ChatContextJSON.encode(payload)
+    }
+    func cardIDs(_ references: [String]) throws -> [UUID] {
+        try references.map { reference in
+            if let id = UUID(uuidString: reference), snapshot.cards.contains(where: { $0.id == id }) { return id }
+            if reference.hasPrefix("C"), let number = Int(reference.dropFirst()),
+               number > 0, number <= snapshot.cards.count, reference == "C\(number)" {
+                return snapshot.cards[number - 1].id
+            }
+            throw AIError.invalidResponse("Unknown card \(reference). Use a displayed reference such as C12 or a frozen card UUID.")
         }
-        return String(decoding: try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]), as: UTF8.self)
     }
     var allowedFiles: [String] {
-        (snapshot.images ?? []).map(\.relativePath) + ["cards.json"] + snapshot.cards.map { "cards/\($0.id.uuidString).json" } + snapshot.slides.flatMap { [String(format: "slides/%03d.png", $0.page), String(format: "slides/%03d.txt", $0.page)] }
+        (snapshot.images ?? []).map(\.relativePath) + ["cards.json"] + snapshot.cards.indices.map { snapshot.cardPath(at: $0) } + snapshot.slides.flatMap { [String(format: "slides/%03d.png", $0.page), String(format: "slides/%03d.txt", $0.page)] }
     }
     func uploadedImages(_ ids: [UUID]) throws -> [[String: Any]] {
         try ids.flatMap { id -> [[String: Any]] in
@@ -87,13 +91,17 @@ struct ChatProviderContext {
         guard let start = request.prompt.range(of: "\nFROZEN ATTACHED CONTEXT:\n"),
               let end = request.prompt.range(of: "\nLOOKUP: ", options: .backwards), start.upperBound <= end.lowerBound else { return false }
         return request.prompt[start.upperBound..<end.lowerBound].split(separator: "\n").contains { line in
+            if snapshot.cardContextVersion == 1 {
+                guard let cards = try? JSONDecoder().decode([ChatCardContent].self, from: Data(line.utf8)) else { return false }
+                return cards == ChatCardContent.deck(snapshot.cards)
+            }
             guard let cards = try? JSONDecoder().decode([Card].self, from: Data(line.utf8)) else { return false }
             return cards == snapshot.cards
         }
     }
     func reference(for relative: String) -> ContextRef? {
         if relative == "cards.json" { return .allCards }
-        if relative.hasPrefix("cards/"), let id = UUID(uuidString: URL(fileURLWithPath: relative).deletingPathExtension().lastPathComponent), snapshot.cards.contains(where: { $0.id == id }) { return .card(id) }
+        if let index = snapshot.cards.indices.first(where: { snapshot.cardPath(at: $0) == relative }) { return .card(snapshot.cards[index].id) }
         if relative.hasPrefix("slides/"), let page = Int(URL(fileURLWithPath: relative).deletingPathExtension().lastPathComponent), snapshot.slides.contains(where: { $0.page == page }) { return .slide(page) }
         return nil
     }
@@ -114,7 +122,10 @@ struct ChatProviderContext {
             case .allSlides:
                 blocks.append(["type": "text", "text": snapshot.slides.map { "[S\($0.page)] \($0.text)\nNote: \($0.note)" }.joined(separator: "\n\n")]); record(ref)
             case .allCards:
-                blocks.append(["type": "text", "text": try cards(snapshot.cards.map(\.id))]); record(ref)
+                if !hasVerifiedInlineDeck {
+                    blocks.append(["type": "text", "text": try ChatContextJSON.encode(ChatCardContent.deck(snapshot.cards))])
+                }
+                record(ref)
             }
         }
         blocks += try uploadedImages((snapshot.images ?? []).filter(\.isCurrent).map { $0.attachment.id })

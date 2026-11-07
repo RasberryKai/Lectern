@@ -109,17 +109,26 @@ struct ChatImageProviderTests {
         let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
         bitmap.setColor(.red, atX: 0, y: 0)
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
-        let upload = try await store.importChatAttachment(moduleID: module.id, lectureID: lecture.id, data: png, filename: "diagram.png", mediaType: "image/png")
+        var uploads: [ChatAttachment] = []
+        for index in 0..<6 {
+            uploads.append(try await store.importChatAttachment(moduleID: module.id, lectureID: lecture.id, data: png, filename: "diagram-\(index).png", mediaType: "image/png"))
+        }
+        let upload = try #require(uploads.first)
         let provider = ImageCaptureProvider()
         let imageRunner = JobRunner(store: store, providers: [provider])
-        let first = try await imageRunner.chat(moduleID: module.id, lectureID: lecture.id, question: "", contextRefs: [], attachments: [upload])
+        let session = LectureSession(lecture: lecture, store: store, runner: imageRunner)
+        try await session.setChatDraft("", attachments: uploads)
+        #expect(try await store.loadLecture(moduleID: module.id, lectureID: lecture.id).currentChat.draftAttachments == uploads)
+        let first = try await imageRunner.chat(moduleID: module.id, lectureID: lecture.id, question: "", contextRefs: [], attachments: uploads)
         await imageRunner.waitUntilIdle()
         let persisted = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(persisted.currentChat.title == "Image question")
         #expect(persisted.currentChat.messages.first?.text == "")
-        #expect(persisted.currentChat.messages.first?.attachments == [upload])
+        #expect(persisted.currentChat.messages.first?.attachments == uploads)
         let requests = await provider.requests
         let original = try #require(requests.first)
+        #expect(original.chatSnapshot?.images?.count == 6)
+        #expect(try ChatProviderContext(request: original, snapshot: original.chatSnapshot!).initialContent().blocks.filter { $0["type"] as? String == "image" }.count == 6)
         let image = try #require(original.chatSnapshot?.images?.first)
         #expect(image.isCurrent); #expect(image.messageID == persisted.currentChat.messages.first?.id)
         #expect(original.prompt.contains("Describe and analyze")); #expect(!original.prompt.contains(png.base64EncodedString()))
@@ -132,6 +141,7 @@ struct ChatImageProviderTests {
         await imageRunner.waitUntilIdle()
         let afterFollowup = await provider.requests
         let frozen = try #require(afterFollowup.last)
+        #expect(frozen.chatSnapshot?.images?.count == 6)
         #expect(frozen.chatSnapshot?.images?.first?.isCurrent == false)
         #expect(frozen.chatSnapshot?.images?.first?.attachment.id == upload.id)
         #expect(frozen.chatSnapshot?.images?.first?.messageID == persisted.currentChat.messages.first?.id)

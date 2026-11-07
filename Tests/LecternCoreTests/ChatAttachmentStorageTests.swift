@@ -34,11 +34,10 @@ import Testing
         await #expect(throws: LibraryError.self) { try await attach(store, lecture, data: Data("not an image".utf8)) }
         await #expect(throws: LibraryError.self) { try await attach(store, lecture, data: Data(repeating: 1, count: ChatAttachment.maximumImageBytes + 1)) }
     }
-    @Test func selectionEnforcesCountIndividualAndCombinedLimits() throws {
+    @Test func selectionAllowsManyImagesWhileEnforcingIndividualAndCombinedLimits() throws {
         func metadata(_ size: Int) -> ChatAttachment { ChatAttachment(filename: "image.png", mediaType: "image/png", byteCount: size, sha256: String(repeating: "a", count: 64)) }
         try ChatAttachment.validateSelection([metadata(5 * 1_024 * 1_024), metadata(5 * 1_024 * 1_024)])
-        try ChatAttachment.validateSelection((0..<4).map { _ in metadata(1) })
-        #expect(throws: LibraryError.self) { try ChatAttachment.validateSelection((0..<5).map { _ in metadata(1) }) }
+        try ChatAttachment.validateSelection((0..<100).map { _ in metadata(1) })
         #expect(throws: LibraryError.self) { try ChatAttachment.validateSelection([metadata(5 * 1_024 * 1_024 + 1)]) }
         #expect(throws: LibraryError.self) { try ChatAttachment.validateSelection([metadata(5 * 1_024 * 1_024), metadata(5 * 1_024 * 1_024), metadata(1)]) }
         let duplicate = metadata(1)

@@ -54,7 +54,6 @@ public enum ChatEditDisposition: String, Codable, Sendable { case proposed, appl
 public struct ChatAttachment: Codable, Equatable, Identifiable, Sendable {
     public static let maximumImageBytes = 5 * 1_024 * 1_024
     public static let maximumSelectionBytes = 10 * 1_024 * 1_024
-    public static let maximumImageCount = 4
     public var id: UUID
     public var filename: String
     public var mediaType: String
@@ -65,7 +64,6 @@ public struct ChatAttachment: Codable, Equatable, Identifiable, Sendable {
         self.id = id; self.filename = filename; self.mediaType = mediaType; self.byteCount = byteCount; self.sha256 = sha256
     }
     public static func validateSelection(_ attachments: [ChatAttachment]) throws {
-        guard attachments.count <= maximumImageCount else { throw LibraryError.invalid("Attach at most 4 images per message.") }
         guard Set(attachments.map(\.id)).count == attachments.count else { throw LibraryError.invalid("An image is attached more than once.") }
         var total = 0
         for image in attachments {

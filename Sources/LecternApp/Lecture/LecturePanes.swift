@@ -2,7 +2,6 @@ import AppKit
 import LecternCore
 import Observation
 import SwiftUI
-import UniformTypeIdentifiers
 
 nonisolated enum LectureSideTab: String { case content, chat }
 
@@ -178,17 +177,17 @@ struct LectureSidePanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onDrop(of: model.canAttachChatImages ? [UTType.fileURL.identifier, UTType.image.identifier] : [], isTargeted: $imageDropTargeted) { providers in
-            guard model.canAttachChatImages, !providers.isEmpty else { return false }
-            imageDropTargeted = false
-            Task {
-                if await model.importChatImageProviders(providers) {
-                    model.panes.openChat(model.mode)
-                    focus.wrappedValue = .ask
+        .overlay {
+            ChatImageDropOverlay(enabled: model.canAttachChatImages, isTargeted: $imageDropTargeted) { images in
+                guard model.canAttachChatImages, !images.isEmpty else { return false }
+                Task {
+                    if await model.importChatImages(images) {
+                        model.panes.openChat(model.mode)
+                        focus.wrappedValue = .ask
+                    }
                 }
+                return true
             }
-            return true
         }
         .overlay {
             if imageDropTargeted && model.canAttachChatImages {

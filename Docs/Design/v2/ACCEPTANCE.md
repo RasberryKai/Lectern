@@ -28,12 +28,12 @@ Status is tracked in the final verification report; this matrix is not a claim t
 | Up/Down highlights and scrolls @ results; Enter/keypad Enter selects; Escape dismisses | Stable composer/native first-responder callbacks + picker | Native keyboard exercise, including zero matches |
 | All slides replaces specific slide pins; All cards replaces specific card pins | ChatContext.pin + visible automatic context | Three context-selection tests + native chip exercise |
 
-Images are normalized to PNG/JPEG with a maximum dimension of 2048 pixels. A message may contain four images, at most 5 MiB each and 10 MiB total. No image is sent before the user sends the message.
+Images are normalized to PNG/JPEG with a maximum dimension of 2048 pixels. There is no image-count limit per message; images are limited to 5 MiB each and 10 MiB total. No image is sent before the user sends the message.
 
 ## Inline-deck context and pane-wide image drop correction
 
 | Requirement | Implementation seam | Verification |
 | --- | --- | --- |
 | All cards plus uploaded images must not fail when the exact frozen deck was already supplied inline | ChatProviderContext.hasVerifiedInlineDeck + CLI context validation | Five regressions, including old frozen Retry format, missing/tampered data and failed image reads |
-| Whole right pane accepts image drops, including transcript, header and Cards/Source | LectureSidePanel.onDrop + shared NSItemProvider import | Native external-file drag exercise |
+| Whole right pane accepts image drops, including transcript, header and Cards/Source | LectureSidePanel native drop overlay + shared pasteboard image import | Native external-file drag exercise |
 | Compact drag cue appears on entry and disappears on exit/drop; normal text dragging remains available | Pane overlay + composer text-only drag registration | Native UI exercise + release build |

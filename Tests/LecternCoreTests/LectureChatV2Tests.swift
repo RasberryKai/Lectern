@@ -61,7 +61,7 @@ private actor V2Gate: AIProvider {
         #expect(session.lecture.canUndoChatEdits(jobID: session.lecture.jobs.last(where: { $0.kind == .chat })!.id))
         let requests = await provider.requests
         let directory = requests[0].workingDirectory
-        let oneCard = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("cards/\(lecture.cards[0].id.uuidString).json"))) as! [String: Any]
+        let oneCard = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("cards/C1.json"))) as! [String: Any]
         #expect(oneCard["cardID"] as? String == lecture.cards[0].id.uuidString); #expect(oneCard["baseRevisionID"] as? String == lecture.cards[0].currentRevisionID?.uuidString)
         #expect(requests[0].pdf == nil); #expect(requests[0].chatSnapshot?.initialRefs == [.allCards])
     }
@@ -146,7 +146,7 @@ private actor V2Gate: AIProvider {
         await runner.waitUntilIdle(); try await session.refresh()
         let before = session.lecture; let calls = await provider.requests.count
         let requests = await provider.requests
-        let cardFile = requests[0].workingDirectory.appendingPathComponent("cards/\(lecture.cards[0].id.uuidString).json")
+        let cardFile = requests[0].workingDirectory.appendingPathComponent("cards/C1.json")
         try Data("tampered context".utf8).write(to: cardFile)
         await #expect(throws: AIError.self) { try await session.retryChat(messageID: before.currentChat.messages.last!.id) }
         try await session.refresh()

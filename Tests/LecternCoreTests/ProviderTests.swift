@@ -374,7 +374,7 @@ struct ProviderTests {
         let editJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edit))
         let first = sseChat(blocks: [
             ["type": "tool_use", "id": "t1", "name": "read_slides", "input": ["pages": [7]]],
-            ["type": "tool_use", "id": "t2", "name": "get_cards", "input": ["ids": [card.id.uuidString]]],
+            ["type": "tool_use", "id": "t2", "name": "get_cards", "input": ["ids": ["C1"]]],
             ["type": "tool_use", "id": "t3", "name": "edit_cards", "input": ["edits": [editJSON]]]
         ], stop: "tool_use", input: 10, output: 3)
         let reply = #"{"message":"Look at [S7].","edits":[],"quiz":[]}"#
@@ -390,6 +390,8 @@ struct ProviderTests {
         let object = try JSONSerialization.jsonObject(with: body)
         let json = String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes]), as: UTF8.self)
         #expect(json.contains("image/png")); #expect(json.contains("tool_result")); #expect(!json.contains("application/pdf"))
+        #expect(json.contains(card.id.uuidString)); #expect(json.contains(card.currentRevisionID!.uuidString))
+        #expect(!json.contains("history"))
     }
 
     @Test(arguments: [false, true]) func messagesChatRereadingAttachedContextDoesNotClaimLectureSearch(allCards: Bool) async throws {

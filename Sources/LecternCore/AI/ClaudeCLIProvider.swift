@@ -151,7 +151,7 @@ public struct ClaudeCLIProvider: AIProvider {
             var required = snapshot.initialRefs.flatMap { ref -> [String] in
                 switch ref {
                 case .slide(let page): return [String(format: "slides/%03d.png", page), String(format: "slides/%03d.txt", page)]
-                case .card(let id): return ["cards/\(id.uuidString).json"] + (snapshot.cards.first(where: { $0.id == id })?.sourcePages.flatMap { [String(format: "slides/%03d.png", $0), String(format: "slides/%03d.txt", $0)] } ?? [])
+                case .card(let id): return [snapshot.cardPath(for: id)].compactMap { $0 } + (snapshot.cards.first(where: { $0.id == id })?.sourcePages.flatMap { [String(format: "slides/%03d.png", $0), String(format: "slides/%03d.txt", $0)] } ?? [])
                 case .allCards: return context.hasVerifiedInlineDeck ? [] : ["cards.json"]
                 case .allSlides: return snapshot.slides.map { String(format: "slides/%03d.txt", $0.page) }
                 }
@@ -159,8 +159,9 @@ public struct ClaudeCLIProvider: AIProvider {
             required += (snapshot.images ?? []).filter(\.isCurrent).map(\.relativePath)
             for path in context.allowedFiles { _ = try context.file(path) }
             let paths = required.map { root.appendingPathComponent($0).path }
+            let cardPath = snapshot.cardContextVersion == 1 ? "cards/C12.json (displayed card number)" : "cards/<UUID>.json"
             return request.prompt + "\n\nFROZEN CHAT FILES: Read only files in " + root.path +
-                ". Slides are slides/007.png and slides/007.txt (three-digit original page number); individual cards are cards/<UUID>.json and the full deck is cards.json. Read the full deck only when the question needs it or All cards is attached. Never read a PDF or any other filesystem location. Before answering, Read these attached context files: " +
+                ". Slides are slides/007.png and slides/007.txt (three-digit original page number); individual cards are " + cardPath + " and the full deck is cards.json. Read the full deck only when the question needs it or All cards is attached. Never read a PDF or any other filesystem location. Before answering, Read these attached context files: " +
                 String(decoding: try JSONEncoder().encode(Array(Set(paths)).sorted()), as: UTF8.self) +
                 ". Look up other frozen slides/cards or indexed prior uploaded images only when needed. Return strict chat JSON including message, edits and quiz. Card edits are proposals in edits, using the frozen base revision ID."
         }
