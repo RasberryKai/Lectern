@@ -136,7 +136,8 @@ final class DomainReducerTests: XCTestCase {
         lecture.viewPreferences.selectedCardID = nil
         for kind in [JobKind.generate, .ask, .distil] {
             lecture.jobs = [Job(kind: kind, pages: [])]
-            XCTAssertThrowsError(try lecture.validated())
+            if kind == .generate { XCTAssertThrowsError(try lecture.validated()) }
+            else { XCTAssertNoThrow(try lecture.validated()) } // Chat may include flashcards without slides.
             lecture.jobs = [Job(kind: kind, pages: [0, 3])]
             XCTAssertThrowsError(try lecture.validated())
         }

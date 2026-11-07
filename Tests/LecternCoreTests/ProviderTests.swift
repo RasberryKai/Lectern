@@ -5,6 +5,24 @@ import Testing
 
 @Suite(.serialized)
 struct ProviderTests {
+    @Test func cliEnvironmentAddsPDFToolsToFinderPathWithoutChangingPrecedence() throws {
+        let environment = ClaudeCLIProvider.sanitizedEnvironment(inheriting: [
+            "PATH": "/custom/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "ANTHROPIC_API_KEY": "test-only-secret",
+            "CLAUDE_CODE_OAUTH_TOKEN": "test-only-token",
+            "HOME": "/test/home"
+        ])
+        #expect(environment["PATH"] == "/custom/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
+        #expect(environment["ANTHROPIC_API_KEY"] == nil)
+        #expect(environment["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
+        #expect(environment["HOME"] == "/test/home")
+        #expect(environment["CLAUDE_CODE_SAFE_MODE"] == "1")
+        for path in [nil, "", ":/opt/homebrew/bin:/opt/homebrew/bin:"] as [String?] {
+            let result = ClaudeCLIProvider.sanitizedEnvironment(inheriting: path.map { ["PATH": $0] } ?? [:])
+            #expect(result["PATH"] == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        }
+    }
+
     @Test func cliUsesPrivateStdinAndParsesStructuredEnvelope() async throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -227,6 +245,26 @@ struct ProviderTests {
         #expect(cards["minItems"] == nil)
         #expect(MessagesAPIProvider.effort(for: .generate) == "high")
         #expect(MessagesAPIProvider.effort(for: .distil) == "low")
+    }
+
+    @Test func chatUsesStructuredNonStreamingPayloadInBothProviders() throws {
+        let prompt = "TASK: chat\n\nSTUDENT QUESTION:\n\"Edit the supplied card\""
+        let request = try MessagesAPIProvider.makeURLRequest(prompt: prompt, kind: .chat, pdf: nil,
+            apiKey: "test-only-key", model: "claude-opus-5-5", apiVersion: "2026-10-21",
+            endpoint: URL(string: "https://api.example.test/v1/messages")!, maxOutputTokens: 128_000)
+        let bodyData = try #require(request.httpBody)
+        let body = try #require(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        #expect(body["stream"] as? Bool == false)
+        #expect(body["max_tokens"] as? Int == 32_768)
+        #expect((body["output_config"] as? [String: Any])?["format"] != nil)
+        #expect(MessagesAPIProvider.effort(for: .chat) == "medium")
+
+        let cli = try ClaudeCLIProvider.arguments(for: AIRequest(jobID: UUID(), kind: .chat,
+            model: "opus", prompt: prompt, pdf: nil, workingDirectory: URL(fileURLWithPath: "/tmp/chat")),
+            model: "opus", pdfURL: nil)
+        #expect(cli.contains("--json-schema"))
+        #expect(!cli.contains("stream-json"))
+        #expect(ClaudeCLIProvider.effort(for: .chat) == "medium")
     }
 
     @Test func messagesRejectsRefusalsAndTruncatedResponses() {

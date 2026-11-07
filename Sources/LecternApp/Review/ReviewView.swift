@@ -488,12 +488,10 @@ private struct SourcePane: View {
                         Text("S cycles sources · Space enlarges").font(Theme.caption).foregroundStyle(Theme.faint)
                     }
                 }
-                if let page = card.sourcePages.first, model.lecture.pageCount > 0, (1...model.lecture.pageCount).contains(page) {
-                    Rectangle().fill(Theme.border).frame(height: 1)
-                    AskPanel(model: model, page: page, cardID: card.id, focus: focus)
-                        .padding(-16)
-                        .padding(.top, 8)
-                }
+                Rectangle().fill(Theme.border).frame(height: 1)
+                AskPanel(model: model, page: currentPage ?? 0, cardID: card.id, focus: focus)
+                    .padding(-16)
+                    .padding(.top, 8)
             }
             .padding(18)
         }
@@ -501,7 +499,8 @@ private struct SourcePane: View {
 
     private var currentPage: Int? {
         guard !card.sourcePages.isEmpty, model.lecture.pageCount > 0 else { return nil }
-        return card.sourcePages[min(model.sourceIndex, card.sourcePages.count - 1)]
+        let page = card.sourcePages[min(model.sourceIndex, card.sourcePages.count - 1)]
+        return (1...model.lecture.pageCount).contains(page) ? page : nil
     }
 }
 

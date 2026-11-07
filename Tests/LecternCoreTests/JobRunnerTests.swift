@@ -6,11 +6,13 @@ import Testing
 
 private actor GateProvider: AIProvider {
     nonisolated let backend = AIBackend.claudeCLI
+    var requests: [AIRequest] = []
     var calls = 0
     var maximum = 0
     var active = 0
     var released = false
     func execute(_ request: AIRequest, onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        requests.append(request)
         calls += 1; active += 1; maximum = max(maximum, active)
         defer { active -= 1 }
         while !released { try await Task.sleep(for: .milliseconds(5)) }
@@ -49,6 +51,124 @@ private actor RetriedAskProvider: AIProvider {
 }
 
 @Suite struct JobRunnerTests {
+    @Test(arguments: [ThreadContext.none, .slide, .lecture], [FlashcardContext.none, .all, .current])
+    func chatIncludesOnlySelectedSlideAndFlashcardContext(slides: ThreadContext, cards: FlashcardContext) async throws {
+        let (store, module, lecture, root) = try await setup()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let current = Card(sourcePages: [1], front: "CURRENT_FRONT_SENTINEL", back: "CURRENT_BACK_SENTINEL")
+        let other = Card(sourcePages: [2], front: "OTHER_FRONT_SENTINEL", back: "OTHER_BACK_SENTINEL")
+        let hidden = Card(sourcePages: [1], front: "HIDDEN_CARD_SENTINEL", back: "Superseded", supersededBy: [])
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.cards = [current, other, hidden]
+            $0.slides[0].note = "FIRST_NOTE_SENTINEL"
+            $0.slides[1].note = "SECOND_NOTE_SENTINEL"
+        }
+        let provider = FakeAIProvider(responses: [AIResponse(content: "Answer"), AIResponse(content: #"{"learningPoints":[]}"#)])
+        let runner = JobRunner(store: store, providers: [provider])
+        let id = try await runner.ask(moduleID: module.id, lectureID: lecture.id, anchorPage: 1,
+            context: slides, question: "Explain this context", cardID: current.id, flashcardContext: cards)
+        await runner.waitUntilIdle()
+        let requests = await provider.requests
+        let request = try #require(requests.first)
+        #expect(request.prompt.contains("CURRENT_FRONT_SENTINEL") == (cards != .none))
+        #expect(request.prompt.contains("CURRENT_BACK_SENTINEL") == (cards != .none))
+        #expect(request.prompt.contains("OTHER_FRONT_SENTINEL") == (cards == .all))
+        #expect(request.prompt.contains("OTHER_BACK_SENTINEL") == (cards == .all))
+        #expect(!request.prompt.contains("HIDDEN_CARD_SENTINEL"))
+        #expect(request.prompt.contains("FIRST_NOTE_SENTINEL") == (slides != .none))
+        #expect(request.prompt.contains("SECOND_NOTE_SENTINEL") == (slides == .lecture))
+        #expect((request.pdf == nil) == (slides == .none))
+        let directory = store.jobDirectory(moduleID: module.id, lectureID: lecture.id, jobID: id)
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("input.pdf").path) == (slides != .none))
+        #expect(requests.count == (slides == .none ? 1 : 2))
+        let result = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(result.jobs.first(where: { $0.id == id })?.state == .succeeded)
+        #expect(result.threads.first?.context == slides)
+        #expect(result.threads.first?.flashcardContext == cards)
+    }
+
+    @Test func flashcardChatWorksWithoutAnySourcePDF() async throws {
+        let (store, module, _, root) = try await setup()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let card = Card(front: "Imported front", back: "Imported back")
+        let lecture = try await store.createLecture(Lecture(moduleID: module.id, name: "Cards only", cards: [card]))
+        let provider = FakeAIProvider(responses: [AIResponse(content: "Answer")])
+        let runner = JobRunner(store: store, providers: [provider])
+        _ = try await runner.ask(moduleID: module.id, lectureID: lecture.id, anchorPage: 0,
+            context: .none, question: "Explain these cards", flashcardContext: .all)
+        await runner.waitUntilIdle()
+        let request = try #require(await provider.requests.first)
+        #expect(request.pdf == nil)
+        #expect(request.prompt.contains("Imported front"))
+        #expect(request.prompt.contains("Imported back"))
+        let result = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(result.jobs.last?.state == .succeeded)
+        #expect(result.threads.first?.anchorPage == 0)
+    }
+
+    @Test func replacementGeneratesFromAllSelectedSlidesAndReplacesReviewOnlyOnSuccess() async throws {
+        let (store, module, lecture, root) = try await setup()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = Card(sourcePages: [1], front: "Old approved card", back: "Old answer", verdict: .good)
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.cards = [old, Card(sourcePages: [2], front: "Old edited card", back: "Edited answer")]
+            $0.skippedSlides = [SkippedSlide(slide: 2, reason: "Old skip")]
+            $0.viewPreferences.selectedCardID = old.id
+        }
+        let other = try await store.importPDF(from: root.appendingPathComponent("test.pdf"), moduleID: module.id)
+        let otherCard = Card(sourcePages: [1], front: "Other lecture card", back: "Keep")
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: other.id) { $0.cards = [otherCard] }
+        let savedOther = try await store.loadLecture(moduleID: module.id, lectureID: other.id)
+        let provider = GateProvider()
+        let runner = JobRunner(store: store, providers: [provider])
+        let id = try await runner.generate(moduleID: module.id, lectureID: lecture.id,
+            additionalInstructions: "Cover every vocabulary entry. Prefer definitions.", replaceExistingCards: true)
+        for _ in 0..<100 { if await provider.count() > 0 { break }; try await Task.sleep(for: .milliseconds(5)) }
+        let pending = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(pending.cards.count == 2)
+        #expect(pending.jobs.last?.pages == [1, 2])
+        let request = try #require(await provider.requests.first)
+        #expect(request.prompt.contains("Cover every vocabulary entry. Prefer definitions."))
+        #expect(request.prompt.contains("Other lecture card"))
+        #expect(!request.prompt.contains("Old approved card"))
+        #expect(!request.prompt.contains("Old edited card"))
+        await provider.release()
+        await runner.waitUntilIdle()
+        let result = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        var controller = LectureController(lecture: pending)
+        try controller.receive(result)
+        #expect(controller.lecture.cards == result.cards)
+        #expect(result.cards.map(\.front) == ["Why?"])
+        #expect(result.cards.first?.origin == .generated(jobID: id))
+        #expect(result.viewPreferences.selectedCardID == nil)
+        #expect(!result.skippedSlides.contains { $0.reason == "Old skip" })
+        #expect(try await store.loadLecture(moduleID: module.id, lectureID: other.id).cards == savedOther.cards)
+    }
+
+    @Test func failedReplacementKeepsCardsAndRetryRetainsReplacementBehavior() async throws {
+        let (store, module, lecture, root) = try await setup()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let old = Card(sourcePages: [1], front: "Keep until success", back: "Original")
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { $0.cards = [old] }
+        let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        let provider = FakeAIProvider(responses: [AIResponse(content: "invalid JSON"),
+            AIResponse(content: #"{"cards":[{"front":"Replacement","back":"New","sourceSlides":[1],"flag":null}],"skipped":[]}"#)])
+        let runner = JobRunner(store: store, providers: [provider])
+        let id = try await runner.generate(moduleID: module.id, lectureID: lecture.id,
+            additionalInstructions: "My retry instructions", replaceExistingCards: true)
+        await runner.waitUntilIdle()
+        let failed = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(failed.cards == saved.cards)
+        #expect(failed.jobs.last?.state == .failed)
+        let restarted = JobRunner(store: store, providers: [provider])
+        try await restarted.retry(moduleID: module.id, lectureID: lecture.id, jobID: id)
+        await restarted.waitUntilIdle()
+        let result = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(result.cards.map(\.front) == ["Replacement"])
+        #expect(result.jobs.last?.state == .succeeded)
+        #expect(await provider.requests.last?.prompt.contains("My retry instructions") == true)
+    }
+
     private func setup() async throws -> (LibraryStore, Module, Lecture, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-job-tests-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

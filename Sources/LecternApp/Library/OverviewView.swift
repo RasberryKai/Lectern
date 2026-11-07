@@ -46,7 +46,7 @@ struct OverviewView: View {
 
     private func totals(_ totals: ProgressTotals) -> some View {
         HStack(spacing: 14) {
-            tile("\(totals.doneLectureCount) / \(totals.plannedLectureCount)", "Lectures done", "Selected slides carded, reviewed, exported")
+            tile("\(totals.doneLectureCount) / \(totals.plannedLectureCount)", "Lectures done", "Completed automatically or manually")
             tile("\(totals.reviewCardCount)", "Cards to review",
                  "In \(Format.count(totals.reviewLectureCount, "lecture"))\(totals.proposalCount > 0 ? ", \(Format.count(totals.proposalCount, "proposal")) waiting" : "")")
             tile("\(totals.readyExportCount)", "Ready to export",
@@ -78,7 +78,7 @@ struct OverviewView: View {
 
     private var footer: some View {
         HStack(spacing: 4) {
-            Text("A lecture is done when every selected slide has cards, every card is reviewed and the approved ones are exported. Archived modules don't appear here.")
+            Text("Right-click any lecture block to set its status, even without a PDF. Automatic completion tracks card generation, review and export.")
                 .foregroundStyle(Theme.quiet)
             if let first = model.dashboard?.modules.first {
                 Button("Module settings") { model.settingsModuleID = first.module.id }.buttonStyle(LinkButtonStyle())
@@ -106,7 +106,7 @@ struct ModuleProgressCard: View {
                 }
                 SlotStrip(slots: progress.slots) { slot in
                     if let lectureID = slot.lectureID {
-                        model.openLecture(LectureRef(moduleID: progress.module.id, lectureID: lectureID), mode: slot.status == .toReview ? .review : nil)
+                        model.openLecture(LectureRef(moduleID: progress.module.id, lectureID: lectureID), mode: progress.lectures.first { $0.lectureID == lectureID }?.automaticStatus == .toReview ? .review : nil)
                     } else {
                         model.selection = .module(progress.module.id)
                     }

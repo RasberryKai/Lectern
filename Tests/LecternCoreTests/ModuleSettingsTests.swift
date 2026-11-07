@@ -18,6 +18,7 @@ import Testing
         let data = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "name": "Legacy", "instructions": "Keep", "lectureIDs": ids.map(\.uuidString)])
         let module = try LibraryStore.decoder().decode(Module.self, from: data)
         #expect(module.plannedLectureCount == 2)
+        #expect(module.slotStatusOverrides.isEmpty)
         #expect(module.examDate == nil); #expect(!module.isArchived)
         #expect(module.lectureIDs == ids)
         let roundTrip = try LibraryStore.decoder().decode(Module.self, from: LibraryStore.encoder().encode(module))

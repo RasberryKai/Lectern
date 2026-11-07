@@ -7,6 +7,8 @@ public struct Module: Codable, Equatable, Identifiable, Sendable {
     public var instructions: String
     public var lectureIDs: [UUID]
     public var plannedLectureCount: Int
+    /// Manual statuses for empty, one-based planned slots. Imported lectures own their override.
+    public var slotStatusOverrides: [Int: LectureProgressStatus] = [:]
     public var examDate: ExamDate?
     public var archivedAt: Date?
     public var isArchived: Bool { archivedAt != nil }
@@ -14,7 +16,7 @@ public struct Module: Codable, Equatable, Identifiable, Sendable {
         self.id = id; self.name = name; self.instructions = instructions; self.lectureIDs = lectureIDs
         self.plannedLectureCount = plannedLectureCount ?? lectureIDs.count; self.examDate = examDate; self.archivedAt = archivedAt
     }
-    private enum CodingKeys: String, CodingKey { case id, name, instructions, lectureIDs, plannedLectureCount, examDate, archivedAt }
+    private enum CodingKeys: String, CodingKey { case id, name, instructions, lectureIDs, plannedLectureCount, slotStatusOverrides, examDate, archivedAt }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -22,9 +24,13 @@ public struct Module: Codable, Equatable, Identifiable, Sendable {
         instructions = try values.decode(String.self, forKey: .instructions)
         lectureIDs = try values.decode([UUID].self, forKey: .lectureIDs)
         plannedLectureCount = try values.decodeIfPresent(Int.self, forKey: .plannedLectureCount) ?? lectureIDs.count
+        slotStatusOverrides = try values.decodeIfPresent([Int: LectureProgressStatus].self, forKey: .slotStatusOverrides) ?? [:]
         examDate = try values.decodeIfPresent(ExamDate.self, forKey: .examDate)
         archivedAt = try values.decodeIfPresent(Date.self, forKey: .archivedAt)
         guard (0...Self.maximumPlannedLectureCount).contains(plannedLectureCount) else { throw DecodingError.dataCorruptedError(forKey: .plannedLectureCount, in: values, debugDescription: "Planned lecture count must be between 0 and \(Self.maximumPlannedLectureCount).") }
+        guard slotStatusOverrides.allSatisfy({ $0.key > 0 && $0.key <= plannedLectureCount && $0.value != .notImported }) else {
+            throw DecodingError.dataCorruptedError(forKey: .slotStatusOverrides, in: values, debugDescription: "Manual statuses must refer to planned slots. Use Automatic for Not imported.")
+        }
     }
 }
 public struct SlideState: Codable, Equatable, Identifiable, Sendable {
@@ -125,7 +131,8 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
     }
     public var canBeApproved: Bool { (!requiresSourcePages || !sourcePages.isEmpty) && sourcePages.allSatisfy { $0 > 0 && (allowedSourcePages?.contains($0) ?? true) } && issue == nil && !front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && [front, back].allSatisfy { (try? FlashcardMathFormatter.formatForAnki($0, interpretations: mathInterpretations)) != nil } }
 }
-public enum ThreadContext: Codable, Equatable, Sendable { case slide, neighbours(Int), lecture }
+public enum ThreadContext: Codable, Equatable, Hashable, Sendable { case none, slide, neighbours(Int), lecture }
+public enum FlashcardContext: String, Codable, CaseIterable, Sendable { case none, all, current }
 public enum MessageRole: String, Codable, Sendable { case user, assistant }
 public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
@@ -133,6 +140,7 @@ public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
     public var text: String
     public var citedPages: [Int]
     public var at: Date
+    public var editJobID: UUID? = nil
     public init(id: UUID = UUID(), role: MessageRole, text: String, citedPages: [Int] = [], at: Date = Date()) { self.id = id; self.role = role; self.text = text; self.citedPages = citedPages; self.at = at }
 }
 public struct LearningPoint: Codable, Equatable, Identifiable, Sendable {
@@ -147,11 +155,12 @@ public struct SlideThread: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var anchorPage: Int
     public var context: ThreadContext
+    public var flashcardContext: FlashcardContext? = nil
     public var messages: [ChatMessage]
     public var learningPoints: [LearningPoint]
     public init(id: UUID = UUID(), anchorPage: Int, context: ThreadContext = .neighbours(1), messages: [ChatMessage] = [], learningPoints: [LearningPoint] = []) { self.id = id; self.anchorPage = anchorPage; self.context = context; self.messages = messages; self.learningPoints = learningPoints }
 }
-public enum JobKind: String, Codable, CaseIterable, Sendable { case generate, revise, ask, distil }
+public enum JobKind: String, Codable, CaseIterable, Sendable { case generate, revise, ask, chat, distil }
 public enum JobState: String, Codable, Sendable { case running, succeeded, failed, cancelled, interrupted }
 public enum AIBackend: String, Codable, CaseIterable, Sendable { case claudeCLI, messagesAPI }
 public struct AIUsage: Codable, Equatable, Sendable {
@@ -161,6 +170,37 @@ public struct AIUsage: Codable, Equatable, Sendable {
     public var cacheCreationInputTokens: Int?
     public var cacheReadInputTokens: Int?
     public init(inputTokens: Int = 0, outputTokens: Int = 0, costUSD: Double? = nil, cacheCreationInputTokens: Int? = nil, cacheReadInputTokens: Int? = nil) { self.inputTokens = inputTokens; self.outputTokens = outputTokens; self.costUSD = costUSD; self.cacheCreationInputTokens = cacheCreationInputTokens; self.cacheReadInputTokens = cacheReadInputTokens }
+}
+public struct ChatCardVersion: Codable, Equatable, Sendable {
+    public var cardID: UUID
+    public var revisionID: UUID
+    public var verdict: CardVerdict? = nil
+    public var mathInterpretations: [String: MathInterpretation]? = nil
+    public init(cardID: UUID, revisionID: UUID, verdict: CardVerdict? = nil,
+                mathInterpretations: [String: MathInterpretation]? = nil) {
+        self.cardID = cardID; self.revisionID = revisionID
+        self.verdict = verdict; self.mathInterpretations = mathInterpretations
+    }
+    public func matches(_ card: Card) -> Bool {
+        card.id == cardID && !card.isSuperseded && card.currentRevisionID == revisionID &&
+            (verdict == nil || verdict == card.verdict) &&
+            (mathInterpretations == nil || mathInterpretations == card.mathInterpretations)
+    }
+}
+public struct ChatEditUndo: Codable, Equatable, Sendable {
+    public var cardID: UUID
+    public var appliedRevisionID: UUID
+    public var front: String
+    public var back: String
+    public var verdict: CardVerdict
+    public var mathInterpretations: [String: MathInterpretation]
+    public var appliedVerdict: CardVerdict? = nil
+    public var appliedMathInterpretations: [String: MathInterpretation]? = nil
+    public func matches(_ card: Card) -> Bool {
+        card.id == cardID && !card.isSuperseded && card.currentRevisionID == appliedRevisionID &&
+            card.verdict == (appliedVerdict ?? (verdict == .good ? .unreviewed : verdict)) &&
+            card.mathInterpretations == (appliedMathInterpretations ?? [:])
+    }
 }
 public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
@@ -179,6 +219,11 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var baseRevisionID: UUID?
     public var prompt: String
     public var model: String
+    /// Absent on older jobs, which keep their original additive behavior.
+    public var replacesExistingCards: Bool? = nil
+    public var chatCardVersions: [ChatCardVersion]? = nil
+    public var chatEditUndo: [ChatEditUndo]? = nil
+    public var chatEditsUndoneAt: Date? = nil
     public init(id: UUID = UUID(), kind: JobKind, pages: [Int], inputHash: String = "", rulesVersion: String = "1", backend: AIBackend = .claudeCLI, state: JobState = .running, error: String? = nil, usage: AIUsage? = nil, startedAt: Date = Date(), finishedAt: Date? = nil, targetCardID: UUID? = nil, threadID: UUID? = nil, baseRevisionID: UUID? = nil, prompt: String = "", model: String = "opus") {
         self.id = id; self.kind = kind; self.pages = pages; self.inputHash = inputHash; self.rulesVersion = rulesVersion; self.backend = backend; self.state = state; self.error = error; self.usage = usage; self.startedAt = startedAt; self.finishedAt = finishedAt; self.targetCardID = targetCardID; self.threadID = threadID; self.baseRevisionID = baseRevisionID; self.prompt = prompt; self.model = model
     }
@@ -205,6 +250,7 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
     public var skippedSlides: [SkippedSlide]
     public var archivedAt: Date?
     public var isArchived: Bool { archivedAt != nil }
+    public var progressOverride: LectureProgressStatus?
     public var viewPreferences: ViewPreferences
     public init(id: UUID = UUID(), moduleID: UUID, name: String, sourceFilename: String = "", pageCount: Int = 0, createdAt: Date = Date(), updatedAt: Date? = nil, slides: [SlideState]? = nil, cards: [Card] = [], threads: [SlideThread] = [], jobs: [Job] = [], skippedSlides: [SkippedSlide] = [], viewPreferences: ViewPreferences = .default, schemaVersion: Int = 1) {
         self.schemaVersion = schemaVersion; self.id = id; self.moduleID = moduleID; self.name = name; self.sourceFilename = sourceFilename; self.pageCount = pageCount; self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt; self.slides = slides ?? (0..<max(0, pageCount)).map { SlideState(pageIndex: $0) }; self.cards = cards; self.threads = threads; self.jobs = jobs; self.skippedSlides = skippedSlides; self.viewPreferences = viewPreferences

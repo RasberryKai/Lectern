@@ -51,7 +51,10 @@ private struct RunningJobRow: View {
                 if stage == "Queued" { Text("Waiting for a free slot").font(Theme.small).foregroundStyle(Theme.quiet) }
                 else if !Self.stages.contains(stage) { Text(stage).font(Theme.small).foregroundStyle(Theme.quiet) }
             }
-            Text("You can keep editing; the job uses a snapshot.").font(Theme.small).foregroundStyle(Theme.quiet).lineLimit(1)
+            Text(job.replacesExistingCards == true
+                 ? "Review cards will be replaced when generation succeeds."
+                 : "You can keep editing; the job uses a snapshot.")
+                .font(Theme.small).foregroundStyle(Theme.quiet).lineLimit(1)
             Spacer(minLength: 8)
             if let warning = model.progress(job.id)?.warning {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.amber).help(warning)
@@ -66,6 +69,7 @@ private struct RunningJobRow: View {
         case .revise:
             if let id = job.targetCardID, let number = model.cardNumbers[id] { "Revising card \(number)" } else { "Revising a card" }
         case .ask: "Answering on \(Format.slides(job.pages))"
+        case .chat: "Working on your chat request"
         case .distil: "Picking learning points"
         }
     }
@@ -105,27 +109,33 @@ struct GenerateSheet: View {
     @Environment(\.dismiss) private var dismiss
     let model: LectureWindowModel
 
-    @State private var regenerateAll = false
-    @State private var confirmRegenerate = false
+    @State private var additionalInstructions = ""
     @State private var rulesTitle = "Global rules"
     @State private var moduleCardCount = 0
     @State private var starting = false
 
     private var lecture: Lecture { model.lecture }
-    private var uncovered: [Int] { lecture.uncoveredSelectedPages }
     private var selected: [Int] { lecture.slides.filter(\.isSelected).map { $0.pageIndex + 1 } }
-    private var scope: [Int] { regenerateAll ? selected : uncovered }
+    private var scope: [Int] { selected }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Generate cards").font(Theme.serif(26))
 
+            Text("Generate from \(Format.count(selected.count, "selected slide")).")
+                .font(Theme.body)
+            if !lecture.cards.isEmpty {
+                Text("This replaces all \(model.activeCards.count) cards in Review when generation succeeds, including reviewed and edited cards.")
+                    .font(Theme.small).foregroundStyle(Theme.amber)
+            }
+
             VStack(alignment: .leading, spacing: 8) {
-                Text("Scope").font(.system(size: 13, weight: .semibold))
-                scopeOption(isOn: !regenerateAll, title: "Slides without cards (\(uncovered.count))",
-                            detail: "Recommended. Never duplicates cards you already have.") { regenerateAll = false }
-                scopeOption(isOn: regenerateAll, title: "All selected slides (\(selected.count))",
-                            detail: "Adds new cards next to the existing \(model.activeCards.filter { $0.verdict != .bad }.count). Asks to confirm.") { regenerateAll = true }
+                Text("Additional instructions (optional)").font(.system(size: 13, weight: .semibold))
+                TextField("What should these cards cover or do differently?", text: $additionalInstructions, axis: .vertical)
+                    .lineLimit(3...6)
+                    .textFieldStyle(.roundedBorder)
+                    .font(Theme.body)
+                    .accessibilityIdentifier("generationInstructions")
             }
 
             VStack(alignment: .leading, spacing: 7) {
@@ -134,7 +144,7 @@ struct GenerateSheet: View {
                 let instructions = app.module(model.ref.moduleID)?.instructions.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 bullet(instructions.isEmpty ? "No module instructions" : "Module instructions · \(model.moduleName)")
                 let notes = scope.filter { !(model.slide($0 - 1)?.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }.count
-                bullet("\(Format.count(notes, "slide note")), which take precedence")
+                bullet("\(Format.count(notes, "slide note"))")
                 let points = lecture.threads.flatMap(\.learningPoints).filter { $0.included && $0.pages.contains(where: { scope.contains($0) }) }
                 let pointSlides = Set(points.flatMap(\.pages)).intersection(scope).count
                 bullet("\(Format.count(points.count, "learning point")) from your questions on \(Format.count(pointSlides, "slide"))")
@@ -155,14 +165,14 @@ struct GenerateSheet: View {
             if scope.count > 100 {
                 ErrorBanner(message: "\(scope.count) slides is over the 100-slide limit per request. Deselect slides or generate in parts; Lectern doesn't split or truncate silently.")
             } else if scope.isEmpty {
-                Text(regenerateAll ? "No slides are selected." : "Every selected slide already has cards. Choose All selected slides to add more.")
+                Text("No slides are selected.")
                     .font(Theme.small).foregroundStyle(Theme.quiet)
             }
 
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
-                Button("Start ⌘↩") { start() }
+                Button("Generate ⌘↩") { Task { await run() } }
                     .buttonStyle(PrimaryButtonStyle())
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(scope.isEmpty || scope.count > 100 || starting || model.readOnly)
@@ -172,31 +182,6 @@ struct GenerateSheet: View {
         .frame(width: 540)
         .background(Theme.surface)
         .task { await loadContext() }
-        .alert("Add cards for all \(selected.count) selected slides?", isPresented: $confirmRegenerate) {
-            Button("Cancel", role: .cancel) {}
-            Button("Generate") { Task { await run() } }
-        } message: {
-            Text("Slides that already have cards will get more. Existing cards stay as they are.")
-        }
-    }
-
-    private func scopeOption(isOn: Bool, title: String, detail: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: isOn ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(isOn ? Theme.accent : Theme.faint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 13, weight: .semibold))
-                    Text(detail).font(Theme.small).foregroundStyle(Theme.quiet)
-                }
-                Spacer()
-            }
-            .padding(12)
-            .background(isOn ? Theme.goodWash : Theme.surface, in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(isOn ? Theme.accent : Theme.borderStrong, lineWidth: isOn ? 1.5 : 1))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     private func bullet(_ text: String) -> some View {
@@ -213,17 +198,13 @@ struct GenerateSheet: View {
             rulesTitle = "Global rules · \(heading ?? "rules.md")"
         }
         if let lectures = try? await app.store.lectures(in: model.ref.moduleID) {
-            moduleCardCount = lectures.flatMap(\.cards).filter { !$0.isSuperseded && $0.verdict != .bad }.count
+            moduleCardCount = lectures.filter { $0.id != lecture.id }.flatMap(\.cards).filter { !$0.isSuperseded && $0.verdict != .bad }.count
         }
-    }
-
-    private func start() {
-        if regenerateAll { confirmRegenerate = true } else { Task { await run() } }
     }
 
     private func run() async {
         starting = true
-        await model.generate(regenerateAll: regenerateAll)
+        await model.generate(additionalInstructions: additionalInstructions)
         starting = false
         if model.errorMessage == nil { dismiss() }
     }

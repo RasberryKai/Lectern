@@ -267,7 +267,7 @@ public struct ClaudeCLIProvider: AIProvider {
     static func effort(for kind: JobKind) -> String {
         switch kind {
         case .generate: "high"
-        case .revise, .ask: "medium"
+        case .revise, .ask, .chat: "medium"
         case .distil: "low"
         }
     }
@@ -292,8 +292,8 @@ public struct ClaudeCLIProvider: AIProvider {
         return path
     }
 
-    fileprivate static func sanitizedEnvironment() -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
+    static func sanitizedEnvironment(inheriting inherited: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var environment = inherited
         for key in Array(environment.keys) {
             if key.hasPrefix("ANTHROPIC_") || key.hasPrefix("CLAUDE_CODE_USE_") ||
                 key.hasPrefix("AWS_") || key.hasPrefix("GOOGLE_") ||
@@ -301,6 +301,14 @@ public struct ClaudeCLIProvider: AIProvider {
                 environment.removeValue(forKey: key)
             }
         }
+        // Finder-launched apps usually omit Homebrew from PATH. Claude's PDF
+        // reader invokes pdftoppm by name, even when Claude itself was located
+        // through an absolute path. Preserve configured precedence and add the
+        // standard Apple Silicon/Intel Homebrew and system tool directories.
+        let directories = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
+            + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        var seen = Set<String>()
+        environment["PATH"] = directories.filter { seen.insert($0).inserted }.joined(separator: ":")
         environment["CLAUDE_CODE_SAFE_MODE"] = "1"
         return environment
     }

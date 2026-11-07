@@ -48,9 +48,11 @@ public actor JobRunner {
 
     @discardableResult
     public func generate(moduleID: UUID, lectureID: UUID, backend: AIBackend = .claudeCLI,
-                         model: String = "opus", regenerateAll: Bool = false) async throws -> UUID {
+                         model: String = "opus", regenerateAll: Bool = false,
+                         additionalInstructions: String = "", replaceExistingCards: Bool = false) async throws -> UUID {
         try await enqueue(kind: .generate, moduleID: moduleID, lectureID: lectureID, backend: backend,
-                          model: model, regenerateAll: regenerateAll)
+                          model: model, regenerateAll: regenerateAll,
+                          additionalInstructions: additionalInstructions, replaceExistingCards: replaceExistingCards)
     }
     @discardableResult
     public func revise(moduleID: UUID, lectureID: UUID, cardID: UUID, feedback: String,
@@ -62,15 +64,26 @@ public actor JobRunner {
     @discardableResult
     public func ask(moduleID: UUID, lectureID: UUID, anchorPage: Int, context: ThreadContext = .neighbours(1),
                     question: String, cardID: UUID? = nil, backend: AIBackend = .claudeCLI,
-                    model: String = "opus") async throws -> UUID {
+                    model: String = "opus", flashcardContext: FlashcardContext? = nil) async throws -> UUID {
         guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AIError.configuration("Ask a question first.") }
         return try await enqueue(kind: .ask, moduleID: moduleID, lectureID: lectureID, backend: backend,
-                                 model: model, cardID: cardID, anchorPage: anchorPage, context: context, question: question)
+                                 model: model, cardID: cardID, anchorPage: anchorPage, context: context, question: question,
+                                 flashcardContext: flashcardContext)
     }
     @discardableResult
     public func distil(moduleID: UUID, lectureID: UUID, anchorPage: Int, backend: AIBackend = .claudeCLI,
                        model: String = "opus") async throws -> UUID {
         try await enqueue(kind: .distil, moduleID: moduleID, lectureID: lectureID, backend: backend, model: model, anchorPage: anchorPage)
+    }
+
+    @discardableResult
+    public func chat(moduleID: UUID, lectureID: UUID, anchorPage: Int, context: ThreadContext,
+                     question: String, cardID: UUID? = nil, backend: AIBackend = .claudeCLI,
+                     model: String = "opus", flashcardContext: FlashcardContext = .none) async throws -> UUID {
+        guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AIError.configuration("Ask a question first.") }
+        return try await enqueue(kind: .chat, moduleID: moduleID, lectureID: lectureID, backend: backend,
+            model: model, cardID: cardID, anchorPage: anchorPage, context: context, question: question,
+            flashcardContext: flashcardContext)
     }
 
     /// Learning points update existing cards via proposals; they never silently create duplicates.
@@ -107,7 +120,9 @@ public actor JobRunner {
 
     private func enqueue(kind: JobKind, moduleID: UUID, lectureID: UUID, backend: AIBackend, model: String,
                          regenerateAll: Bool = false, cardID: UUID? = nil, feedback: String = "",
-                         anchorPage: Int? = nil, context: ThreadContext = .neighbours(1), question: String = "") async throws -> UUID {
+                         anchorPage: Int? = nil, context: ThreadContext = .neighbours(1), question: String = "",
+                         additionalInstructions: String = "", replaceExistingCards: Bool = false,
+                         flashcardContext: FlashcardContext? = nil) async throws -> UUID {
         try Task.checkCancellation()
         try await store.assertModuleEditable(moduleID: moduleID)
         guard providers[backend] != nil else { throw AIError.configuration("No provider configured for \(backend.rawValue).") }
@@ -129,40 +144,68 @@ public actor JobRunner {
             guard let found = initial.cards.first(where: { $0.id == cardID && !$0.isSuperseded }) else { throw LectureError.missingCard(cardID) }
             card = found
         } else { card = nil }
-        let anchor = kind == .ask ? (card?.sourcePages.first ?? anchorPage) : anchorPage
+        let anchor = anchorPage
         var thread: SlideThread?
         var pages: [Int]
         switch kind {
         case .generate:
-            pages = regenerateAll ? initial.slides.filter(\.isSelected).map { $0.pageIndex + 1 } : initial.uncoveredSelectedPages
+            pages = regenerateAll || replaceExistingCards ? initial.slides.filter(\.isSelected).map { $0.pageIndex + 1 } : initial.uncoveredSelectedPages
             guard !pages.isEmpty else { throw AIError.configuration("No selected slides without cards. Choose Regenerate all explicitly to include covered slides.") }
         case .revise:
             guard let card, card.proposal == nil else { throw AIError.configuration("Resolve this card's existing proposal first.") }
             pages = card.sourcePages
-        case .ask, .distil:
-            guard let anchor, (1...max(1, initial.pageCount)).contains(anchor), initial.pageCount > 0 else { throw AIError.configuration("Ask needs a linked source slide.") }
+        case .ask, .chat, .distil:
+            guard let anchor, anchor == 0 || ((1...max(1, initial.pageCount)).contains(anchor) && initial.pageCount > 0) else { throw AIError.configuration("Choose a valid chat context.") }
             thread = initial.threads.first(where: { $0.anchorPage == anchor }) ?? SlideThread(anchorPage: anchor, context: context)
-            if kind == .ask { thread?.context = context }
+            if kind == .ask || kind == .chat {
+                thread?.context = context
+                thread?.flashcardContext = flashcardContext ?? (card == nil ? FlashcardContext.none : .current)
+            }
             guard let currentThread = thread else { throw AIError.configuration("Thread could not be prepared.") }
             switch currentThread.context {
-            case .slide: pages = [anchor]
+            case .none: pages = []
+            case .slide:
+                guard anchor > 0 else { throw AIError.configuration("No current slide is available. Choose No slide or Whole lecture.") }
+                pages = [anchor]
             case .neighbours(let distance):
                 guard distance >= 0 && distance <= 100 else { throw AIError.configuration("Neighbour range must be 0 to 100.") }
+                guard anchor > 0 && initial.pageCount > 0 else { throw AIError.configuration("No current slide is available. Choose No slide.") }
                 pages = Array(max(1, anchor - distance)...min(initial.pageCount, anchor + distance))
-            case .lecture: pages = Array(1...initial.pageCount)
+            case .lecture: pages = initial.pageCount > 0 ? Array(1...initial.pageCount) : []
             }
         }
         pages = Array(Set(pages)).sorted()
         guard pages.count <= 100 else { throw AIError.limit("v1 supports up to 100 slides per call. Reduce the selected context.") }
         guard pages.allSatisfy({ $0 > 0 && $0 <= initial.pageCount }) else { throw AIError.configuration("Repair invalid source slide links before sending this request.") }
         let allLectures = try await store.lectures(in: moduleID)
-        let fronts = allLectures.flatMap(\.cards).filter { $0.verdict != .bad && !$0.isSuperseded }.map(\.front)
+        let fronts = allLectures.filter { !replaceExistingCards || $0.id != lectureID }
+            .flatMap(\.cards).filter { $0.verdict != .bad && !$0.isSuperseded }.map(\.front)
         let rules = kind == .generate || kind == .revise ? try await store.loadRules() : ""
+        let contextCards: [Card]?
+        if kind == .ask || kind == .chat {
+            switch thread?.flashcardContext ?? .none {
+            case .none: contextCards = []
+            case .all: contextCards = initial.cards.filter { !$0.isSuperseded }
+            case .current:
+                guard card != nil else { throw AIError.configuration("Select a flashcard to use This flashcard.") }
+                contextCards = nil // Sent once through CURRENT CARD below.
+            }
+        } else { contextCards = nil }
         let prompt = try PromptBuilder.build(kind: kind, rules: rules, module: module, lecture: initial,
-                                             pages: pages, existingFronts: fronts, card: card, feedback: feedback,
-                                             thread: thread, question: question)
+                                             pages: pages, existingFronts: fronts,
+                                             card: (kind == .ask || kind == .chat) && thread?.flashcardContext != .current ? nil : card, feedback: feedback,
+                                             thread: thread, question: question, generationInstructions: additionalInstructions,
+                                             contextCards: contextCards)
         var job = Job(kind: kind, pages: pages, rulesVersion: PromptBuilder.hash(rules), backend: backend,
                       targetCardID: cardID, threadID: thread?.id, baseRevisionID: card?.currentRevisionID, prompt: prompt, model: resolvedModel)
+        job.replacesExistingCards = replaceExistingCards ? true : nil
+        if kind == .chat {
+            let editableCards = thread?.flashcardContext == .current ? card.map { [$0] } ?? [] : contextCards ?? []
+            job.chatCardVersions = editableCards.compactMap { card in
+                card.currentRevisionID.map { ChatCardVersion(cardID: card.id, revisionID: $0,
+                    verdict: card.verdict, mathInterpretations: card.mathInterpretations) }
+            }
+        }
         let directory = store.jobDirectory(moduleID: moduleID, lectureID: lectureID, jobID: job.id)
         var committed = false
         defer { if !committed { try? FileManager.default.removeItem(at: directory) } }
@@ -200,7 +243,7 @@ public actor JobRunner {
                     guard thread.id == frozenJob.threadID else { throw AIError.configuration("Thread changed while preparing. Try again.") }
                     thread.messages = current.messages; thread.learningPoints = current.learningPoints
                 }
-                if kind == .ask { thread.messages.append(ChatMessage(role: .user, text: question)) }
+                if kind == .ask || kind == .chat { thread.messages.append(ChatMessage(role: .user, text: question)) }
                 try LectureReducer.reduce(&lecture, action: .upsertThread(thread))
             }
             try LectureReducer.reduce(&lecture, action: .startJob(frozenJob))
@@ -280,7 +323,7 @@ public actor JobRunner {
     /// Cards/proposal/thread and succeeded state commit in the same atomic lecture write.
     private func land(_ work: Work, response: AIResponse) async throws -> Int? {
         let data = Data(response.content.utf8)
-        var generated: GeneratedCards?; var revised: RevisedCards?; var points: DistilledPoints?
+        var generated: GeneratedCards?; var revised: RevisedCards?; var points: DistilledPoints?; var chat: ChatReply?
         switch work.job.kind {
         case .generate: generated = try JSONDecoder().decode(GeneratedCards.self, from: data)
         case .revise:
@@ -290,8 +333,13 @@ public actor JobRunner {
             points = try JSONDecoder().decode(DistilledPoints.self, from: data)
             guard let points, points.learningPoints.count <= 3, points.learningPoints.allSatisfy({ !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0.pages.isEmpty && $0.pages.allSatisfy(work.job.pages.contains) }) else { throw AIError.invalidResponse("Invalid learning points or source slide references.") }
         case .ask: guard !response.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AIError.invalidResponse("Claude returned an empty answer.") }
+        case .chat:
+            chat = try JSONDecoder().decode(ChatReply.self, from: data)
+            guard let chat, !chat.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AIError.invalidResponse("Claude returned an empty chat message.")
+            }
         }
-        let frozenGenerated = generated, frozenRevised = revised, frozenPoints = points
+        let frozenGenerated = generated, frozenRevised = revised, frozenPoints = points, frozenChat = chat
         let result = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { lecture in
             guard let j = lecture.jobs.firstIndex(where: { $0.id == work.job.id }), lecture.jobs[j].state == .running else { throw LectureError.jobNotRunning(work.job.id) }
             switch work.job.kind {
@@ -304,15 +352,21 @@ public actor JobRunner {
             case .revise:
                 guard let output = frozenRevised else { throw AIError.invalidResponse("Missing revision payload.") }
                 try LectureReducer.reduce(&lecture, action: .landProposal(jobID: work.job.id, cards: output.cards.map(\.draft), rationale: output.rationale, usage: response.usage))
-            case .ask, .distil:
+            case .ask, .chat, .distil:
                 guard let t = lecture.threads.firstIndex(where: { $0.id == work.job.threadID }) else { throw AIError.invalidResponse("The slide thread no longer exists.") }
-                if work.job.kind == .ask {
-                    let expression = try NSRegularExpression(pattern: #"\[slide (\d+)\]"#, options: .caseInsensitive)
-                    let range = NSRange(response.content.startIndex..., in: response.content)
-                    let citations = expression.matches(in: response.content, range: range).compactMap { match -> Int? in
-                        guard let r = Range(match.range(at: 1), in: response.content), let p = Int(response.content[r]), work.job.pages.contains(p) else { return nil }; return p
+                if work.job.kind == .ask || work.job.kind == .chat {
+                    if let chat = frozenChat {
+                        try LectureReducer.reduce(&lecture, action: .applyChatEdits(jobID: work.job.id, edits: chat.edits))
                     }
-                    lecture.threads[t].messages.append(ChatMessage(role: .assistant, text: response.content, citedPages: Array(Set(citations)).sorted()))
+                    let text = frozenChat?.message ?? response.content
+                    let expression = try NSRegularExpression(pattern: #"\[slide (\d+)\]"#, options: .caseInsensitive)
+                    let range = NSRange(text.startIndex..., in: text)
+                    let citations = expression.matches(in: text, range: range).compactMap { match -> Int? in
+                        guard let r = Range(match.range(at: 1), in: text), let p = Int(text[r]), work.job.pages.contains(p) else { return nil }; return p
+                    }
+                    var message = ChatMessage(role: .assistant, text: text, citedPages: Array(Set(citations)).sorted())
+                    if lecture.jobs[j].chatEditUndo?.isEmpty == false { message.editJobID = work.job.id }
+                    lecture.threads[t].messages.append(message)
                 } else if let output = frozenPoints {
                     // Preserve user edits, exclusions and IDs across repeated distillation.
                     for point in output.learningPoints where !lecture.threads[t].learningPoints.contains(where: { $0.text == point.text && $0.pages == point.pages }) {
@@ -330,7 +384,8 @@ public actor JobRunner {
         if let output = generated, output.cards.isEmpty || output.cards.count > work.job.pages.count * 3 {
             emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"), warning: output.cards.isEmpty ? "No cards returned. Inspect skipped-slide reasons." : "More than 3 cards per slide on average. Review the scope and card quality.")
         }
-        return work.job.kind == .ask ? result.threads.first(where: { $0.id == work.job.threadID })?.anchorPage : nil
+        return (work.job.kind == .ask || (work.job.kind == .chat && chat?.edits.isEmpty == true)) && !work.job.pages.isEmpty
+            ? result.threads.first(where: { $0.id == work.job.threadID })?.anchorPage : nil
     }
 
     public func cancel(moduleID: UUID, lectureID: UUID, jobID: UUID) async throws {
@@ -355,6 +410,10 @@ public actor JobRunner {
         guard active[jobID] == nil, !pending.contains(where: { $0.job.id == jobID }) else { throw AIError.configuration("Job is still active.") }
         let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
         guard var job = lecture.jobs.first(where: { $0.id == jobID }), [.failed, .cancelled, .interrupted].contains(job.state) else { throw AIError.configuration("Only failed, cancelled or interrupted jobs can be retried.") }
+        if job.kind == .chat, let versions = job.chatCardVersions,
+           !versions.allSatisfy({ version in lecture.cards.contains { version.matches($0) } }) {
+            throw AIError.configuration("These flashcards changed since this chat request. Send your message again to use the current cards.")
+        }
         guard providers[job.backend] != nil else { throw AIError.configuration("Configure the original backend before retrying.") }
         let directory = store.jobDirectory(moduleID: moduleID, lectureID: lectureID, jobID: jobID)
         guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("snapshot.json").path) else { throw AIError.configuration("This job snapshot has expired or is missing. Start a new job instead.") }
@@ -370,6 +429,10 @@ public actor JobRunner {
         _ = try await store.updateLecture(moduleID: moduleID, lectureID: lectureID) { lecture in
             try Task.checkCancellation()
             guard let i = lecture.jobs.firstIndex(where: { $0.id == jobID }), [.failed, .cancelled, .interrupted].contains(lecture.jobs[i].state) else { throw AIError.configuration("This job has already landed.") }
+            if frozen.kind == .chat, let versions = frozen.chatCardVersions,
+               !versions.allSatisfy({ version in lecture.cards.contains { version.matches($0) } }) {
+                throw AIError.configuration("These flashcards changed since this chat request. Send your message again to use the current cards.")
+            }
             guard !lecture.jobs.contains(where: { $0.state == .running && $0.id != jobID && ($0.kind == .generate && frozen.kind == .generate || $0.targetCardID != nil && $0.targetCardID == frozen.targetCardID || $0.threadID != nil && $0.threadID == frozen.threadID) }) else { throw AIError.configuration("Another job for this scope is running.") }
             lecture.jobs[i] = frozen
         }

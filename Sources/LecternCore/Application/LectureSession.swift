@@ -50,6 +50,8 @@ public final class LectureSession {
         await acquire(); defer { release() }
         let latest = try await store.loadLecture(moduleID: lecture.moduleID, lectureID: lecture.id)
         try controller.receive(latest); lecture = latest; canUndo = controller.canUndo
+        let cardIDs = Set(latest.cards.map(\.id))
+        editingCards = editingCards.filter { cardIDs.contains($0.key) }
     }
     public func dispatch(_ action: LectureAction) async throws {
         // Serialized by the MainActor gate plus the store transaction, including async landings.
@@ -102,9 +104,12 @@ public final class LectureSession {
         catch { isClosed = false; throw error }
         eventTask?.cancel(); eventTask = nil
     }
-    public func generate(backend: AIBackend = .claudeCLI, model: String = "opus", regenerateAll: Bool = false) async throws -> UUID {
+    public func generate(backend: AIBackend = .claudeCLI, model: String = "opus", regenerateAll: Bool = false,
+                         additionalInstructions: String = "", replaceExistingCards: Bool = false) async throws -> UUID {
         try await flushEdits()
-        return try await runner.generate(moduleID: lecture.moduleID, lectureID: lecture.id, backend: backend, model: model, regenerateAll: regenerateAll)
+        return try await runner.generate(moduleID: lecture.moduleID, lectureID: lecture.id, backend: backend, model: model,
+                                         regenerateAll: regenerateAll, additionalInstructions: additionalInstructions,
+                                         replaceExistingCards: replaceExistingCards)
     }
     public func revise(cardID: UUID, feedback: String, backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> UUID {
         try await flushEdits()
@@ -112,8 +117,15 @@ public final class LectureSession {
         return try await runner.revise(moduleID: lecture.moduleID, lectureID: lecture.id, cardID: cardID, feedback: feedback, backend: backend, model: model)
     }
     public func ask(anchorPage: Int, context: ThreadContext = .neighbours(1), question: String, cardID: UUID? = nil,
-                    backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> UUID {
+                    backend: AIBackend = .claudeCLI, model: String = "opus",
+                    flashcardContext: FlashcardContext? = nil) async throws -> UUID {
         try await flushEdits()
-        return try await runner.ask(moduleID: lecture.moduleID, lectureID: lecture.id, anchorPage: anchorPage, context: context, question: question, cardID: cardID, backend: backend, model: model)
+        return try await runner.ask(moduleID: lecture.moduleID, lectureID: lecture.id, anchorPage: anchorPage, context: context, question: question, cardID: cardID, backend: backend, model: model, flashcardContext: flashcardContext)
+    }
+    public func chat(anchorPage: Int, context: ThreadContext, question: String, cardID: UUID? = nil,
+                     backend: AIBackend = .claudeCLI, model: String = "opus", flashcardContext: FlashcardContext = .none) async throws -> UUID {
+        try await flushEdits()
+        return try await runner.chat(moduleID: lecture.moduleID, lectureID: lecture.id, anchorPage: anchorPage,
+            context: context, question: question, cardID: cardID, backend: backend, model: model, flashcardContext: flashcardContext)
     }
 }

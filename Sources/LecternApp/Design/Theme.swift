@@ -266,8 +266,9 @@ struct LegendSwatch: View {
     }
 }
 
-/// One segment per planned lecture slot, coloured by derived status.
+/// One segment per planned lecture slot, coloured by lecture status.
 struct SlotStrip: View {
+    @Environment(AppModel.self) private var model
     let slots: [LectureSlot]
     var height: CGFloat = 26
     var onTap: ((LectureSlot) -> Void)?
@@ -278,19 +279,60 @@ struct SlotStrip: View {
             let width = max(4, (proxy.size.width - spacing * CGFloat(max(0, slots.count - 1))) / CGFloat(max(1, slots.count)))
             HStack(spacing: spacing) {
                 ForEach(slots) { slot in
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(slot.status == .notImported ? Theme.surface : Theme.stage(slot.status))
-                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(slot.status == .notImported ? Theme.borderStrong : .clear))
-                        .frame(width: width, height: height)
-                        .contentShape(Rectangle())
-                        .onTapGesture { onTap?(slot) }
-                        .help(Format.slotHelp(slot))
+                    Button { onTap?(slot) } label: {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(slot.status == .notImported ? Theme.surface : Theme.stage(slot.status))
+                            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(slot.status == .notImported ? Theme.borderStrong : .clear))
+                            .overlay {
+                                if slot.statusOverride != nil {
+                                    Circle().fill(Theme.surface).frame(width: 5, height: 5)
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                            .frame(width: width, height: height)
+                    }
+                    .buttonStyle(.plain)
+                    .help(Format.slotHelp(slot))
+                    .accessibilityLabel(Format.slotHelp(slot))
+                    .contextMenu {
+                        if let lectureID = slot.lectureID {
+                            LectureStatusOptions(current: slot.statusOverride) { status in
+                                Task { await model.setLectureStatus(status, for: LectureRef(moduleID: slot.id.moduleID, lectureID: lectureID)) }
+                            }
+                        } else {
+                            LectureStatusOptions(current: slot.statusOverride) { status in
+                                Task { await model.setEmptySlotStatus(status, for: slot.id) }
+                            }
+                        }
+                    }
                 }
             }
         }
         .frame(height: height)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Format.statusSummary(counts: Dictionary(grouping: slots, by: \.status).mapValues(\.count)))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Lecture progress")
+    }
+}
+
+struct LectureStatusOptions: View {
+    let current: LectureProgressStatus?
+    let onSelect: (LectureProgressStatus?) -> Void
+
+    var body: some View {
+        option("Automatic", status: nil)
+        Divider()
+        ForEach(Format.legendOrder.filter { $0 != .notImported }, id: \.self) { status in
+            option(Format.statusLabel(status), status: status)
+        }
+    }
+
+    private func option(_ title: String, status: LectureProgressStatus?) -> some View {
+        Button {
+            onSelect(status)
+        } label: {
+            if current == status { Label(title, systemImage: "checkmark") }
+            else { Text(title) }
+        }
     }
 }
 

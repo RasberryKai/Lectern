@@ -68,6 +68,7 @@ final class LectureWindowModel {
     // Ask drafts per anchor page.
     var askDrafts: [Int: String] = [:]
     var askContexts: [Int: ThreadContext] = [:]
+    var askFlashcardContexts: [Int: FlashcardContext] = [:]
 
     private(set) var isClosing = false
 
@@ -440,11 +441,12 @@ final class LectureWindowModel {
     private var backend: AIBackend { settings.backend }
     private var model: String { settings.selectedModel }
 
-    func generate(regenerateAll: Bool) async {
+    func generate(additionalInstructions: String) async {
         guard !readOnly else { return }
         await run {
             try await flushNoteNow()
-            _ = try await session.generate(backend: backend, model: model, regenerateAll: regenerateAll)
+            _ = try await session.generate(backend: backend, model: model,
+                                           additionalInstructions: additionalInstructions, replaceExistingCards: true)
             try await session.refresh()
         }
         app.scheduleReload()
@@ -472,7 +474,14 @@ final class LectureWindowModel {
     func askContext(for page: Int) -> ThreadContext {
         let context = askContexts[page] ?? thread(page: page)?.context ?? .slide
         // Older chats may retain a neighbouring-slide scope; use the current slide instead.
-        return context == .lecture ? .lecture : .slide
+        if context == .none || context == .lecture { return context }
+        return page > 0 ? .slide : .none
+    }
+
+    func askFlashcardContext(for page: Int, cardID: UUID?) -> FlashcardContext {
+        let context = askFlashcardContexts[page] ?? thread(page: page)?.flashcardContext
+            ?? (cardID == nil ? FlashcardContext.none : .current)
+        return context == .current && cardID == nil ? .none : context
     }
 
     func ask(page: Int, cardID: UUID? = nil) async {
@@ -481,7 +490,9 @@ final class LectureWindowModel {
         guard !question.isEmpty else { return }
         let context = askContext(for: page)
         await run {
-            _ = try await session.ask(anchorPage: page, context: context, question: question, cardID: cardID, backend: backend, model: model)
+            _ = try await session.chat(anchorPage: page, context: context, question: question, cardID: cardID,
+                                      backend: backend, model: model,
+                                      flashcardContext: askFlashcardContext(for: page, cardID: cardID))
             askDrafts[page] = ""
             try await session.refresh()
         }
@@ -490,7 +501,17 @@ final class LectureWindowModel {
     /// The running Ask/Distil job on a thread, if any, for streaming display.
     func runningConversationJob(page: Int) -> Job? {
         guard let thread = thread(page: page) else { return nil }
-        return runningJobs.first { $0.threadID == thread.id && ($0.kind == .ask || $0.kind == .distil) }
+        return runningJobs.first { $0.threadID == thread.id && ($0.kind == .ask || $0.kind == .chat || $0.kind == .distil) }
+    }
+
+    func undoChatEdits(jobID: UUID) async {
+        guard !readOnly else { return }
+        await run {
+            try await session.flushEdits()
+            try await session.dispatch(.undoChatEdits(jobID: jobID))
+        }
+        syncEditor()
+        app.scheduleReload()
     }
 
     func updateLearningPoint(page: Int, pointID: UUID, text: String? = nil, included: Bool? = nil) async {

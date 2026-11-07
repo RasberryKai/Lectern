@@ -185,6 +185,22 @@ final class AppModel {
         return module
     }
 
+    func setLectureStatus(_ status: LectureProgressStatus?, for ref: LectureRef) async {
+        await perform {
+            _ = try await store.updateLecture(moduleID: ref.moduleID, lectureID: ref.lectureID) {
+                $0.progressOverride = status
+            }
+            try await reloadNow()
+        }
+    }
+
+    func setEmptySlotStatus(_ status: LectureProgressStatus?, for slotID: LectureSlot.ID) async {
+        await perform {
+            try await store.setEmptySlotStatus(status, slotID: slotID)
+            try await reloadNow()
+        }
+    }
+
     func renameLecture(_ ref: LectureRef, name: String) async throws {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw LibraryError.invalid("Give the presentation a name.") }

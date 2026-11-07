@@ -47,7 +47,10 @@ import Testing
         #expect(session.lecture.cards[0].feedback == "Feedback"); #expect(session.lecture.cards[0].verdict == .needsAdjustment)
         try await session.undo()
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
-        #expect(saved.cards[0].feedback == "Feedback"); #expect(saved.cards[0].verdict == .good)
+        // Concurrent actions can acquire the session gate in either order.
+        // Undo must revert exactly the last action and preserve the other one.
+        #expect((saved.cards[0].feedback == "Feedback" && saved.cards[0].verdict == .good)
+            || (saved.cards[0].feedback.isEmpty && saved.cards[0].verdict == .needsAdjustment))
     }
     @Test func failedExportPlacementNeverMarksCardsAndSuccessfulExportMarksCapturedRevision() async throws {
         let (store, module, lecture, root) = try await setup(); defer { try? FileManager.default.removeItem(at: root) }

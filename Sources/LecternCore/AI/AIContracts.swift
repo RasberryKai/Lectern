@@ -70,10 +70,36 @@ public struct DistilledPoints: Codable, Equatable, Sendable {
     public init(learningPoints: [Point]) { self.learningPoints = learningPoints }
 }
 
+public struct ChatCardEdit: Codable, Equatable, Sendable {
+    public var cardID: UUID
+    public var baseRevisionID: UUID
+    public var front: String
+    public var back: String
+
+    public init(cardID: UUID, baseRevisionID: UUID, front: String, back: String) {
+        self.cardID = cardID
+        self.baseRevisionID = baseRevisionID
+        self.front = front
+        self.back = back
+    }
+}
+
+public struct ChatReply: Codable, Equatable, Sendable {
+    public var message: String
+    public var edits: [ChatCardEdit]
+
+    public init(message: String, edits: [ChatCardEdit] = []) {
+        self.message = message
+        self.edits = edits
+    }
+}
+
 public enum AIOutputSchema {
     public static func json(for kind: JobKind) -> String? {
         switch kind {
         case .ask: return nil
+        case .chat:
+            return #"{"type":"object","additionalProperties":false,"required":["message","edits"],"properties":{"message":{"type":"string"},"edits":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID","front","back"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"},"front":{"type":"string"},"back":{"type":"string"}}}}}}"#
         case .generate:
             return #"{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":CARD},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}"#.replacingOccurrences(of: "CARD", with: card)
         case .revise:

@@ -25,7 +25,7 @@ enum Format {
     }
 
     static func slotHelp(_ slot: LectureSlot) -> String {
-        "Lecture \(String(format: "%02d", slot.id.index)) · \(statusLabel(slot.status))"
+        "Lecture \(String(format: "%02d", slot.id.index)) · \(statusLabel(slot.status))\(slot.statusOverride == nil ? "" : " · Manual")"
     }
 
     /// "03 Distributions". Names that already start with a number keep their own numbering.

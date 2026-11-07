@@ -1,22 +1,43 @@
 import Foundation
 
-public enum LectureError: Error, Equatable, Sendable {
+public enum LectureError: Error, LocalizedError, Equatable, Sendable {
     case identityMismatch, staleSnapshot
     case unsupportedSchema(Int), invalidMetadata(String), missingCard(UUID), missingJob(UUID), missingThread(UUID)
     case invalidApproval(UUID), invalidProposal(UUID), duplicateID(UUID), jobNotRunning(UUID), jobAlreadyExists(UUID)
+    public var errorDescription: String? {
+        switch self {
+        case .invalidMetadata(let message): return message
+        case .missingCard: return "A flashcard no longer exists. Send a new request using the current cards."
+        case .jobNotRunning: return "This request is no longer running."
+        case .staleSnapshot: return "The lecture changed. Reload it and try again."
+        default: return "The lecture could not be updated because its data changed or is invalid."
+        }
+    }
 }
 public extension Lecture {
+    func canUndoChatEdits(jobID: UUID) -> Bool {
+        guard let job = jobs.first(where: { $0.id == jobID }), job.state == .succeeded,
+              job.chatEditsUndoneAt == nil, let edits = job.chatEditUndo, !edits.isEmpty else { return false }
+        return edits.allSatisfy { edit in
+            cards.contains { edit.matches($0) }
+        }
+    }
     func validated() throws -> Lecture {
+        guard progressOverride != .notImported else {
+            throw LectureError.invalidMetadata("Only empty slots can be marked Not imported.")
+        }
         guard schemaVersion == Self.currentSchemaVersion else { throw LectureError.unsupportedSchema(schemaVersion) }
         guard pageCount >= 0, slides.count == pageCount, slides.enumerated().allSatisfy({ $0.offset == $0.element.pageIndex }) else { throw LectureError.invalidMetadata("Slide state does not match page count") }
         for ids in [cards.map(\.id), jobs.map(\.id), threads.map(\.id)] {
             var seen = Set<UUID>()
             for id in ids where !seen.insert(id).inserted { throw LectureError.duplicateID(id) }
         }
-        guard Set(threads.map(\.anchorPage)).count == threads.count, threads.allSatisfy({ (1...max(1, pageCount)).contains($0.anchorPage) && pageCount > 0 }) else { throw LectureError.invalidMetadata("Threads must have unique valid anchor pages") }
+        guard Set(threads.map(\.anchorPage)).count == threads.count, threads.allSatisfy({
+            $0.anchorPage == 0 || ((1...max(1, pageCount)).contains($0.anchorPage) && pageCount > 0)
+        }) else { throw LectureError.invalidMetadata("Threads must have unique valid anchor pages") }
         if let focused = viewPreferences.focusedPageIndex, !(0..<pageCount).contains(focused) { throw LectureError.invalidMetadata("Invalid focused page") }
         if let selected = viewPreferences.selectedCardID, !cards.contains(where: { $0.id == selected }) { throw LectureError.missingCard(selected) }
-        guard jobs.allSatisfy({ job in (job.kind == .revise || !job.pages.isEmpty) && job.pages.allSatisfy { $0 > 0 && $0 <= pageCount } }) else { throw LectureError.invalidMetadata("Job pages must belong to the document") }
+        guard jobs.allSatisfy({ job in (job.kind != .generate || !job.pages.isEmpty) && job.pages.allSatisfy { $0 > 0 && $0 <= pageCount } }) else { throw LectureError.invalidMetadata("Job pages must belong to the document") }
         guard cards.allSatisfy({ !$0.history.isEmpty }) else { throw LectureError.invalidMetadata("Card history cannot be empty") }
         for card in cards where card.verdict == .good {
             guard issues(for: card).isEmpty else { throw LectureError.invalidApproval(card.id) }
@@ -66,6 +87,8 @@ public enum LectureAction: Equatable, Sendable {
     case updateJob(Job)
     case landGeneration(jobID: UUID, cards: [CardDraft], skipped: [SkippedSlide], usage: AIUsage?)
     case landProposal(jobID: UUID, cards: [CardDraft], rationale: String, usage: AIUsage?)
+    case applyChatEdits(jobID: UUID, edits: [ChatCardEdit])
+    case undoChatEdits(jobID: UUID)
     case upsertThread(SlideThread)
     case setSlideSelection(pageIndex: Int, Bool)
     case updateNote(pageIndex: Int, String)
@@ -138,6 +161,11 @@ public enum LectureReducer {
             guard lecture.jobs[j].state == .running else { throw LectureError.jobNotRunning(id) }
             guard lecture.jobs[j].kind == .generate else { throw LectureError.invalidMetadata("Wrong job kind") }
             let pages = lecture.jobs[j].pages
+            if lecture.jobs[j].replacesExistingCards == true {
+                lecture.cards.removeAll()
+                lecture.skippedSlides.removeAll()
+                lecture.viewPreferences.selectedCardID = nil
+            }
             lecture.cards.append(contentsOf: drafts.map { Card(sourcePages: $0.sourcePages, front: $0.front, back: $0.back, flag: $0.flag, history: [CardRevision(front: $0.front, back: $0.back, author: .ai, at: now)], origin: .generated(jobID: id), allowedSourcePages: pages) })
             lecture.skippedSlides.append(contentsOf: skipped); lecture.jobs[j].state = .succeeded; lecture.jobs[j].finishedAt = now; lecture.jobs[j].usage = usage
         case .landProposal(let id, let cards, let rationale, let usage):
@@ -148,6 +176,54 @@ public enum LectureReducer {
             let i = try index(target, in: lecture)
             lecture.cards[i].proposal = Proposal(jobID: id, baseRevisionID: base, cards: cards, rationale: rationale, allowedSourcePages: lecture.jobs[j].pages)
             lecture.jobs[j].state = .succeeded; lecture.jobs[j].finishedAt = now; lecture.jobs[j].usage = usage
+        case .applyChatEdits(let id, let edits):
+            let j = try jobIndex(id, in: lecture)
+            guard lecture.jobs[j].kind == .chat, lecture.jobs[j].state == .running else { throw LectureError.jobNotRunning(id) }
+            guard Set(edits.map(\.cardID)).count == edits.count else { throw LectureError.invalidMetadata("Chat returned duplicate card edits.") }
+            let allowed = lecture.jobs[j].chatCardVersions ?? []
+            var undo: [ChatEditUndo] = []
+            for edit in edits {
+                guard let version = allowed.first(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) else {
+                    throw LectureError.invalidMetadata("Chat tried to edit a card outside its selected context.")
+                }
+                let i = try index(edit.cardID, in: lecture)
+                guard version.matches(lecture.cards[i]) else {
+                    throw LectureError.invalidMetadata("A flashcard changed while chat was working. Your changes were kept; send the request again.")
+                }
+                guard !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw LectureError.invalidMetadata("Chat returned a card with an empty front or back.")
+                }
+                guard lecture.cards[i].front != edit.front || lecture.cards[i].back != edit.back else { continue }
+                let before = lecture.cards[i]
+                lecture.cards[i].front = edit.front; lecture.cards[i].back = edit.back
+                lecture.cards[i].mathInterpretations = [:]
+                if lecture.cards[i].verdict == .good { lecture.cards[i].verdict = .unreviewed }
+                let revision = CardRevision(front: edit.front, back: edit.back, author: .ai, reason: "Chat edit", at: now)
+                lecture.cards[i].history.append(revision)
+                undo.append(ChatEditUndo(cardID: edit.cardID, appliedRevisionID: revision.id,
+                    front: before.front, back: before.back, verdict: before.verdict, mathInterpretations: before.mathInterpretations,
+                    appliedVerdict: lecture.cards[i].verdict, appliedMathInterpretations: lecture.cards[i].mathInterpretations))
+            }
+            lecture.jobs[j].chatEditUndo = undo.isEmpty ? nil : undo
+        case .undoChatEdits(let id):
+            let j = try jobIndex(id, in: lecture)
+            guard lecture.jobs[j].state == .succeeded, lecture.jobs[j].chatEditsUndoneAt == nil,
+                  let edits = lecture.jobs[j].chatEditUndo, !edits.isEmpty else {
+                throw LectureError.invalidMetadata("There are no chat edits to undo.")
+            }
+            for edit in edits {
+                let i = try index(edit.cardID, in: lecture)
+                guard edit.matches(lecture.cards[i]) else {
+                    throw LectureError.invalidMetadata("A card was changed after this chat edit. Undo would overwrite newer changes.")
+                }
+                lecture.cards[i].front = edit.front; lecture.cards[i].back = edit.back
+                lecture.cards[i].mathInterpretations = edit.mathInterpretations
+                lecture.cards[i].verdict = edit.verdict
+                if edit.verdict == .good && !lecture.issues(for: lecture.cards[i]).isEmpty { lecture.cards[i].verdict = .unreviewed }
+                appendRevision(&lecture.cards[i], author: .user, reason: "Undo chat edit", now: now)
+            }
+            lecture.jobs[j].chatEditsUndoneAt = now
         case .upsertThread(let thread):
             if let i = lecture.threads.firstIndex(where: { $0.id == thread.id }) { lecture.threads[i] = thread } else { lecture.threads.append(thread) }
         case .setSlideSelection(let page, let selected):
@@ -186,9 +262,16 @@ public struct LectureController: Sendable {
     public mutating func receive(_ latest: Lecture) throws {
         guard latest.id == lecture.id, latest.moduleID == lecture.moduleID else { throw LectureError.identityMismatch }
         guard latest.updatedAt.timeIntervalSince1970.rounded(.down) >= lecture.updatedAt.timeIntervalSince1970.rounded(.down) else { throw LectureError.staleSnapshot }
+        let replacementLanded = latest.jobs.contains { job in
+            job.kind == .generate && job.replacesExistingCards == true && job.state == .succeeded &&
+                lecture.jobs.first(where: { $0.id == job.id })?.state != .succeeded
+        }
         for current in lecture.cards {
-            guard let incoming = latest.cards.first(where: { $0.id == current.id }),
-                  Set(current.history.map(\.id)).isSubset(of: Set(incoming.history.map(\.id))) else { throw LectureError.staleSnapshot }
+            guard let incoming = latest.cards.first(where: { $0.id == current.id }) else {
+                guard replacementLanded else { throw LectureError.staleSnapshot }
+                continue
+            }
+            guard Set(current.history.map(\.id)).isSubset(of: Set(incoming.history.map(\.id))) else { throw LectureError.staleSnapshot }
         }
         _ = try latest.validated()
         lecture = latest
@@ -197,7 +280,7 @@ public struct LectureController: Sendable {
         let before = lecture
         try LectureReducer.reduce(&lecture, action: action, now: now)
         switch action {
-        case .startJob, .updateJob, .landGeneration, .landProposal, .upsertThread, .markExported, .markExportEntries: return
+        case .startJob, .updateJob, .landGeneration, .landProposal, .applyChatEdits, .undoChatEdits, .upsertThread, .markExported, .markExportEntries: return
         default: break
         }
         if before != lecture { undoStack.append(UndoEntry(before: before, after: lecture)); if undoStack.count > 50 { undoStack.removeFirst() } }
@@ -233,6 +316,9 @@ public struct LectureController: Sendable {
             if before.isSelected != after.isSelected && lecture.slides[i].isSelected == after.isSelected { lecture.slides[i].isSelected = before.isSelected }
         }
         if entry.before.viewPreferences != entry.after.viewPreferences { lecture.viewPreferences = entry.before.viewPreferences }
+        if let selected = lecture.viewPreferences.selectedCardID, !lecture.cards.contains(where: { $0.id == selected }) {
+            lecture.viewPreferences.selectedCardID = nil
+        }
         lecture.viewPreferences.reviewFilter = .all
         lecture.updatedAt = now
     }

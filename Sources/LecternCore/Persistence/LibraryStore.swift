@@ -57,6 +57,8 @@ public actor LibraryStore {
         let original = module
         module.lectureIDs += ids.filter { !module.lectureIDs.contains($0) }.sorted { $0.uuidString < $1.uuidString }
         module.plannedLectureCount = max(module.plannedLectureCount, lectures.filter { !$0.isArchived }.count)
+        let activeCount = lectures.filter { !$0.isArchived }.count
+        module.slotStatusOverrides = module.slotStatusOverrides.filter { $0.key > activeCount }
         // Repair interrupted publication or pre-planning metadata without changing user order.
         if module != original { try write(module, to: url) }
         return module
@@ -69,6 +71,9 @@ public actor LibraryStore {
     private func validateModule(_ module: Module, activeLectureCount: Int = 0) throws {
         guard (0...Module.maximumPlannedLectureCount).contains(module.plannedLectureCount), module.plannedLectureCount >= activeLectureCount, Set(module.lectureIDs).count == module.lectureIDs.count else {
             throw LibraryError.invalid("Planned lectures cannot be fewer than imported lectures, and lecture order must contain unique identities.")
+        }
+        guard module.slotStatusOverrides.allSatisfy({ $0.key > activeLectureCount && $0.key <= module.plannedLectureCount && $0.value != .notImported }) else {
+            throw LibraryError.invalid("Manual statuses must refer to empty planned lecture slots.")
         }
     }
     public func createModule(name: String, instructions: String = "") throws -> Module { try createModule(Module(name: name, instructions: instructions)) }
@@ -91,6 +96,7 @@ public actor LibraryStore {
         // settings operation, so a cached pre-import Module cannot erase a newer plan.
         updated.plannedLectureCount = current.plannedLectureCount
         updated.examDate = current.examDate
+        updated.slotStatusOverrides = current.slotStatusOverrides
         try validateModule(updated)
         try write(updated, to: url)
     } }
@@ -100,8 +106,19 @@ public actor LibraryStore {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw LibraryError.invalid("Give the module a name.") }
         module.name = name; module.plannedLectureCount = plannedLectureCount; module.examDate = examDate
+        module.slotStatusOverrides = module.slotStatusOverrides.filter { $0.key <= plannedLectureCount }
         try validateModule(module, activeLectureCount: lectureListUnlocked(in: module).filter { !$0.isArchived }.count)
         try write(module, to: moduleDirectory(moduleID).appendingPathComponent("module.json")); return module
+    } }
+    /// Changes a planned slot without creating a lecture or requiring a source PDF.
+    public func setEmptySlotStatus(_ status: LectureProgressStatus?, slotID: LectureSlot.ID) throws { try locked {
+        var module = try moduleUnlocked(slotID.moduleID); try requireEditable(module)
+        let activeCount = try lectureListUnlocked(in: module).filter { !$0.isArchived }.count
+        guard slotID.index > activeCount, slotID.index <= module.plannedLectureCount, status != .notImported else {
+            throw LibraryError.invalid("This empty lecture slot changed. Refresh and try again.")
+        }
+        module.slotStatusOverrides[slotID.index] = status
+        try write(module, to: moduleDirectory(module.id).appendingPathComponent("module.json"))
     } }
     /// Archiving does not cancel or discard paid work. Wait/cancel and retry when idle.
     @discardableResult public func setModuleArchived(moduleID: UUID, archived: Bool, at: Date = Date()) throws -> Module { try locked {
@@ -129,14 +146,20 @@ public actor LibraryStore {
     }
 
     public func setLectureArchived(moduleID: UUID, lectureID: UUID, archived: Bool, at: Date = Date()) throws { try locked {
-        try requireEditable(moduleUnlocked(moduleID))
+        var module = try moduleUnlocked(moduleID); try requireEditable(module)
         var lecture = try readLecture(moduleID, lectureID)
         guard lecture.isArchived != archived else { return }
         guard !archived || !lecture.jobs.contains(where: { $0.state == .running }) else {
             throw LibraryError.invalid("Wait for this lecture’s running jobs, or cancel them before archiving.")
         }
         lecture.archivedAt = archived ? at : nil
+        // Empty slots follow the imported rows. Keep their statuses on those empty
+        // slots when archiving/restoring changes the number of imported rows.
+        module.slotStatusOverrides = Dictionary(uniqueKeysWithValues: module.slotStatusOverrides.map { ($0.key + (archived ? -1 : 1), $0.value) })
+        module.plannedLectureCount = max(module.plannedLectureCount, module.slotStatusOverrides.keys.max() ?? 0)
+        try validateModule(module)
         try write(lecture, to: lectureDirectory(moduleID, lectureID).appendingPathComponent("lecture.json"))
+        try write(module, to: moduleDirectory(moduleID).appendingPathComponent("module.json"))
     } }
     public func loadLecture(moduleID: UUID, lectureID: UUID) throws -> Lecture { try locked { try readLecture(moduleID, lectureID) } }
     public func updateLecture(moduleID: UUID, lectureID: UUID, _ mutation: @Sendable (inout Lecture) throws -> Void) throws -> Lecture {
@@ -176,10 +199,17 @@ public actor LibraryStore {
     }
     public func createLecture(_ lecture: Lecture, sourceURL: URL? = nil) throws -> Lecture { try locked { try createLectureUnlocked(lecture, sourceURL: sourceURL) } }
     private func createLectureUnlocked(_ lecture: Lecture, sourceURL: URL?) throws -> Lecture {
+        var lecture = lecture
         try validate(lecture)
         let moduleURL = moduleDirectory(lecture.moduleID).appendingPathComponent("module.json")
         var module = try moduleUnlocked(lecture.moduleID)
         try requireEditable(module)
+        if !lecture.isArchived {
+            let slotIndex = try lectureListUnlocked(in: module).filter { !$0.isArchived }.count + 1
+            if let status = module.slotStatusOverrides.removeValue(forKey: slotIndex), lecture.progressOverride == nil {
+                lecture.progressOverride = status
+            }
+        }
         let directory = lectureDirectory(lecture.moduleID, lecture.id)
         guard !FileManager.default.fileExists(atPath: directory.appendingPathComponent("lecture.json").path) else { throw LibraryError.alreadyExists(lecture.id) }
         guard module.lectureIDs.count < Module.maximumPlannedLectureCount else { throw LibraryError.invalid("This module has reached its lecture limit.") }

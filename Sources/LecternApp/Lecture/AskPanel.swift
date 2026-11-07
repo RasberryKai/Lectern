@@ -4,7 +4,7 @@ import SwiftUI
 /// Per-slide Ask thread, shared by Prepare and Review (threads are keyed by one-based anchor page).
 struct AskPanel: View {
     @Bindable var model: LectureWindowModel
-    /// One-based anchor page.
+    /// One-based anchor page, or zero for a chat without a linked slide.
     let page: Int
     let cardID: UUID?
     var focus: FocusState<EditorField?>.Binding
@@ -19,9 +19,7 @@ struct AskPanel: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         if (thread?.messages.isEmpty ?? true) && model.runningConversationJob(page: page) == nil {
-                            Text(cardID == nil
-                                 ? "Ask about this slide when something is unclear. Claude answers from the slides you choose above; what you found hard becomes learning points for your cards."
-                                 : "Ask about this card and its slides. The thread is shared with Prepare.")
+                            Text("Ask a question or tell Claude what to change. It can edit the flashcards selected in the context above.")
                                 .font(Theme.small).foregroundStyle(Theme.quiet)
                         }
                         ForEach(thread?.messages ?? []) { message in
@@ -53,33 +51,49 @@ struct AskPanel: View {
             }
             Spacer()
             let questions = thread?.messages.filter { $0.role == .user }.count ?? 0
-            Text(cardID == nil
-                 ? "Thread on slide \(page)\(questions > 0 ? " · \(Format.count(questions, "question"))" : "")"
-                 : "Same thread as slide \(page) in Prepare")
+            Text(page == 0 ? "Flashcard chat" : "Thread on slide \(page)\(questions > 0 ? " · \(Format.count(questions, "question"))" : "")")
                 .font(Theme.caption).foregroundStyle(Theme.quiet)
         }
     }
 
     private var contextChips: some View {
-        let current = model.askContext(for: page)
-        return HStack(spacing: 6) {
-            chip("Current slide", .slide, current)
-            chip("Whole lecture", .lecture, current)
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Slides", selection: Binding(
+                get: { model.askContext(for: page) },
+                set: { model.askContexts[page] = $0 }
+            )) {
+                Text("Whole lecture").tag(ThreadContext.lecture).disabled(model.lecture.pageCount == 0)
+                Text("Current slide").tag(ThreadContext.slide).disabled(page == 0)
+                Text("No slide").tag(ThreadContext.none)
+            }
+            .accessibilityIdentifier("askSlideContext")
+            Picker("Flashcards", selection: Binding(
+                get: { model.askFlashcardContext(for: page, cardID: cardID) },
+                set: { model.askFlashcardContexts[page] = $0 }
+            )) {
+                Text("All flashcards").tag(FlashcardContext.all)
+                Text("This flashcard").tag(FlashcardContext.current).disabled(cardID == nil)
+                Text("No flashcards").tag(FlashcardContext.none)
+            }
+            .accessibilityIdentifier("askFlashcardContext")
         }
-    }
-
-    private func chip(_ title: String, _ context: ThreadContext, _ current: ThreadContext) -> some View {
-        Button(title) { model.askContexts[page] = context }
-            .buttonStyle(ChipButtonStyle(isOn: current == context))
-            .disabled(model.readOnly)
+        .pickerStyle(.menu)
+        .font(Theme.small)
+        .disabled(model.readOnly || model.runningConversationJob(page: page) != nil)
     }
 
     private var contextLabel: String {
-        switch model.askContext(for: page) {
-        case .slide: "slide \(page)"
-        case .neighbours(let n): Format.slides(Array(max(1, page - n)...min(model.lecture.pageCount, page + n)))
+        let slides: String? = switch model.askContext(for: page) {
+        case .none: nil
+        case .slide, .neighbours: "slide \(page)"
         case .lecture: "the whole lecture"
         }
+        let cards: String? = switch model.askFlashcardContext(for: page, cardID: cardID) {
+        case .none: nil
+        case .all: "all flashcards"
+        case .current: "this flashcard"
+        }
+        return [slides, cards].compactMap { $0 }.joined(separator: " and ")
     }
 
     // MARK: Jobs
@@ -87,7 +101,7 @@ struct AskPanel: View {
     @ViewBuilder private var runningJob: some View {
         if let job = model.runningConversationJob(page: page) {
             let progress = model.progress(job.id)
-            if job.kind == .ask {
+            if job.kind == .ask || job.kind == .chat {
                 VStack(alignment: .leading, spacing: 6) {
                     if let text = progress?.streamedText, !text.isEmpty {
                         Text(text).font(Theme.small).textSelection(.enabled)
@@ -119,7 +133,7 @@ struct AskPanel: View {
             }
             ForEach(failed) { job in
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(job.kind == .ask ? "The answer didn't arrive" : "Learning points couldn't be extracted")
+                    Text(job.kind == .ask || job.kind == .chat ? "The chat request didn't finish" : "Learning points couldn't be extracted")
                         .font(.system(size: 12, weight: .semibold))
                     Text(job.error ?? (job.state == .interrupted ? "Lectern quit before it finished." : "Unknown error.")).font(Theme.small)
                     HStack {
@@ -168,7 +182,7 @@ struct AskPanel: View {
 
     private var input: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField("Ask about \(contextLabel)",
+            TextField(contextLabel.isEmpty ? "Ask a question" : "Ask about \(contextLabel)",
                       text: Binding(get: { model.askDrafts[page] ?? "" }, set: { model.askDrafts[page] = $0 }),
                       axis: .vertical)
                 .lineLimit(2...6)
@@ -180,7 +194,10 @@ struct AskPanel: View {
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(focus.wrappedValue == .ask ? Theme.ai : Theme.borderStrong))
                 .disabled(model.readOnly || model.runningConversationJob(page: page) != nil)
-            Text("↩ send · questions you ask here shape the next cards").font(Theme.caption).foregroundStyle(Theme.faint)
+            Text(model.askFlashcardContext(for: page, cardID: cardID) == .none
+                 ? "↩ send · select flashcards above to edit them"
+                 : "↩ send · requested edits apply directly · Undo is available")
+                .font(Theme.caption).foregroundStyle(Theme.faint)
         }
     }
 }
@@ -219,6 +236,22 @@ private struct MessageBubble: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+                if let id = message.editJobID,
+                   let job = model.lecture.jobs.first(where: { $0.id == id }),
+                   let edits = job.chatEditUndo, !edits.isEmpty {
+                    HStack {
+                        Text(job.chatEditsUndoneAt == nil
+                             ? "Updated \(Format.count(edits.count, "flashcard"))"
+                             : "Changes undone")
+                            .font(Theme.caption).foregroundStyle(Theme.aiStrong)
+                        if job.chatEditsUndoneAt == nil {
+                            Button("Undo") { Task { await model.undoChatEdits(jobID: id) } }
+                                .buttonStyle(LinkButtonStyle())
+                                .disabled(model.readOnly || !model.lecture.canUndoChatEdits(jobID: id))
+                                .accessibilityIdentifier("undoChatEdits")
+                        }
+                    }
+                }
                 if showUseAsFeedback {
                     Button("Use as feedback") {
                         let existing = model.feedbackDraft.trimmingCharacters(in: .whitespacesAndNewlines)

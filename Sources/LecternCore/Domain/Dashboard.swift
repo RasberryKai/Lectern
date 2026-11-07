@@ -1,6 +1,6 @@
 import Foundation
 
-public enum LectureProgressStatus: String, CaseIterable, Equatable, Sendable {
+public enum LectureProgressStatus: String, Codable, CaseIterable, Equatable, Sendable {
     case notImported, preparing, toReview, toExport, done
 }
 
@@ -15,7 +15,9 @@ public enum PreparationReason: Equatable, Sendable {
 public struct LectureProgress: Equatable, Identifiable, Sendable {
     public let lectureID: UUID
     public let name: String
-    public let status: LectureProgressStatus
+    public let automaticStatus: LectureProgressStatus
+    public let statusOverride: LectureProgressStatus?
+    public var status: LectureProgressStatus { statusOverride ?? automaticStatus }
     public let reviewCardCount: Int
     public let proposalCount: Int
     public let readyExportCount: Int
@@ -36,6 +38,7 @@ public struct LectureSlot: Equatable, Identifiable, Sendable {
     public let id: ID
     public let lectureID: UUID?
     public let status: LectureProgressStatus
+    public let statusOverride: LectureProgressStatus?
 }
 
 public enum NextUpAction: Equatable, Sendable {
@@ -133,7 +136,8 @@ public enum DashboardBuilder {
         }
         if !running.isEmpty { reasons.append(.waitingForJobs(jobIDs: running)) }
         let status: LectureProgressStatus = review > 0 ? .toReview : !reasons.isEmpty ? .preparing : ready > 0 ? .toExport : .done
-        return LectureProgress(lectureID: lecture.id, name: lecture.name, status: status, reviewCardCount: review,
+        return LectureProgress(lectureID: lecture.id, name: lecture.name, automaticStatus: status,
+                               statusOverride: lecture.progressOverride, reviewCardCount: review,
                                proposalCount: proposals, readyExportCount: ready, changedExportCount: changed,
                                selectedPageCount: selected.count, coveredSelectedPageCount: selected.count - missing.count,
                                preparationReasons: reasons)
@@ -147,7 +151,8 @@ public enum DashboardBuilder {
         let slots = (0..<planned).map { index in
             LectureSlot(id: .init(moduleID: module.id, index: index + 1),
                         lectureID: index < progress.count ? progress[index].lectureID : nil,
-                        status: index < progress.count ? progress[index].status : .notImported)
+                        status: index < progress.count ? progress[index].status : module.slotStatusOverrides[index + 1] ?? .notImported,
+                        statusOverride: index < progress.count ? progress[index].statusOverride : module.slotStatusOverrides[index + 1])
         }
         var counts = Dictionary(uniqueKeysWithValues: LectureProgressStatus.allCases.map { ($0, 0) })
         for slot in slots { counts[slot.status, default: 0] += 1 }
@@ -162,8 +167,9 @@ public enum DashboardBuilder {
             totals.readyExportCount += lecture.readyExportCount
             totals.changedExportCount += lecture.changedExportCount
         }
+        let pending = progress.filter { $0.statusOverride != .done }
         var actions: [NextUpAction] = []
-        if let first = progress.first(where: { $0.status == .toReview }) {
+        if let first = pending.first(where: { $0.automaticStatus == .toReview }) {
             actions.append(.review(lectureID: first.lectureID, cardCount: first.reviewCardCount))
         }
         let exportable = progress.filter { $0.readyExportCount > 0 }
@@ -171,10 +177,10 @@ public enum DashboardBuilder {
             actions.append(.export(moduleID: module.id, lectureIDs: exportable.map(\.lectureID),
                                    cardCount: totals.readyExportCount, changedCardCount: totals.changedExportCount))
         }
-        if let first = progress.first(where: { $0.status == .preparing }) {
+        if let first = pending.first(where: { $0.automaticStatus == .preparing }) {
             actions.append(.prepare(lectureID: first.lectureID, reasons: first.preparationReasons))
         }
-        if let first = slots.first(where: { $0.lectureID == nil }) {
+        if let first = slots.first(where: { $0.lectureID == nil && $0.status != .done }) {
             actions.append(.importLecture(moduleID: module.id, slotID: first.id))
         }
         return ModuleProgress(module: module, lectures: progress, slots: slots, statusCounts: counts, totals: totals,

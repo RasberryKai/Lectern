@@ -18,6 +18,27 @@ final class DashboardTests: XCTestCase {
         return card
     }
 
+    func testManualStatusPersistsAndAutomaticCanBeRestored() throws {
+        var lecture = Lecture(moduleID: UUID(), name: "L", cards: [Card(front: "Q", back: "A")])
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        let legacy = try decoder.decode(Lecture.self, from: encoder.encode(lecture))
+        XCTAssertNil(legacy.progressOverride)
+        XCTAssertEqual(progress(legacy).status, .toReview)
+
+        lecture.progressOverride = .done
+        lecture = try decoder.decode(Lecture.self, from: encoder.encode(lecture))
+        let manual = snapshot([lecture], planned: 2)
+        XCTAssertEqual(manual.totals.doneLectureCount, 1)
+        XCTAssertEqual(manual.totals.reviewCardCount, 1)
+        XCTAssertEqual(manual.modules[0].slots.map(\.status), [.done, .notImported])
+        XCTAssertEqual(manual.modules[0].nextUp.count, 1)
+        XCTAssertEqual(manual.modules[0].nextUp.first, .importLecture(moduleID: lecture.moduleID, slotID: manual.modules[0].slots[1].id))
+
+        lecture.progressOverride = nil
+        XCTAssertEqual(snapshot([lecture]).modules[0].nextUp, [.review(lectureID: lecture.id, cardCount: 1)])
+    }
+
     func testReviewUnionCountsEachCardOnceAndAllProposalStates() {
         var cards = [Card(front: "Q", back: "A"), Card(front: "Q", back: "A", verdict: .needsAdjustment), approved(), Card(front: "Q", back: "A", verdict: .bad)]
         let states: [ProposalState] = [.pending, .ready, .failed, .ready]

@@ -31,6 +31,17 @@ struct ModuleView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
+                    if let progress, !progress.slots.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            SlotStrip(slots: progress.slots, height: 18) { slot in
+                                if let lectureID = slot.lectureID {
+                                    model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: nil)
+                                }
+                            }
+                            Text("Right-click any lecture block to set its status, even without a PDF.")
+                                .font(Theme.small).foregroundStyle(Theme.quiet)
+                        }
+                    }
                     table
                     lectureArchive
                     HStack(alignment: .top, spacing: 18) {
@@ -197,7 +208,21 @@ struct ModuleView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Text("—").foregroundStyle(Theme.quiet).frame(width: 150, alignment: .leading)
                 Text("—").foregroundStyle(Theme.quiet).frame(width: 220, alignment: .leading)
-                Pill(text: "Planned", tone: .outline).frame(width: 300, alignment: .leading)
+                Menu {
+                    LectureStatusOptions(current: module?.slotStatusOverrides[next]) { status in
+                        Task { await model.setEmptySlotStatus(status, for: .init(moduleID: moduleID, index: next)) }
+                    }
+                } label: {
+                    if let status = module?.slotStatusOverrides[next] {
+                        Pill(text: "\(Format.statusLabel(status)) · Manual", tone: .neutral)
+                    } else {
+                        Pill(text: "Planned", tone: .outline)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(archived)
+                .frame(width: 300, alignment: .leading)
                 Button("Import PDF") { Task { await model.chooseAndImportPDFs(into: moduleID) } }
                     .buttonStyle(LinkButtonStyle()).disabled(archived)
                     .frame(width: 90, alignment: .trailing)
@@ -217,7 +242,7 @@ struct ModuleView: View {
     }
 
     private func moreSlotsLine(next: Int, planned: Int) -> some View {
-        Text("\(String(format: "%02d", next + 1)) to \(String(format: "%02d", planned)) · \(Format.count(planned - next, "more planned slot")). Drop one or several PDFs on this list to fill the next one.")
+        Text("\(String(format: "%02d", next + 1)) to \(String(format: "%02d", planned)) · \(Format.count(planned - next, "more planned slot")). Right-click any lecture block above to set its status without a PDF.")
             .font(Theme.small).foregroundStyle(Theme.quiet)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20).padding(.vertical, 12)
@@ -343,7 +368,7 @@ private struct LectureRow: View {
                 .foregroundStyle(Theme.quiet).frame(width: 150, alignment: .leading)
             Text(cardsText).frame(width: 220, alignment: .leading)
             status.frame(width: 300, alignment: .leading)
-            Button(progress?.status == .toReview ? "Review" : "Open") { open(progress?.status == .toReview ? .review : nil) }
+            Button(progress?.automaticStatus == .toReview ? "Review" : "Open") { open(progress?.automaticStatus == .toReview ? .review : nil) }
                 .buttonStyle(LinkButtonStyle())
                 .frame(width: 90, alignment: .trailing)
         }
@@ -359,6 +384,13 @@ private struct LectureRow: View {
             }.disabled(archived)
             Button("Add PDFs…") { Task { await model.chooseAndAppendPDFs(to: ref) } }
                 .disabled(archived || lecture.pageCount == 0)
+            if !archived, let progress {
+                Menu("Lecture status") {
+                    LectureStatusOptions(current: progress.statusOverride) { status in
+                        Task { await model.setLectureStatus(status, for: ref) }
+                    }
+                }
+            }
             Divider()
             Button("Export Lecture Backup…") { exportBackup() }
             Button("Export Lecture to Anki…") { model.selection = .export(lecture.moduleID) }
@@ -391,7 +423,9 @@ private struct LectureRow: View {
     }
 
     @ViewBuilder private var status: some View {
-        if let generate = lecture.jobs.first(where: { $0.kind == .generate && $0.state == .running }) {
+        if let manual = progress?.statusOverride {
+            Pill(text: "\(Format.statusLabel(manual)) · Manual", tone: .neutral)
+        } else if let generate = lecture.jobs.first(where: { $0.kind == .generate && $0.state == .running }) {
             HStack(spacing: 10) {
                 ProgressView().progressViewStyle(.linear).tint(Theme.accent).frame(width: 90)
                 Text("Writing cards from \(Format.count(generate.pages.count, "slide"))").font(Theme.small).foregroundStyle(Theme.quiet)

@@ -165,7 +165,7 @@ public struct MessagesAPIProvider: AIProvider {
     static func outputLimit(for kind: JobKind, configured: Int) -> Int {
         let cap: Int
         switch kind {
-        case .generate: cap = 32_768
+        case .generate, .chat: cap = 32_768
         case .revise: cap = 8_192
         case .ask: cap = 8_192
         case .distil: cap = 2_048
@@ -176,7 +176,7 @@ public struct MessagesAPIProvider: AIProvider {
     static func effort(for kind: JobKind) -> String {
         switch kind {
         case .generate: "high"
-        case .revise, .ask: "medium"
+        case .revise, .ask, .chat: "medium"
         case .distil: "low"
         }
     }
