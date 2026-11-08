@@ -2,6 +2,7 @@ import Foundation
 import PDFKit
 import CryptoKit
 import Darwin
+import ImageIO
 
 public enum LibraryError: Error, LocalizedError, Sendable {
     case unsupportedSchema(Int), invalid(String), unavailable(String), alreadyExists(UUID), archivedModule(UUID)
@@ -294,14 +295,15 @@ public actor LibraryStore {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: url.path) { try data.write(to: url, options: .atomic) }
     } }
-    private struct Backup: Codable { var schemaVersion = 1; var module: Module; var lecture: Lecture; var sourcePDF: Data?; var provenance: Data? }
+    private struct Backup: Codable { var schemaVersion = 1; var module: Module; var lecture: Lecture; var sourcePDF: Data?; var provenance: Data?; var chatAttachments: [String: Data]? = nil }
     public func exportBackup(moduleID: UUID, lectureID: UUID, to url: URL) throws {
         try assertExternalDestination(url)
         try locked {
         let lecture = try readLecture(moduleID, lectureID)
         let source = sourceURL(moduleID: moduleID, lectureID: lectureID)
         let provenance = lectureDirectory(moduleID, lectureID).appendingPathComponent("legacy-provenance.json")
-        let backup = Backup(module: try read(moduleDirectory(moduleID).appendingPathComponent("module.json")), lecture: lecture, sourcePDF: FileManager.default.fileExists(atPath: source.path) ? try Data(contentsOf: source) : nil, provenance: FileManager.default.fileExists(atPath: provenance.path) ? try Data(contentsOf: provenance) : nil)
+        var backup = Backup(module: try read(moduleDirectory(moduleID).appendingPathComponent("module.json")), lecture: lecture, sourcePDF: FileManager.default.fileExists(atPath: source.path) ? try Data(contentsOf: source) : nil, provenance: FileManager.default.fileExists(atPath: provenance.path) ? try Data(contentsOf: provenance) : nil)
+        backup.chatAttachments = try attachmentBlobs(for: lecture)
         if lecture.pageCount > 0 && backup.sourcePDF == nil { throw LibraryError.invalid("Source PDF is missing; backup would be incomplete.") }
         try Self.encoder().encode(backup).write(to: url, options: .atomic)
         }
@@ -310,6 +312,7 @@ public actor LibraryStore {
         let backup: Backup = try Self.decoder().decode(Backup.self, from: Data(contentsOf: url))
         guard backup.schemaVersion == 1 else { throw LibraryError.unsupportedSchema(backup.schemaVersion) }
         try validate(backup.lecture)
+        try validateAttachmentBlobs(backup.chatAttachments ?? [:], lecture: backup.lecture)
         guard backup.lecture.moduleID == backup.module.id else { throw LibraryError.invalid("Backup module identity mismatch.") }
         guard !backup.module.isArchived || !backup.lecture.jobs.contains(where: { $0.state == .running }) else { throw LibraryError.invalid("An archived backup cannot contain running jobs.") }
         let existing = lectureDirectory(backup.module.id, backup.lecture.id).appendingPathComponent("lecture.json")
@@ -334,6 +337,7 @@ public actor LibraryStore {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             if let data = backup.sourcePDF { try data.write(to: directory.appendingPathComponent("source.pdf"), options: .atomic) }
             if let provenance = backup.provenance { try provenance.write(to: directory.appendingPathComponent("legacy-provenance.json"), options: .atomic) }
+            try writeAttachmentBlobs(backup.chatAttachments ?? [:], lecture: backup.lecture, directory: directory)
             try write(backup.lecture, to: directory.appendingPathComponent("lecture.json"))
             try write(module, to: staging.appendingPathComponent("module.json"))
             try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -347,6 +351,7 @@ public actor LibraryStore {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         // Publish provenance before the lecture so a crash cannot produce an apparently complete restore without it.
         if let provenance = backup.provenance { try provenance.write(to: directory.appendingPathComponent("legacy-provenance.json"), options: .atomic) }
+        try writeAttachmentBlobs(backup.chatAttachments ?? [:], lecture: backup.lecture, directory: directory)
         return try createLectureUnlocked(backup.lecture, sourceURL: backup.sourcePDF == nil ? nil : temporary)
     } }
     private struct ModuleBackup: Codable {
@@ -368,7 +373,8 @@ public actor LibraryStore {
                 let data = FileManager.default.fileExists(atPath: pdf.path) ? try Data(contentsOf: pdf) : nil
                 guard lecture.pageCount == 0 || data != nil else { throw LibraryError.invalid("Source PDF is missing; module backup would be incomplete.") }
                 return Backup(module: module, lecture: lecture, sourcePDF: data,
-                    provenance: FileManager.default.fileExists(atPath: provenance.path) ? try Data(contentsOf: provenance) : nil)
+                    provenance: FileManager.default.fileExists(atPath: provenance.path) ? try Data(contentsOf: provenance) : nil,
+                    chatAttachments: try attachmentBlobs(for: lecture))
             }
             try Self.encoder().encode(ModuleBackup(module: module, lectures: backups)).write(to: url, options: .atomic)
         }
@@ -391,6 +397,7 @@ public actor LibraryStore {
             guard entry.schemaVersion == 1, entry.module.id == module.id, entry.lecture.moduleID == module.id else { throw LibraryError.invalid("Mismatched module backup entry.") }
             guard !module.isArchived || !entry.lecture.jobs.contains(where: { $0.state == .running }) else { throw LibraryError.invalid("An archived backup cannot contain running jobs.") }
             try validate(entry.lecture)
+            try validateAttachmentBlobs(entry.chatAttachments ?? [:], lecture: entry.lecture)
             if entry.lecture.pageCount > 0 {
                 guard let data = entry.sourcePDF, let pdf = PDFDocument(data: data), !pdf.isLocked,
                       pdf.pageCount == entry.lecture.pageCount else { throw LibraryError.invalid("Module backup source PDF is missing or invalid.") }
@@ -399,6 +406,7 @@ public actor LibraryStore {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             if let pdf = entry.sourcePDF { try pdf.write(to: directory.appendingPathComponent("source.pdf"), options: .atomic) }
             if let provenance = entry.provenance { try provenance.write(to: directory.appendingPathComponent("legacy-provenance.json"), options: .atomic) }
+            try writeAttachmentBlobs(entry.chatAttachments ?? [:], lecture: entry.lecture, directory: directory)
             try write(entry.lecture, to: directory.appendingPathComponent("lecture.json"))
         }
         try write(module, to: staging.appendingPathComponent("module.json"))
@@ -463,6 +471,7 @@ public actor LibraryStore {
             throw LibraryError.invalid("An archived lecture cannot contain running jobs.")
         }
         _ = try lecture.validated()
+        _ = try attachmentMetadata(for: lecture)
     }
     private func read<T: Decodable>(_ url: URL) throws -> T {
         func decode(_ data: Data) throws -> T {
@@ -497,4 +506,87 @@ public actor LibraryStore {
     }
     static func encoder() -> JSONEncoder { let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601; return encoder }
     static func decoder() -> JSONDecoder { let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601; return decoder }
+}
+
+extension LibraryStore {
+    public nonisolated func chatAttachmentURL(moduleID: UUID, lectureID: UUID, attachment: ChatAttachment) -> URL {
+        lectureDirectory(moduleID, lectureID).appendingPathComponent(attachment.relativePath)
+    }
+    public func importChatAttachment(moduleID: UUID, lectureID: UUID, data: Data, filename: String, mediaType: String) throws -> ChatAttachment { try locked {
+        try requireEditable(moduleUnlocked(moduleID))
+        guard !(try readLecture(moduleID, lectureID)).isArchived else { throw LibraryError.invalid("This lecture is archived and read-only.") }
+        guard !data.isEmpty, data.count <= ChatAttachment.maximumImageBytes else { throw LibraryError.invalid("Images must be at most 5 MiB each.") }
+        let attachment = ChatAttachment(filename: URL(fileURLWithPath: filename).lastPathComponent, mediaType: mediaType, byteCount: data.count, sha256: PromptBuilder.hash(data))
+        try Self.validateAttachmentData(data, attachment: attachment)
+        let root = lectureDirectory(moduleID, lectureID).standardizedFileURL.resolvingSymlinksInPath()
+        let destination = root.appendingPathComponent(attachment.relativePath)
+        guard destination.resolvingSymlinksInPath() == destination else { throw LibraryError.invalid("The attachment folder is outside this lecture.") }
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destination.deletingLastPathComponent().path)
+        try data.write(to: destination, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        return attachment
+    } }
+    public func loadChatAttachment(moduleID: UUID, lectureID: UUID, attachment: ChatAttachment) throws -> Data { try locked {
+        _ = try readLecture(moduleID, lectureID)
+        return try loadChatAttachmentUnlocked(moduleID: moduleID, lectureID: lectureID, attachment: attachment)
+    } }
+    private func loadChatAttachmentUnlocked(moduleID: UUID, lectureID: UUID, attachment: ChatAttachment) throws -> Data {
+        try ChatAttachment.validateSelection([attachment])
+        let root = lectureDirectory(moduleID, lectureID).standardizedFileURL.resolvingSymlinksInPath()
+        let url = root.appendingPathComponent(attachment.relativePath)
+        guard url.resolvingSymlinksInPath() == url else { throw LibraryError.invalid("The attachment file is outside this lecture.") }
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular, (attributes[.size] as? NSNumber)?.intValue == attachment.byteCount else { throw LibraryError.invalid("The image attachment has changed or is incomplete.") }
+        let data = try Data(contentsOf: url)
+        try Self.validateAttachmentData(data, attachment: attachment)
+        return data
+    }
+    private static func validateAttachmentData(_ data: Data, attachment: ChatAttachment) throws {
+        try ChatAttachment.validateSelection([attachment])
+        guard data.count == attachment.byteCount, PromptBuilder.hash(data) == attachment.sha256 else { throw LibraryError.invalid("The image attachment has changed or is incomplete.") }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) as String?,
+              type == (attachment.mediaType == "image/png" ? "public.png" : "public.jpeg"),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary), image.width > 0, image.height > 0 else {
+            throw LibraryError.invalid("The attachment is not a readable PNG or JPEG matching its image type.")
+        }
+    }
+    private func attachmentMetadata(for lecture: Lecture) throws -> [String: ChatAttachment] {
+        var result: [String: ChatAttachment] = [:]
+        let chats = [lecture.currentChat] + lecture.archivedChats
+        let selections = chats.map(\.draftAttachments) + chats.flatMap(\.messages).map(\.attachments) + lecture.threads.flatMap(\.messages).map(\.attachments)
+        var identities: [UUID: ChatAttachment] = [:]
+        for selection in selections {
+            try ChatAttachment.validateSelection(selection)
+            for attachment in selection {
+                if let existing = identities[attachment.id], existing != attachment { throw LibraryError.invalid("An image attachment has inconsistent metadata.") }
+                identities[attachment.id] = attachment; result[attachment.relativePath] = attachment
+            }
+        }
+        return result
+    }
+    private func attachmentBlobs(for lecture: Lecture) throws -> [String: Data] {
+        try attachmentMetadata(for: lecture).mapValues { try loadChatAttachmentUnlocked(moduleID: lecture.moduleID, lectureID: lecture.id, attachment: $0) }
+    }
+    private func validateAttachmentBlobs(_ blobs: [String: Data], lecture: Lecture) throws {
+        let metadata = try attachmentMetadata(for: lecture)
+        guard Set(blobs.keys) == Set(metadata.keys) else { throw LibraryError.invalid("Backup image attachments are missing or do not match this lecture.") }
+        for (path, attachment) in metadata { try Self.validateAttachmentData(blobs[path]!, attachment: attachment) }
+    }
+    private func writeAttachmentBlobs(_ blobs: [String: Data], lecture: Lecture, directory: URL) throws {
+        try validateAttachmentBlobs(blobs, lecture: lecture)
+        guard !blobs.isEmpty else { return }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let folder = root.appendingPathComponent("chat-attachments")
+        guard folder.resolvingSymlinksInPath() == folder else { throw LibraryError.invalid("The attachment folder is outside this lecture.") }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        for (relativePath, data) in blobs {
+            let destination = root.appendingPathComponent(relativePath)
+            guard destination.resolvingSymlinksInPath() == destination else { throw LibraryError.invalid("The attachment file is outside this lecture.") }
+            try data.write(to: destination, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        }
+    }
 }

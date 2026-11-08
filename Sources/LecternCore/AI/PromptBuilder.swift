@@ -29,7 +29,7 @@ public enum PromptBuilder {
         let notes = lecture.slides.filter { pageSet.contains($0.pageIndex + 1) }.map {
             Note(slide: $0.pageIndex + 1, text: $0.note)
         }
-        let points = lecture.threads.flatMap(\.learningPoints).filter {
+        let points = (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints).filter { old in !lecture.learningPoints.contains(where: { $0.id == old.id }) }).filter {
             $0.included && !$0.pages.allSatisfy { !pageSet.contains($0) }
         }.map { Point(text: $0.text, pages: $0.pages.filter(pageSet.contains)) }
         var parts = [

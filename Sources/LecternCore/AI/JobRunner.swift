@@ -7,26 +7,27 @@ public struct JobProgress: Equatable, Sendable {
     public var stage: String
     public var streamedText: String
     public var warning: String?
+    public var read: [ContextRef] = []
 }
 
 /// Every provider call passes through this actor. Durable state lives in LibraryStore;
 /// only queue scheduling and transient stream text live here.
 public actor JobRunner {
-    private struct Work: Sendable {
+    struct Work: Sendable {
         var moduleID: UUID
         var lectureID: UUID
         var job: Job
         var request: AIRequest
         var learningPointIDs: [UUID]
     }
-    private struct Snapshot: Codable { var request: AIRequest; var learningPointIDs: [UUID] }
+    struct Snapshot: Codable { var request: AIRequest; var learningPointIDs: [UUID] }
     private let pdfExporter: any PDFSnapshotExporting
-    private let store: LibraryStore
-    private let providers: [AIBackend: any AIProvider]
-    private var pending: [Work] = []
-    private var active: [UUID: Task<Void, Never>] = [:]
-    private var reservations = Set<String>()
-    private var progress: [UUID: JobProgress] = [:]
+    let store: LibraryStore
+    let providers: [AIBackend: any AIProvider]
+    var pending: [Work] = []
+    var active: [UUID: Task<Void, Never>] = [:]
+    var reservations = Set<String>()
+    var progress: [UUID: JobProgress] = [:]
     private var subscribers: [UUID: AsyncStream<JobProgress>.Continuation] = [:]
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -96,7 +97,7 @@ public actor JobRunner {
                                backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> ProposeUpdatesResult {
         try Task.checkCancellation()
         let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
-        let points = lecture.threads.flatMap(\.learningPoints).filter { $0.included && $0.pages.contains(page) }
+        let points = (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints).filter { old in !lecture.learningPoints.contains(where: { $0.id == old.id }) }).filter { $0.included && $0.pages.contains(page) }
         guard !points.isEmpty else { throw AIError.configuration("No included learning points for this slide.") }
         let feedback = points.map(\.text).joined(separator: "\n")
         var result = ProposeUpdatesResult()
@@ -219,7 +220,7 @@ public actor JobRunner {
             pdf = try Data(contentsOf: destination)
         }
         try Task.checkCancellation()
-        let pointIDs = initial.threads.flatMap(\.learningPoints).filter { $0.included && $0.pages.contains(where: pages.contains) }.map(\.id)
+        let pointIDs = (initial.learningPoints + initial.threads.flatMap(\.learningPoints)).filter { $0.included && $0.pages.contains(where: pages.contains) }.map(\.id)
         let request = AIRequest(jobID: job.id, kind: kind, model: resolvedModel, prompt: prompt, pdf: pdf, workingDirectory: directory)
         job.inputHash = try Self.inputHash(request)
         var persistedRequest = request; persistedRequest.pdf = nil
@@ -246,6 +247,11 @@ public actor JobRunner {
                 if kind == .ask || kind == .chat { thread.messages.append(ChatMessage(role: .user, text: question)) }
                 try LectureReducer.reduce(&lecture, action: .upsertThread(thread))
             }
+            if kind == .revise, let cardID {
+                var message = ChatMessage(role: .user, text: feedback); message.context = [.card(cardID)]; message.editJobID = frozenJob.id
+                if lecture.currentChat.messages.isEmpty { lecture.currentChat.title = LectureChat.title(for: feedback) }
+                lecture.currentChat.messages.append(message)
+            }
             try LectureReducer.reduce(&lecture, action: .startJob(frozenJob))
         }
         committed = true
@@ -259,14 +265,14 @@ public actor JobRunner {
         return job.id
     }
 
-    private static func inputHash(_ request: AIRequest) throws -> String {
-        struct Input: Encodable { var kind: JobKind; var model: String; var systemPrompt: String; var prompt: String; var pdf: Data? }
+    static func inputHash(_ request: AIRequest) throws -> String {
+        struct Input: Encodable { var kind: JobKind; var model: String; var systemPrompt: String; var prompt: String; var pdf: Data?; var chatSnapshot: ChatSnapshot? }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return PromptBuilder.hash(try encoder.encode(Input(kind: request.kind, model: request.model,
-            systemPrompt: request.systemPrompt, prompt: request.prompt, pdf: request.pdf)))
+            systemPrompt: request.systemPrompt, prompt: request.prompt, pdf: request.pdf, chatSnapshot: request.chatSnapshot)))
     }
 
-    private func schedule() {
+    func schedule() {
         while active.count < 3 && !pending.isEmpty {
             let work = pending.removeFirst()
             active[work.job.id] = Task { await self.run(work) }
@@ -277,6 +283,7 @@ public actor JobRunner {
     }
     private func run(_ work: Work) async {
         var autoDistilAnchor: Int?
+        var chatSucceeded = false
         do {
             try Task.checkCancellation()
             guard let provider = providers[work.job.backend] else { throw AIError.configuration("Provider unavailable.") }
@@ -285,7 +292,8 @@ public actor JobRunner {
                 Task { await self.receive(work: work, event: event) }
             }
             try Task.checkCancellation()
-            autoDistilAnchor = try await land(work, response: response)
+            if work.request.chatSnapshot != nil { try await landLectureChat(work, response: response); chatSucceeded = true }
+            else { autoDistilAnchor = try await land(work, response: response) }
             emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"))
         } catch {
             do {
@@ -302,19 +310,24 @@ public actor JobRunner {
             }
         }
         active.removeValue(forKey: work.job.id)
+        if chatSucceeded, !Task.isCancelled {
+            let distilID = UUID()
+            active[distilID] = Task { await self.distilLectureChat(work, distilID: distilID); self.finishDistil(distilID) }
+        }
         if let anchor = autoDistilAnchor {
             do { _ = try await distil(moduleID: work.moduleID, lectureID: work.lectureID, anchorPage: anchor, backend: work.job.backend, model: work.job.model) }
             catch { emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"), warning: "Answer saved; learning-point extraction could not start: \(error.localizedDescription)") }
         }
         schedule()
     }
+    func finishDistil(_ id: UUID) { active.removeValue(forKey: id); schedule() }
     private func receive(work: Work, event: AIEvent) {
         guard active[work.job.id] != nil else { return }
         emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: event)
     }
-    private func emit(moduleID: UUID, lectureID: UUID, jobID: UUID, event: AIEvent, warning: String? = nil) {
+    func emit(moduleID: UUID, lectureID: UUID, jobID: UUID, event: AIEvent, warning: String? = nil) {
         var value = progress[jobID] ?? JobProgress(moduleID: moduleID, lectureID: lectureID, jobID: jobID, stage: "Queued", streamedText: "")
-        switch event { case .stage(let stage): value.stage = stage; case .text(let text): value.streamedText += text }
+        switch event { case .stage(let stage): value.stage = stage; case .text(let text): value.streamedText += text; case .read(let ref): if !value.read.contains(ref) { value.read.append(ref) } }
         if let warning { value.warning = warning }
         progress[jobID] = value; subscribers.values.forEach { $0.yield(value) }
     }
@@ -352,6 +365,10 @@ public actor JobRunner {
             case .revise:
                 guard let output = frozenRevised else { throw AIError.invalidResponse("Missing revision payload.") }
                 try LectureReducer.reduce(&lecture, action: .landProposal(jobID: work.job.id, cards: output.cards.map(\.draft), rationale: output.rationale, usage: response.usage))
+                var message = ChatMessage(role: .assistant, text: output.rationale.isEmpty ? "Revision ready to review on the card." : output.rationale); message.editJobID = work.job.id
+                if let id = work.job.targetCardID { message.context = [.card(id)] }
+                if let current = lecture.currentChat.messages.first(where: { $0.editJobID == work.job.id && $0.role == .user }) { message.context = current.context; lecture.currentChat.messages.append(message) }
+                else if let c = lecture.archivedChats.firstIndex(where: { $0.messages.contains(where: { $0.editJobID == work.job.id && $0.role == .user }) }) { lecture.archivedChats[c].messages.append(message) }
             case .ask, .chat, .distil:
                 guard let t = lecture.threads.firstIndex(where: { $0.id == work.job.threadID }) else { throw AIError.invalidResponse("The slide thread no longer exists.") }
                 if work.job.kind == .ask || work.job.kind == .chat {
@@ -375,6 +392,9 @@ public actor JobRunner {
                 }
                 lecture.jobs[j].state = .succeeded; lecture.jobs[j].usage = response.usage; lecture.jobs[j].finishedAt = Date()
             }
+                for p in lecture.learningPoints.indices where work.learningPointIDs.contains(lecture.learningPoints[p].id) {
+                    if !lecture.learningPoints[p].usedBy.contains(work.job.id) { lecture.learningPoints[p].usedBy.append(work.job.id) }
+                }
                 for t in lecture.threads.indices {
                     for p in lecture.threads[t].learningPoints.indices where work.learningPointIDs.contains(lecture.threads[t].learningPoints[p].id) {
                         if !lecture.threads[t].learningPoints[p].usedBy.contains(work.job.id) { lecture.threads[t].learningPoints[p].usedBy.append(work.job.id) }
@@ -402,6 +422,10 @@ public actor JobRunner {
     }
 
     public func retry(moduleID: UUID, lectureID: UUID, jobID: UUID) async throws {
+        let current = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
+        if let job = current.jobs.first(where: { $0.id == jobID }), job.kind == .chat, job.isLectureChat == true, job.threadID == current.currentChat.id {
+            try await retryLectureChat(moduleID: moduleID, lectureID: lectureID, jobID: jobID); return
+        }
         try await store.assertModuleEditable(moduleID: moduleID)
         try Task.checkCancellation()
         let reservation = "retry:\(jobID)"
@@ -469,7 +493,8 @@ public actor JobRunner {
     public func cleanSnapshots(olderThan date: Date = Date().addingTimeInterval(-7 * 86400)) async throws {
         for module in try await store.modules() {
             for lecture in try await store.lectures(in: module.id) {
-                for job in lecture.jobs where job.state != .running && (job.finishedAt ?? job.startedAt) < date {
+                let savedChatJobIDs = Set(([lecture.currentChat] + lecture.archivedChats).flatMap(\.messages).compactMap(\.editJobID))
+                for job in lecture.jobs where job.state != .running && !savedChatJobIDs.contains(job.id) && (job.finishedAt ?? job.startedAt) < date {
                     let directory = store.jobDirectory(moduleID: module.id, lectureID: lecture.id, jobID: job.id)
                     if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
                 }

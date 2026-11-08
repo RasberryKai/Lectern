@@ -303,6 +303,117 @@ struct ProviderTests {
         }
     }
 
+    @Test func chatContextRejectsSymlinksAndNeverReadsAnAmbientPDF() throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let request = try chatRequest(in: root)
+        let context = ChatProviderContext(request: request, snapshot: request.chatSnapshot!)
+        #expect(throws: AIError.self) { try context.file("../outside.txt") }
+        let png = root.appendingPathComponent("slides/007.png")
+        try FileManager.default.removeItem(at: png)
+        try FileManager.default.createSymbolicLink(at: png, withDestinationURL: URL(fileURLWithPath: "/etc/hosts"))
+        #expect(throws: AIError.self) { try context.image(page: 7) }
+    }
+
+    @Test func cliChatScopesFilesAndTracesOnlyCompletedReads() throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let request = try chatRequest(in: root)
+        let arguments = try ClaudeCLIProvider.arguments(for: request, model: "opus", pdfURL: nil)
+        #expect(arguments.contains("stream-json")); #expect(arguments.contains("--json-schema"))
+        #expect(!arguments.contains { $0.contains("input.pdf") })
+        let path = try ChatProviderContext(request: request, snapshot: request.chatSnapshot!).file("slides/007.png").path
+        let events: [[String: Any]] = [
+            ["type": "assistant", "message": ["content": [["type": "tool_use", "id": "r1", "name": "Read", "input": ["file_path": path]]]]],
+            ["type": "user", "message": ["content": [["type": "tool_result", "tool_use_id": "r1", "content": "image"]]]],
+            ["type": "result", "subtype": "success", "stop_reason": "tool_use", "structured_output": ["message": "Answer", "edits": [], "quiz": []]]
+        ]
+        let data = try events.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }.joined(separator: "\n")
+        let result = try ClaudeCLIProvider.parseChatStream(Data(data.utf8), request: request, snapshot: request.chatSnapshot!, onEvent: { _ in })
+        #expect(result.read == [.slide(7)])
+        let noReads = try JSONSerialization.data(withJSONObject: events.last!)
+        let empty = try ClaudeCLIProvider.parseChatStream(noReads, request: request, snapshot: request.chatSnapshot!, onEvent: { _ in })
+        #expect(empty.read.isEmpty)
+    }
+
+    @Test func cliSingleCardContextReadsOnlyThatCardAndReportsItHonestly() throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        var request = try chatRequest(in: root)
+        let card = Card(front: "Focused question", back: "Focused answer")
+        request.chatSnapshot!.cards = [card]
+        request.chatSnapshot!.initialRefs = [.card(card.id)]
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("cards"), withIntermediateDirectories: true)
+        let relative = "cards/\(card.id.uuidString).json"
+        try JSONEncoder().encode(card).write(to: root.appendingPathComponent(relative))
+        let prompt = try ClaudeCLIProvider.inputPrompt(for: request, pdfURL: nil)
+        let required = prompt.components(separatedBy: "Before answering, Read these attached context files: ").last!.components(separatedBy: ". Look up").first!
+        #expect(required.contains(card.id.uuidString))
+        #expect(!required.contains("cards.json"))
+        let events: [[String: Any]] = [
+            ["type": "assistant", "message": ["content": [["type": "tool_use", "id": "focused", "name": "Read", "input": ["file_path": root.appendingPathComponent(relative).path]]]]],
+            ["type": "user", "message": ["content": [["type": "tool_result", "tool_use_id": "focused", "content": "focused card"]]]],
+            ["type": "result", "subtype": "success", "stop_reason": "end_turn", "structured_output": ["message": "Answer", "edits": [], "quiz": []]]
+        ]
+        let data = try events.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }.joined(separator: "\n")
+        let response = try ClaudeCLIProvider.parseChatStream(Data(data.utf8), request: request, snapshot: request.chatSnapshot!, onEvent: { _ in })
+        #expect(response.read == [.card(card.id)])
+        #expect(!response.searchedLecture)
+    }
+
+    @Test func structuredChatPreviewDecodesOnlyMessageAndEscapes() {
+        var preview = ChatMessageStream()
+        #expect(preview.append(#"{"message":"Hello "#) == "Hello ")
+        #expect(preview.append(#"world\n[S7]","edits":[],"quiz":[]}"#) == "world\n[S7]")
+    }
+
+    @Test func messagesChatRunsLookupLoopWithImagesAndSummedUsage() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        var request = try chatRequest(in: root)
+        request.chatSnapshot!.initialRefs = []
+        let card = Card(sourcePages: [7], front: "Front", back: "Back")
+        request.chatSnapshot!.cards = [card]
+        let edit = ChatCardEdit(cardID: card.id, baseRevisionID: card.currentRevisionID!, front: "Changed", back: "Changed back")
+        let editJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edit))
+        let first = sseChat(blocks: [
+            ["type": "tool_use", "id": "t1", "name": "read_slides", "input": ["pages": [7]]],
+            ["type": "tool_use", "id": "t2", "name": "get_cards", "input": ["ids": ["C1"]]],
+            ["type": "tool_use", "id": "t3", "name": "edit_cards", "input": ["edits": [editJSON]]]
+        ], stop: "tool_use", input: 10, output: 3)
+        let reply = #"{"message":"Look at [S7].","edits":[],"quiz":[]}"#
+        let second = sseChat(blocks: [["type": "text", "text": reply]], stop: "end_turn", input: 20, output: 9)
+        let session = URLSessionStub.makeSession(status: 200, body: first)
+        URLSessionStub.state.enqueue(second)
+        let provider = MessagesAPIProvider(apiKey: { "fixture" }, session: session, endpoint: URL(string: "https://api.example.test/v1/messages")!)
+        let result = try await provider.execute(request, onEvent: { _ in })
+        #expect(result.read == [.slide(7), .card(card.id)]); #expect(result.searchedLecture)
+        #expect(try JSONDecoder().decode(ChatReply.self, from: Data(result.content.utf8)).edits == [edit])
+        #expect(result.usage.inputTokens == 30); #expect(result.usage.outputTokens == 12)
+        let body = try #require(URLSessionStub.state.lastRequest()?.httpBody)
+        let object = try JSONSerialization.jsonObject(with: body)
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes]), as: UTF8.self)
+        #expect(json.contains("image/png")); #expect(json.contains("tool_result")); #expect(!json.contains("application/pdf"))
+        #expect(json.contains(card.id.uuidString)); #expect(json.contains(card.currentRevisionID!.uuidString))
+        #expect(!json.contains("history"))
+    }
+
+    @Test(arguments: [false, true]) func messagesChatRereadingAttachedContextDoesNotClaimLectureSearch(allCards: Bool) async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        var request = try chatRequest(in: root)
+        let card = Card(sourcePages: [7], front: "Front", back: "Back")
+        request.chatSnapshot!.cards = [card]
+        request.chatSnapshot!.initialRefs = allCards ? [.allCards, .slide(7)] : [.card(card.id)]
+        let first = sseChat(blocks: [
+            ["type": "tool_use", "id": "t1", "name": "read_slides", "input": ["pages": [7]]],
+            ["type": "tool_use", "id": "t2", "name": "get_cards", "input": ["ids": [card.id.uuidString]]]
+        ], stop: "tool_use", input: 10, output: 3)
+        let second = sseChat(blocks: [["type": "text", "text": #"{"message":"Answer","edits":[],"quiz":[]}"#]], stop: "end_turn", input: 20, output: 9)
+        let session = URLSessionStub.makeSession(status: 200, body: first)
+        URLSessionStub.state.enqueue(second)
+        let provider = MessagesAPIProvider(apiKey: { "fixture" }, session: session, endpoint: URL(string: "https://api.example.test/v1/messages")!)
+        let result = try await provider.execute(request, onEvent: { _ in })
+        #expect(result.read.contains(.card(card.id)))
+        #expect(result.read.contains(.slide(7)))
+        #expect(!result.searchedLecture)
+    }
+
     @Test func settingsCodableClampsLimitsAndHasNoCredentialField() throws {
         let settings = AISettings(backend: .messagesAPI, cliModel: "opus", messagesAPIModel: "claude-opus-5-5",
                                   claudeCLIPath: "/test/claude", maxOutputTokens: 999_999)
@@ -356,18 +467,31 @@ private final class URLSessionStubState: @unchecked Sendable {
     private let lock = NSLock()
     private var status = 200
     private var body = Data()
+    private var queued: [Data] = []
     private var request: URLRequest?
     private var stopped = false
 
     func configure(status: Int, body: Data) {
         lock.lock(); defer { lock.unlock() }
-        self.status = status; self.body = body; request = nil; stopped = false
+        self.status = status; self.body = body; request = nil; stopped = false; queued = []
     }
     func snapshot() -> (Int, Data) {
         lock.lock(); defer { lock.unlock() }
-        return (status, body)
+        let current = body
+        if !queued.isEmpty { body = queued.removeFirst() }
+        return (status, current)
     }
-    func capture(_ request: URLRequest) { lock.lock(); self.request = request; lock.unlock() }
+    func enqueue(_ data: Data) { lock.withLock { queued.append(data) } }
+    func capture(_ request: URLRequest) {
+        var captured = request
+        if captured.httpBody == nil, let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; data.append(contentsOf: buffer.prefix(count)) }
+            captured.httpBody = data
+        }
+        lock.withLock { self.request = captured }
+    }
     func lastRequest() -> URLRequest? { lock.lock(); defer { lock.unlock() }; return request }
     func markStopped() { lock.lock(); stopped = true; lock.unlock() }
     func isStopped() -> Bool { lock.lock(); defer { lock.unlock() }; return stopped }
@@ -392,9 +516,27 @@ private final class StubURLProtocol: URLProtocol {
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
                                        headerFields: ["content-type": "application/json"] )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        guard !URLSessionStub.state.isStopped() else { return }
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() { URLSessionStub.state.markStopped() }
+}
+
+private func chatRequest(in root: URL) throws -> AIRequest {
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("slides"), withIntermediateDirectories: true)
+    try Data("PNG fixture".utf8).write(to: root.appendingPathComponent("slides/007.png"))
+    try Data("Slide seven".utf8).write(to: root.appendingPathComponent("slides/007.txt"))
+    try Data("[]".utf8).write(to: root.appendingPathComponent("cards.json"))
+    try Data("ambient PDF must not be used".utf8).write(to: root.appendingPathComponent("input.pdf"))
+    var request = AIRequest(jobID: UUID(), kind: .chat, model: "opus", prompt: "Question", pdf: Data("ignored PDF".utf8), workingDirectory: root)
+    request.chatSnapshot = ChatSnapshot(slides: [ChatSlide(page: 7, text: "Slide seven", note: "Note", imagePath: "slides/007.png")], cards: [], initialRefs: [])
+    return request
+}
+
+private func sseChat(blocks: [[String: Any]], stop: String, input: Int, output: Int) -> Data {
+    var events: [[String: Any]] = [["type": "message_start", "message": ["usage": ["input_tokens": input]]]]
+    for (index, block) in blocks.enumerated() { events.append(["type": "content_block_start", "index": index, "content_block": block]); events.append(["type": "content_block_stop", "index": index]) }
+    events.append(["type": "message_delta", "delta": ["stop_reason": stop], "usage": ["output_tokens": output]])
+    events.append(["type": "message_stop"])
+    return Data(events.map { "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: $0), as: UTF8.self) + "\n\n" }.joined().utf8)
 }

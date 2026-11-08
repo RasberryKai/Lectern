@@ -135,11 +135,30 @@ public enum ThreadContext: Codable, Equatable, Hashable, Sendable { case none, s
 public enum FlashcardContext: String, Codable, CaseIterable, Sendable { case none, all, current }
 public enum MessageRole: String, Codable, Sendable { case user, assistant }
 public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
+    private enum CodingKeys: String, CodingKey { case id, role, text, citedPages, at, editJobID, attachments, context, read, quiz, stopped, searchedLecture, pendingEdits, conflictingCardIDs }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); role = try c.decode(MessageRole.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
+        citedPages = try c.decodeIfPresent([Int].self, forKey: .citedPages) ?? []; at = try c.decode(Date.self, forKey: .at); editJobID = try c.decodeIfPresent(UUID.self, forKey: .editJobID)
+        attachments = try c.decodeIfPresent([ChatAttachment].self, forKey: .attachments) ?? []
+        context = try c.decodeIfPresent([ContextRef].self, forKey: .context) ?? []; read = try c.decodeIfPresent([ContextRef].self, forKey: .read) ?? []; quiz = try c.decodeIfPresent([QuizItem].self, forKey: .quiz) ?? []; stopped = try c.decodeIfPresent(Bool.self, forKey: .stopped) ?? false
+        searchedLecture = try c.decodeIfPresent(Bool.self, forKey: .searchedLecture) ?? false
+        pendingEdits = try c.decodeIfPresent([ChatCardEdit].self, forKey: .pendingEdits) ?? []; conflictingCardIDs = try c.decodeIfPresent([UUID].self, forKey: .conflictingCardIDs) ?? []
+    }
+
     public var id: UUID
     public var role: MessageRole
     public var text: String
     public var citedPages: [Int]
     public var at: Date
+    public var attachments: [ChatAttachment] = []
+    public var context: [ContextRef] = []
+    public var read: [ContextRef] = []
+    public var quiz: [QuizItem] = []
+    public var stopped: Bool = false
+    public var searchedLecture: Bool = false
+    public var pendingEdits: [ChatCardEdit] = []
+    public var conflictingCardIDs: [UUID] = []
     public var editJobID: UUID? = nil
     public init(id: UUID = UUID(), role: MessageRole, text: String, citedPages: [Int] = [], at: Date = Date()) { self.id = id; self.role = role; self.text = text; self.citedPages = citedPages; self.at = at }
 }
@@ -221,6 +240,9 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var model: String
     /// Absent on older jobs, which keep their original additive behavior.
     public var replacesExistingCards: Bool? = nil
+    public var isLectureChat: Bool? = nil
+    public var chatEdits: [ChatCardEdit]? = nil
+    public var chatEditDisposition: ChatEditDisposition? = nil
     public var chatCardVersions: [ChatCardVersion]? = nil
     public var chatEditUndo: [ChatEditUndo]? = nil
     public var chatEditsUndoneAt: Date? = nil
@@ -234,6 +256,20 @@ public struct SkippedSlide: Codable, Equatable, Sendable {
     public init(slide: Int, reason: String) { self.slide = slide; self.reason = reason }
 }
 public struct Lecture: Codable, Equatable, Identifiable, Sendable {
+    private enum CodingKeys: String, CodingKey { case schemaVersion,id,moduleID,name,sourceFilename,pageCount,createdAt,updatedAt,slides,cards,threads,currentChat,archivedChats,learningPoints,jobs,skippedSlides,archivedAt,progressOverride,viewPreferences }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decode(Int.self, forKey: .schemaVersion); id = try c.decode(UUID.self, forKey: .id); moduleID = try c.decode(UUID.self, forKey: .moduleID); name = try c.decode(String.self, forKey: .name)
+        sourceFilename = try c.decode(String.self, forKey: .sourceFilename); pageCount = try c.decode(Int.self, forKey: .pageCount); createdAt = try c.decode(Date.self, forKey: .createdAt); updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        slides = try c.decode([SlideState].self, forKey: .slides); cards = try c.decode([Card].self, forKey: .cards); threads = try c.decodeIfPresent([SlideThread].self, forKey: .threads) ?? []
+        currentChat = try c.decodeIfPresent(LectureChat.self, forKey: .currentChat) ?? LectureChat.migrating(threads)
+        if !c.contains(.currentChat) { currentChat.id = threads.first?.id ?? id }
+        archivedChats = try c.decodeIfPresent([LectureChat].self, forKey: .archivedChats) ?? []
+        learningPoints = try c.decodeIfPresent([LearningPoint].self, forKey: .learningPoints) ?? threads.flatMap(\.learningPoints)
+        jobs = try c.decode([Job].self, forKey: .jobs); skippedSlides = try c.decode([SkippedSlide].self, forKey: .skippedSlides); archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt); progressOverride = try c.decodeIfPresent(LectureProgressStatus.self, forKey: .progressOverride)
+        viewPreferences = try c.decode(ViewPreferences.self, forKey: .viewPreferences)
+    }
+
     public static let currentSchemaVersion = 1
     public var schemaVersion: Int
     public var id: UUID
@@ -246,6 +282,9 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
     public var slides: [SlideState]
     public var cards: [Card]
     public var threads: [SlideThread]
+    public var currentChat: LectureChat
+    public var archivedChats: [LectureChat]
+    public var learningPoints: [LearningPoint]
     public var jobs: [Job]
     public var skippedSlides: [SkippedSlide]
     public var archivedAt: Date?
@@ -253,6 +292,6 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
     public var progressOverride: LectureProgressStatus?
     public var viewPreferences: ViewPreferences
     public init(id: UUID = UUID(), moduleID: UUID, name: String, sourceFilename: String = "", pageCount: Int = 0, createdAt: Date = Date(), updatedAt: Date? = nil, slides: [SlideState]? = nil, cards: [Card] = [], threads: [SlideThread] = [], jobs: [Job] = [], skippedSlides: [SkippedSlide] = [], viewPreferences: ViewPreferences = .default, schemaVersion: Int = 1) {
-        self.schemaVersion = schemaVersion; self.id = id; self.moduleID = moduleID; self.name = name; self.sourceFilename = sourceFilename; self.pageCount = pageCount; self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt; self.slides = slides ?? (0..<max(0, pageCount)).map { SlideState(pageIndex: $0) }; self.cards = cards; self.threads = threads; self.jobs = jobs; self.skippedSlides = skippedSlides; self.viewPreferences = viewPreferences
+        self.schemaVersion = schemaVersion; self.id = id; self.moduleID = moduleID; self.name = name; self.sourceFilename = sourceFilename; self.pageCount = pageCount; self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt; self.slides = slides ?? (0..<max(0, pageCount)).map { SlideState(pageIndex: $0) }; self.cards = cards; self.threads = threads; self.currentChat = LectureChat.migrating(threads); self.archivedChats = []; self.learningPoints = threads.flatMap(\.learningPoints); self.jobs = jobs; self.skippedSlides = skippedSlides; self.viewPreferences = viewPreferences
     }
 }

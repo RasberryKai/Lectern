@@ -120,9 +120,24 @@ struct LectureWorkspace: View {
     private func handleKey(_ event: NSEvent, editing: Bool) -> Bool {
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
+        if modifiers == [.command, .shift], letter == "a" {
+            toggleSidePanel(.chat)
+            return true
+        }
+        if modifiers == [.command, .shift], letter == "s" {
+            toggleSidePanel(.content)
+            return true
+        }
+        // Native focus is authoritative: SwiftUI's FocusState can lag while
+        // the mention menu changes. The composer owns its Return and Escape.
+        if ChatComposerTextView.owns(NSApp.keyWindow?.firstResponder), Key.isReturn(event) || event.keyCode == Key.escape {
+            return false
+        }
         if model.titleDraft != nil && editing { return false }
+        if model.panes.focusedDivider != nil && (event.keyCode == Key.left || event.keyCode == Key.right) { return false }
         if modifiers == [.command, .option], letter == "b" {
             model.askVisible.toggle()
+            if model.askVisible { model.panes.openChat(model.mode) }
             if !model.askVisible, focus == .ask { focus = nil }
             return true
         }
@@ -149,16 +164,20 @@ struct LectureWorkspace: View {
                 switch focus {
                 case .feedback: Task { await model.sendFeedback() }; return true
                 case .ask:
-                    if let page = askPage { Task { await model.ask(page: page, cardID: model.mode == .review ? model.selectedCard?.id : nil) } }
-                    return true
+                    // The editor gives an open mention menu first refusal.
+                    return false
                 default: return false
                 }
             }
         }
-        if modifiers == [.command, .shift], letter == "a" {
-            model.askVisible = true; focus = .ask; return true
+        if Key.isReturn(event), modifiers.isEmpty, focus == .feedback {
+            Task { await model.sendFeedback() }
+            focus = nil
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            return true
         }
         if event.keyCode == Key.escape, editing {
+            if focus == .ask { return false }
             if focus == .feedback { Task { await model.saveFeedback() } }
             focus = nil
             NSApp.keyWindow?.makeFirstResponder(nil)
@@ -167,11 +186,26 @@ struct LectureWorkspace: View {
         // Card shortcuts would act on cards hidden behind the generation overlay.
         if model.mode == .review, model.runningGenerate != nil { return false }
         guard !editing else { return false }
+        if modifiers.isEmpty, letter == "a" {
+            model.askVisible = true
+            model.panes.openChat(model.mode)
+            focus = .ask
+            return true
+        }
         return model.mode == .prepare ? handlePrepareKey(event, modifiers: modifiers) : handleReviewKey(event, modifiers: modifiers, letter: letter)
     }
 
-    private var askPage: Int? {
-        model.mode == .prepare ? model.focusedPage : model.selectedCard?.sourcePages.first
+    private func toggleSidePanel(_ tab: LectureSideTab) {
+        let closing = model.askVisible && model.panes.tab(for: model.mode) == tab
+        model.askVisible = !closing
+        if closing {
+            focus = nil
+            NSApp.keyWindow?.makeFirstResponder(nil)
+        } else {
+            model.panes.setTab(tab, for: model.mode)
+            focus = tab == .chat ? .ask : nil
+            if tab == .content { NSApp.keyWindow?.makeFirstResponder(nil) }
+        }
     }
 
     private func handlePrepareKey(_ event: NSEvent, modifiers: NSEvent.ModifierFlags) -> Bool {
@@ -217,7 +251,13 @@ struct LectureWorkspace: View {
             return true
         case "x": Task { await model.discardProposal() }; return true
         case "u": Task { await model.undo() }; return true
+        case "j": model.stepCard(-1); return true
+        case "k": model.stepCard(1); return true
         case "s":
+            let wasShowingSlide = model.askVisible && model.panes.tab(for: .review) == .content
+            model.askVisible = true
+            model.panes.setTab(.content, for: .review)
+            guard wasShowingSlide else { return true }
             guard let count = model.selectedCard?.sourcePages.count, count > 0 else { return false }
             model.sourceIndex = (model.sourceIndex + 1) % count
             return true
@@ -226,8 +266,8 @@ struct LectureWorkspace: View {
             model.jumpToPrepare(page: card.sourcePages[min(model.sourceIndex, card.sourcePages.count - 1)])
             return true
         case "a":
-            guard model.selectedCard?.sourcePages.isEmpty == false else { return false }
             model.askVisible = true
+            model.panes.openChat(model.mode)
             focus = .ask
             return true
         case "e":
@@ -274,38 +314,46 @@ struct LectureTopBar: View {
     var focus: FocusState<EditorField?>.Binding
 
     var body: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 10) {
             Button {
                 Task { await app.returnToLibrary() }
             } label: {
-                Label("Back to library", systemImage: "chevron.left")
+                Image(systemName: "chevron.left")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(SecondaryButtonStyle())
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back to library")
             .disabled(app.leavingLecture)
             presentationTitle
+            Text(model.moduleName).font(Theme.small).foregroundStyle(Theme.faint).lineLimit(1)
             SegmentedControl(options: [(LectureMode.prepare, "Prepare"), (LectureMode.review, "Review")],
                              selection: Binding(get: { model.mode }, set: { model.setMode($0) }))
                 .help("⌘1 Prepare · ⌘2 Review")
                 .disabled(model.lecture.pageCount == 0)
-            if model.mode == .prepare {
-                SegmentedControl(options: [(PrepareFilter.all, "All"), (PrepareFilter.selected, "Selected"), (PrepareFilter.noCards, "No cards")],
-                                 selection: $model.prepareFilter, activeFill: Theme.inset, activeText: Theme.ink)
-            }
             Spacer(minLength: 10)
             if model.mode == .prepare { prepareTrailing } else { reviewTrailing }
             Button {
+                if model.mode == .prepare { model.thumbnailsVisible.toggle() }
+                else { model.panes.reviewLeftVisible.toggle() }
+            } label: { Image(systemName: "sidebar.left").frame(width: 28, height: 26) }
+                .buttonStyle(.plain).foregroundStyle(Theme.quiet)
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
+                .accessibilityLabel("Toggle left sidebar")
+            Button {
                 model.askVisible.toggle()
             } label: {
-                Image(systemName: "sidebar.right")
+                Image(systemName: "sidebar.right").frame(width: 28, height: 26)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(model.askVisible ? Theme.accentText : Theme.quiet)
+            .foregroundStyle(Theme.quiet)
+            .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
             .accessibilityLabel("Toggle right sidebar")
             .help("Toggle right sidebar · ⌘⌥B")
             .keyboardShortcut("b", modifiers: [.command, .option])
         }
-        .padding(.horizontal, 22).padding(.vertical, 12)
-        .background(Theme.surface)
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(Theme.sidebar)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
@@ -355,8 +403,7 @@ struct LectureTopBar: View {
 
     @ViewBuilder private var prepareTrailing: some View {
         let selected = model.lecture.slides.filter(\.isSelected).count
-        let uncovered = model.lecture.uncoveredSelectedPages.count
-        Text("\(selected) of \(model.lecture.pageCount) selected · \(uncovered) without cards")
+        Text("\(selected) of \(model.lecture.pageCount) slides for cards")
             .font(Theme.body).foregroundStyle(Theme.quiet).monospacedDigit()
         Menu {
             Button("Select all slides") { Task { await model.setAllSelected(true) } }
@@ -378,7 +425,7 @@ struct LectureTopBar: View {
             Button("Generating…") {}.buttonStyle(SecondaryButtonStyle(foreground: Theme.quiet, fill: Theme.inset)).disabled(true)
                 .help("Writing cards from \(Format.count(running.pages.count, "slide"))")
         } else {
-            Button("Generate cards…") { model.showGenerateSheet = true }
+            Button { model.showGenerateSheet = true } label: { Label("Generate cards", systemImage: "sparkles") }
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(model.readOnly)
                 .help("⌘G")
@@ -386,9 +433,13 @@ struct LectureTopBar: View {
     }
 
     @ViewBuilder private var reviewTrailing: some View {
-        Text("\(model.reviewedCount) / \(model.activeCards.count) reviewed").font(Theme.body).foregroundStyle(Theme.quiet).monospacedDigit()
-        Text(model.readOnly ? "Read-only" : "Saved on this Mac").font(Theme.small).foregroundStyle(Theme.faint)
-        Button("Export") {
+        HStack(spacing: 8) {
+            Text("\(model.reviewedCount) of \(model.activeCards.count) reviewed")
+                .font(Theme.small).foregroundStyle(Theme.quiet).monospacedDigit()
+            ProgressView(value: Double(model.reviewedCount), total: Double(max(1, model.activeCards.count)))
+                .progressViewStyle(.linear).tint(Theme.accent).frame(width: 90)
+        }
+        Button("Export to Anki") {
             Task { await app.returnToLibrary(destination: .export(model.ref.moduleID)) }
         }
         .buttonStyle(SecondaryButtonStyle())

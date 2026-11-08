@@ -14,6 +14,12 @@ open .build/Lectern.app
 
 Or open `Package.swift` in Xcode 26 and run the `LecternApp` scheme. `LECTERN_LIBRARY_ROOT=/tmp/lectern-test` runs against an isolated library; `LECTERN_SKIP_LEGACY_IMPORT=1` skips the first-launch import of Slide Learning / Flashcard Reviewer data. The app target uses Swift 6.2's default MainActor isolation, so the package now needs tools version 6.2 (Xcode 26). See [the frontend notes](Docs/FRONTEND.md) for structure and what still needs live checks.
 
+The [v2 redesign](Docs/Design/v2/lectern-v2-design.md) adds resizable Prepare/Review panes, shared lecture chats with saved history, focus/pinned context, Markdown answers and card edits. See [v2 verification](Docs/Design/v2/VERIFICATION.md) for coverage and remaining live checks.
+
+Chat accepts images through the paperclip, paste, or drag and drop anywhere in the right pane. A compact drop cue appears while dragging; dropping on Cards/Source opens chat. Preview or remove images before sending; image-only questions work too. Uploads stay with drafts and saved chats, travel in portable backups, and are frozen for retries. Messages have no image-count limit; images are limited to 5 MiB each and 10 MiB total per message, normalized to PNG/JPEG at up to 2048 pixels. The `@` picker supports ↑/↓, Enter and Escape; All slides/All cards replace individual selections in that category.
+
+Chat sends current card questions, answers, source pages and any math decisions, keeping revision history and app metadata in the local snapshot. All cards omits the redundant card index; individual lookups by displayed number fetch exact IDs for safe edits. Stable context comes before conversation history and uses sorted JSON keys for prompt-cache reuse. Older frozen jobs keep their original retry format. Model/effort settings and learning-point extraction are unchanged.
+
 Start with [the frontend handoff](Docs/FRONTEND_HANDOFF.md). The original design's instruction to use Slide Learning as the host repository is superseded by this standalone checkout. The supplied [design](Docs/learning-app-v1-design.md) and [screen mockups](Docs/learning-app-v1-screens.html) are copied here for a self-contained handoff. [Verification](Docs/VERIFICATION.md) records tests, migration, review, and outstanding checks. [Integration research](Docs/INTEGRATION_RESEARCH.md) distinguishes verified Claude/Anki support from remaining live checks.
 
 The updated [Overview](Docs/Design/overview.png) and [Module settings](Docs/Design/module-settings.png) are included. The backend now supports planned lecture slots, date-only exam settings, derived progress/pace/Next up actions, and reversible read-only archives. The frontend handoff documents the new APIs and refresh/archiving rules.
@@ -28,6 +34,8 @@ swift run lectern demo
 swift run lectern help
 swift run lectern overview
 ```
+
+Run `scripts/check-thumbnail-scrolling.sh` to check animated thumbnail navigation in both directions, rapid changes, and list boundaries in an isolated window without accessing your library.
 
 The demo uses fixtures, makes a new temporary library, and exercises PDF import → Generate → Revise → accept/approve → Ask → Distil → Anki text → backup/restore. It makes no model requests. If running under the Codex filesystem sandbox, use:
 
@@ -55,9 +63,9 @@ The new library defaults to `~/Library/Application Support/Lectern/Library`. `--
 
 ## Claude and Anki
 
-The CLI backend launches the installed, unmodified `claude`, keeps its own authentication, disables personal customizations with safe mode, and restricts built-in tools to reading the job PDF. Lectern never extracts subscription credentials. Run `claude auth login` yourself to sign in with an ordinary Pro/Max/Ultra/Team/Enterprise Claude profile. Console OAuth and unverifiable setup-token profiles are rejected; account-enabled extra-usage credits can still incur charges beyond included limits. The installed CLI was logged out, so the logged-in status/tier compatibility and real inference remain unverified. This path is for personal local use; use the API-key backend for distribution unless Anthropic confirms the subscription-wrapper policy.
+The CLI backend launches the installed, unmodified `claude`, keeps its own authentication, disables personal customizations with safe mode, and restricts built-in tools to reading job context files. Lecture chat uses PDFKit-rendered PNGs, extracted text and frozen card JSON, with a compact index for lookup; it never attaches the lecture PDF. Generate and revision jobs retain their PDF workflow. Lectern never extracts subscription credentials. Run `claude auth login` yourself to sign in with an ordinary Pro/Max/Ultra/Team/Enterprise Claude profile. Console OAuth and unverifiable setup-token profiles are rejected; account-enabled extra-usage credits can still incur charges beyond included limits. The installed CLI was logged out, so the logged-in status/tier compatibility and real inference remain unverified. This path is for personal local use; use the API-key backend for distribution unless Anthropic confirms the subscription-wrapper policy.
 
-The API fallback uses Keychain, direct Messages requests, structured output, PDF blocks, and SSE for Ask. Provider/model settings are available through `AISettingsStore`. Model IDs and published pricing are configurable/dated; cost summaries distinguish reported cost from token-based estimates and unpriced jobs.
+The API fallback uses Keychain, direct Messages requests, structured output, PDF blocks for generation/revision, and streamed lookup tools for lecture chat. Provider/model settings are available through `AISettingsStore`. Model IDs and published pricing are configurable/dated; cost summaries distinguish reported cost from token-based estimates and unpriced jobs.
 
 Anki export uses a stable **first regular field** `LecternID`, not a fabricated Anki GUID. Run `lectern anki-setup` for the required one-time note type setup. The generated header selects an existing note type; it cannot create one. Scheduling remains in Anki. Real import/update/rendering requires a manual Anki check.
 
