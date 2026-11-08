@@ -35,6 +35,8 @@ swift run lectern help
 swift run lectern overview
 ```
 
+Run `scripts/check-thumbnail-scrolling.sh` to check animated thumbnail navigation in both directions, rapid changes, and list boundaries in an isolated window without accessing your library.
+
 The demo uses fixtures, makes a new temporary library, and exercises PDF import → Generate → Revise → accept/approve → Ask → Distil → Anki text → backup/restore. It makes no model requests. If running under the Codex filesystem sandbox, use:
 
 ```sh

@@ -26,25 +26,16 @@ struct PrepareView: View {
     // MARK: Thumbnails
 
     private var thumbnails: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(model.filteredSlides) { slide in
-                        SlideCell(model: model, slide: slide, width: 250, sourceURL: sourceURL)
-                            .id(slide.pageIndex)
-                    }
-                    if model.filteredSlides.isEmpty {
-                        Text(model.prepareFilter == .noCards ? "Every slide has cards." : "No slides match this filter.")
-                            .font(Theme.small).foregroundStyle(Theme.quiet).padding(.top, 30)
-                    }
-                }
-                .padding(10)
+        CenteredThumbnailList(pageIndices: model.filteredSlides.map(\.pageIndex), focusedPageIndex: model.focusedPageIndex) { pageIndex in
+            if let slide = model.slide(pageIndex) {
+                SlideCell(model: model, slide: slide, width: 250, sourceURL: sourceURL)
             }
-            .onChange(of: model.focusedPageIndex) { _, page in
-                guard let page else { return }
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(page) }
+        }
+        .overlay {
+            if model.filteredSlides.isEmpty {
+                Text(model.prepareFilter == .noCards ? "Every slide has cards." : "No slides match this filter.")
+                    .font(Theme.small).foregroundStyle(Theme.quiet).padding(10)
             }
-            .onAppear { if let page = model.focusedPageIndex { proxy.scrollTo(page, anchor: .center) } }
         }
     }
 
