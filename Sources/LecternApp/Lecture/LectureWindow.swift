@@ -78,6 +78,8 @@ struct LectureWorkspace: View {
                 case .review:
                     ZStack {
                         ReviewView(model: model, focus: $focus)
+                            .disabled(generationOverlayVisible)
+                            .accessibilityHidden(generationOverlayVisible)
                         if let job = model.runningGenerate {
                             GenerationOverlay(model: model, job: job)
                                 .transition(reduceMotion ? AnyTransition.opacity
@@ -103,6 +105,12 @@ struct LectureWorkspace: View {
         .onChange(of: model.runningGenerate?.id) { old, new in
             if let old, new == nil { model.revealGenerated(old) }
         }
+        .onChange(of: generationOverlayVisible) { _, visible in
+            // Nothing behind the overlay keeps focus, so Return can't send from a hidden composer.
+            guard visible else { return }
+            focus = nil
+            NSApp.keyWindow?.makeFirstResponder(nil)
+        }
         .onChange(of: app.requestedModes[model.ref.lectureID]) { _, mode in
             guard let mode else { return }
             app.requestedModes.removeValue(forKey: model.ref.lectureID)
@@ -117,10 +125,14 @@ struct LectureWorkspace: View {
 
     // MARK: Keyboard
 
+    private var generationOverlayVisible: Bool { model.mode == .review && model.runningGenerate != nil }
+
     private func handleKey(_ event: NSEvent, editing: Bool) -> Bool {
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
         if modifiers == [.command, .shift], letter == "a" {
+            // The chat sits behind the generation overlay; don't focus it there.
+            guard !generationOverlayVisible else { return true }
             toggleSidePanel(.chat)
             return true
         }
@@ -184,7 +196,7 @@ struct LectureWorkspace: View {
             return true
         }
         // Card shortcuts would act on cards hidden behind the generation overlay.
-        if model.mode == .review, model.runningGenerate != nil { return false }
+        if generationOverlayVisible { return false }
         guard !editing else { return false }
         if modifiers.isEmpty, letter == "a" {
             model.askVisible = true
