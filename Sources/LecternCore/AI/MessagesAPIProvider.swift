@@ -46,65 +46,101 @@ public struct MessagesAPIProvider: AIProvider {
     }
 
     public func execute(_ request: AIRequest, onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
-        try Task.checkCancellation()
-        let apiKey = try apiKeyProvider().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !apiKey.isEmpty else { throw AIError.configuration("Add an Anthropic API key in Lectern settings to use the Messages API.") }
+        let recordsEvents = AIDiagnostics.current?.jobID != request.jobID
+        return try await AIDiagnostics.withTrace(request: request, backend: backend) { _ in
+            let trace = AIDiagnostics.current
+            let forwardEvent: @Sendable (AIEvent) -> Void = { event in
+                if recordsEvents { trace?.event(event) }
+                onEvent(event)
+            }
+            trace?.phase("preflight")
+            try Task.checkCancellation()
+            let suppliedAPIKey = try apiKeyProvider()
+            // Register the exact secret before constructing/logging an HTTP request.
+            trace?.registerSecret(suppliedAPIKey)
+            let apiKey = suppliedAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            trace?.registerSecret(apiKey)
+            guard !apiKey.isEmpty else {
+                throw AIError.configuration("Add an Anthropic API key in Lectern settings to use the Messages API.")
+            }
 
-        if request.kind == .chat, let snapshot = request.chatSnapshot {
-            return try await executeChat(request, snapshot: snapshot, apiKey: apiKey, onEvent: onEvent)
+            let response: AIResponse
+            if request.kind == .chat, let snapshot = request.chatSnapshot {
+                response = try await executeChat(request, snapshot: snapshot, apiKey: apiKey, onEvent: forwardEvent)
+            } else {
+                let pdf = try Self.pdfData(for: request)
+                if let pdf, pdf.count > 96 * 1_024 * 1_024 {
+                    throw AIError.limit("The PDF is too large for an inline Messages API request. Reduce its size or selected pages.")
+                }
+
+                let effectiveModel = request.model.hasPrefix("claude-") ? request.model : model
+                let urlRequest = try Self.makeURLRequest(
+                    prompt: request.prompt,
+                    kind: request.kind,
+                    pdf: pdf,
+                    systemPrompt: request.systemPrompt,
+                    apiKey: apiKey,
+                    model: effectiveModel,
+                    apiVersion: apiVersion,
+                    endpoint: endpoint,
+                    maxOutputTokens: maxOutputTokens
+                )
+                guard let bodySize = urlRequest.httpBody?.count, bodySize <= maximumRequestBytes else {
+                    throw AIError.limit("The Messages API request exceeds Anthropic's 128 MB request limit.")
+                }
+
+                try Task.checkCancellation()
+                trace?.phase("sending")
+                forwardEvent(.stage("Sending"))
+                if request.kind == .ask {
+                    response = try await executeStreaming(urlRequest, onEvent: forwardEvent)
+                } else {
+                    response = try await executeNonStreaming(urlRequest, onEvent: forwardEvent)
+                }
+            }
+
+            trace?.response(response)
+            return response
         }
+    }
 
-        let pdf = try Self.pdfData(for: request)
-        if let pdf, pdf.count > 96 * 1_024 * 1_024 {
-            throw AIError.limit("The PDF is too large for an inline Messages API request. Reduce its size or selected pages.")
-        }
-
-        let effectiveModel = request.model.hasPrefix("claude-") ? request.model : model
-        let urlRequest = try Self.makeURLRequest(
-            prompt: request.prompt,
-            kind: request.kind,
-            pdf: pdf,
-            systemPrompt: request.systemPrompt,
-            apiKey: apiKey,
-            model: effectiveModel,
-            apiVersion: apiVersion,
-            endpoint: endpoint,
-            maxOutputTokens: maxOutputTokens
-        )
-        guard let bodySize = urlRequest.httpBody?.count, bodySize <= maximumRequestBytes else {
-            throw AIError.limit("The Messages API request exceeds Anthropic's 128 MB request limit.")
-        }
-
-        try Task.checkCancellation()
-        onEvent(.stage("Sending"))
-        if request.kind == .ask {
-            return try await executeStreaming(urlRequest, onEvent: onEvent)
-        }
-
+    private func executeNonStreaming(_ request: URLRequest,
+                                     onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        let trace = AIDiagnostics.current
+        let prefix = trace?.httpRequest(request)
         do {
             try Task.checkCancellation()
-            let (data, response) = try await session.data(for: urlRequest)
+            let (data, response) = try await session.data(for: request)
+            trace?.httpResponse(response, prefix: prefix ?? "http-unknown")
+            let status = (response as? HTTPURLResponse)?.statusCode
+            let bodySuffix = status.map { (200..<300).contains($0) } == true ? "json" : "error.txt"
+            trace?.writeText((prefix ?? "http-unknown") + "-body." + bodySuffix, String(decoding: data, as: UTF8.self))
             try Task.checkCancellation()
             guard let http = response as? HTTPURLResponse else {
                 throw AIError.transport("The Messages API returned a non-HTTP response.")
             }
             guard (200..<300).contains(http.statusCode) else {
+                trace?.phase("parsing")
                 throw Self.httpError(status: http.statusCode, body: data, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
             }
+            trace?.phase("parsing")
             onEvent(.stage("Writing"))
             return try Self.parseMessageResponse(data)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as AIError {
+            trace?.failure(error, event: "http_round_error", fields: ["round": prefix ?? ""])
             throw error
         } catch {
             if Task.isCancelled { throw CancellationError() }
+            trace?.failure(error, event: "http_transport_error", fields: ["round": prefix ?? ""])
             throw AIError.transport("Messages API request failed: \(error.localizedDescription)")
         }
     }
 
     private func executeChat(_ request: AIRequest, snapshot: ChatSnapshot, apiKey: String,
                              onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        let trace = AIDiagnostics.current
         let context = ChatProviderContext(request: request, snapshot: snapshot)
         let initial = try context.initialContent()
         var read = initial.refs
@@ -127,6 +163,7 @@ public struct MessagesAPIProvider: AIProvider {
             urlRequest.setValue("text/event-stream", forHTTPHeaderField: "accept")
             guard urlRequest.httpBody!.count <= maximumRequestBytes else { throw AIError.limit("The chat exceeds the Messages API request limit.") }
             let round = try await chatRound(urlRequest, onEvent: onEvent)
+            trace?.phase("parsing")
             total.inputTokens += round.usage.inputTokens; total.outputTokens += round.usage.outputTokens
             total.cacheCreationInputTokens = (total.cacheCreationInputTokens ?? 0) + (round.usage.cacheCreationInputTokens ?? 0)
             total.cacheReadInputTokens = (total.cacheReadInputTokens ?? 0) + (round.usage.cacheReadInputTokens ?? 0)
@@ -147,6 +184,7 @@ public struct MessagesAPIProvider: AIProvider {
             guard round.stopReason == "tool_use" else { throw AIError.invalidResponse("Claude returned unfinished chat tool calls.") }
             messages.append(["role": "assistant", "content": blocks])
             var results: [[String: Any]] = []
+            trace?.phase("tool_execution")
             for tool in tools {
                 try Task.checkCancellation()
                 guard let id = tool["id"] as? String, let name = tool["name"] as? String,
@@ -200,20 +238,41 @@ public struct MessagesAPIProvider: AIProvider {
 
     private func chatRound(_ request: URLRequest, onEvent: @escaping @Sendable (AIEvent) -> Void) async throws
         -> (blocks: [[String: Any]], usage: AIUsage, stopReason: String?) {
+        let trace = AIDiagnostics.current
+        trace?.phase("sending")
+        let prefix = trace?.httpRequest(request) ?? "http-unknown"
+        let sseFilename = prefix + "-body.sse"
+        defer { trace?.flush(sseFilename) }
         do {
             onEvent(.stage("Sending"))
             let (bytes, response) = try await session.bytes(for: request)
+            trace?.httpResponse(response, prefix: prefix)
             guard let http = response as? HTTPURLResponse else { throw AIError.transport("Non-HTTP chat response.") }
             guard (200..<300).contains(http.statusCode) else {
+                trace?.phase("parsing")
                 var body = Data()
-                for try await byte in bytes { if body.count >= 1_048_576 { break }; body.append(byte) }
-                throw Self.httpError(status: http.statusCode, body: body, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+                defer { trace?.writeText(prefix + "-body.error.txt", String(decoding: body, as: UTF8.self)) }
+                do {
+                    try Task.checkCancellation()
+                    for try await byte in bytes {
+                        if body.count >= 1_048_576 { break }
+                        body.append(byte)
+                    }
+                } catch {
+                    if Task.isCancelled { throw CancellationError() }
+                    trace?.failure(error, event: "http_error_body_read_error", fields: ["round": prefix])
+                    throw error
+                }
+                let error = Self.httpError(status: http.statusCode, body: body, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+                throw error
             }
             var blocks: [Int: [String: Any]] = [:], partialInputs: [Int: String] = [:]
             var usage = AIUsage(), stop: String?, stopped = false, size = 0
             var preview = ChatMessageStream()
+            trace?.phase("parsing")
             for try await line in bytes.lines {
                 try Task.checkCancellation(); size += line.utf8.count
+                trace?.appendBytes(sseFilename, Data((line + "\n").utf8))
                 guard size <= 16 * 1_024 * 1_024 else { throw AIError.limit("Chat response exceeded 16 MB.") }
                 guard line.hasPrefix("data:"), let event = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(5).utf8)) as? [String: Any], let type = event["type"] as? String else { continue }
                 let index = event["index"] as? Int ?? 0
@@ -241,9 +300,17 @@ public struct MessagesAPIProvider: AIProvider {
             }
             guard stopped else { throw AIError.transport("Chat stream ended before message_stop.") }
             return (blocks.keys.sorted().compactMap { blocks[$0] }, usage, stop)
-        } catch is CancellationError { throw CancellationError() }
-        catch let error as AIError { throw error }
-        catch { if Task.isCancelled { throw CancellationError() }; throw AIError.transport("Chat request failed: \(error.localizedDescription)") }
+        } catch is CancellationError {
+            trace?.record("http_round_cancelled", ["round": prefix])
+            throw CancellationError()
+        } catch let error as AIError {
+            trace?.failure(error, event: "http_round_error", fields: ["round": prefix])
+            throw error
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            trace?.failure(error, event: "http_round_error", fields: ["round": prefix])
+            throw AIError.transport("Chat request failed: \(error.localizedDescription)")
+        }
     }
 
     /// Request builder is internal so tests can inspect the exact payload without network access.
@@ -333,7 +400,10 @@ public struct MessagesAPIProvider: AIProvider {
         let snapshotURL = request.workingDirectory.appendingPathComponent("input.pdf", isDirectory: false)
         guard FileManager.default.fileExists(atPath: snapshotURL.path) else { return nil }
         do { return try Data(contentsOf: snapshotURL) }
-        catch { throw AIError.configuration("The job PDF could not be read: \(error.localizedDescription)") }
+        catch {
+            AIDiagnostics.current?.failure(error, event: "pdf_read_error", fields: ["path": snapshotURL.path])
+            throw AIError.configuration("The job PDF could not be read: \(error.localizedDescription)")
+        }
     }
 
     private static func cachedPromptSegments(_ prompt: String) -> (stable: String, dynamic: String)? {
@@ -364,27 +434,43 @@ public struct MessagesAPIProvider: AIProvider {
     }
 
     private func executeStreaming(_ request: URLRequest, onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        let trace = AIDiagnostics.current
+        let prefix = trace?.httpRequest(request) ?? "http-unknown"
+        let sseFilename = prefix + "-body.sse"
+        defer { trace?.flush(sseFilename) }
+        trace?.phase("sending")
         let (bytes, response): (URLSession.AsyncBytes, URLResponse)
         do { try Task.checkCancellation(); (bytes, response) = try await session.bytes(for: request) }
         catch {
             if Task.isCancelled { throw CancellationError() }
+            trace?.failure(error, event: "http_transport_error", fields: ["round": prefix])
             throw AIError.transport("Messages API stream could not start: \(error.localizedDescription)")
         }
+        trace?.httpResponse(response, prefix: prefix)
         guard let http = response as? HTTPURLResponse else {
             throw AIError.transport("The Messages API returned a non-HTTP response.")
         }
         if !(200..<300).contains(http.statusCode) {
-            var lines: [String] = []
-            var size = 0
-            for try await line in bytes.lines {
+            trace?.phase("parsing")
+            var body = Data()
+            defer { trace?.writeText(prefix + "-body.error.txt", String(decoding: body, as: UTF8.self)) }
+            do {
                 try Task.checkCancellation()
-                size += line.utf8.count
-                guard size <= 1_048_576 else { break }
-                lines.append(line)
+                for try await byte in bytes {
+                    if body.count >= 1_048_576 { break }
+                    body.append(byte)
+                }
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                trace?.failure(error, event: "http_error_body_read_error", fields: ["round": prefix])
+                throw error
             }
-            throw Self.httpError(status: http.statusCode, body: Data(lines.joined(separator: "\n").utf8), retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+            let error = Self.httpError(status: http.statusCode, body: body, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+            trace?.failure(error, event: "http_round_error", fields: ["round": prefix])
+            throw error
         }
 
+        trace?.phase("parsing")
         onEvent(.stage("Writing"))
         var dataLines: [String] = []
         var responseText = ""
@@ -431,6 +517,7 @@ public struct MessagesAPIProvider: AIProvider {
 
         do {
             for try await line in bytes.lines {
+                trace?.appendBytes(sseFilename, Data((line + "\n").utf8))
                 try Task.checkCancellation()
                 totalBytes += line.utf8.count + 1
                 guard totalBytes <= 16 * 1_024 * 1_024 else {
@@ -452,11 +539,14 @@ public struct MessagesAPIProvider: AIProvider {
             }
             try processEventData()
         } catch is CancellationError {
+            trace?.record("http_round_cancelled", ["round": prefix])
             throw CancellationError()
         } catch let error as AIError {
+            trace?.failure(error, event: "http_round_error", fields: ["round": prefix])
             throw error
         } catch {
             if Task.isCancelled { throw CancellationError() }
+            trace?.failure(error, event: "http_round_error", fields: ["round": prefix])
             throw AIError.transport("Messages API stream ended unexpectedly: \(error.localizedDescription)")
         }
 

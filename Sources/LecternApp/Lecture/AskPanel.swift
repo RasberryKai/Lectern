@@ -78,6 +78,11 @@ struct AskPanel: View {
                         .font(Theme.caption).foregroundStyle(Theme.faint)
                 }
             }
+        } else if model.isStartingChat {
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.mini)
+                Text("Preparing your question…").font(Theme.caption).foregroundStyle(Theme.faint)
+            }
         }
     }
     @ViewBuilder private var errors: some View {

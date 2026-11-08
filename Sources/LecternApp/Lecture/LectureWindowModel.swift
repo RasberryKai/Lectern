@@ -37,6 +37,7 @@ final class LectureWindowModel {
     var chatAttachmentError: String?
     var isImportingChatImages = false
     var chatPreparationFailure: ChatPreparationFailure?
+    var pendingChatMessage: PendingChatMessage?
     var isStartingChat = false
     @ObservationIgnored var chatDraftSaveTask: Task<Void, Never>?
     var titleDraft: String?

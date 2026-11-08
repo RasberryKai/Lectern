@@ -64,6 +64,61 @@ struct ProviderTests {
         #expect(response.usage.inputTokens == 4)
     }
 
+    @Test func cliNonzeroStreamExitPreservesProviderErrorAndLimitCategory() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cli = try fakeCLI(in: root, body: #"""
+        if [ "$1" = "auth" ]; then
+          printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"pro"}'
+          exit 0
+        fi
+        cat > /dev/null
+        printf '%s\n' '{"type":"system","subtype":"init"}'
+        printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","errors":["You have hit your limit. Try again after 8pm."]}'
+        exit 1
+        """#)
+        var request = AIRequest(jobID: UUID(), kind: .chat, model: "opus", prompt: "Give a simple example.",
+                                pdf: nil, workingDirectory: root)
+        request.chatSnapshot = ChatSnapshot(slides: [], cards: [], initialRefs: [])
+        try Data("[]".utf8).write(to: root.appendingPathComponent("cards.json"))
+        do {
+            _ = try await ClaudeCLIProvider(executableURL: cli, timeout: 3).execute(request, onEvent: { _ in })
+            Issue.record("Expected a provider limit error")
+        } catch let error as AIError {
+            #expect(error == .limit("You have hit your limit. Try again after 8pm."))
+        }
+    }
+
+    @Test func cliFailureDetailsHandleEnvelopesStreamsAndFallbacks() throws {
+        let fallback = "Claude Code exited with status 1."
+        let samples: [(String, String, String)] = [
+            (#"{"type":"result","is_error":true,"result":"Session expired"}"#, "stderr noise", "Session expired"),
+            (#"{"type":"result","result":"  ","errors":["", "Provider unavailable"]}"#, "", "Provider unavailable"),
+            ("{\"type\":\"system\"}\n{\"type\":\"result\",\"errors\":[\"Connection reset\"]}\n", "", "Connection reset"),
+            ("{\"type\":\"system\"}\n{\"type\":\"error\",\"error\":{\"message\":\"Authentication failed\"}}", "", "Authentication failed"),
+            (#"{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"You've hit your limit"}]}}"#, "", "You've hit your limit"),
+            (#"{"type":"result","result":"","errors":[]}"#, " CLI crashed \n", "CLI crashed"),
+            (#"{"type":"result","subtype":"error_max_structured_output_retries"}"#, "", "Claude Code reported an error (error_max_structured_output_retries)."),
+            ("invalid JSON", "", fallback)
+        ]
+        for (stdout, stderr, expected) in samples {
+            #expect(ClaudeCLIProvider.message(from: Data(stdout.utf8), stderr: Data(stderr.utf8), fallback: fallback) == expected)
+        }
+        #expect(ClaudeCLIProvider.message(from: Data(), stderr: Data(String(repeating: "x", count: 2_000).utf8), fallback: fallback).count == 1_024)
+    }
+
+    @Test func cliParsersPreserveErrorsArrayWhenResultIsEmpty() throws {
+        let result = Data(#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","errors":["Provider unavailable"]}"#.utf8)
+        for parse in [ClaudeCLIProvider.parseStructuredResult, ClaudeCLIProvider.parseStreamResult] {
+            do {
+                _ = try parse(result)
+                Issue.record("Expected the provider error")
+            } catch let error as AIError {
+                #expect(error == .transport("Provider unavailable"))
+            }
+        }
+    }
+
     @Test func cliAcceptsCompletedStructuredToolButRejectsIncompleteCalls() throws {
         let payload = #"{"learningPoints":[{"text":"Profit is revenue minus expenses.","pages":[1]}]}"#
         let success = Data("""

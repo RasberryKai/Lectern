@@ -49,6 +49,41 @@ private actor V2Gate: AIProvider {
         try await session.newChat(); #expect(session.lecture.archivedChats.first?.draft == "Unsent")
         try await session.openChat(id: original); #expect(session.lecture.currentChat.draft == "Unsent"); #expect(session.lecture.learningPoints.count == 1)
     }
+    @Test @MainActor func optimisticMessageIdentitySurvivesCommitAndRepeatedSubmission() async throws {
+        let (store, _, lecture, root) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let gate = V2Gate(try response(lecture.cards, count: 0))
+        let runner = JobRunner(store: store, providers: [gate])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+        let messageID = UUID()
+        let jobID = try await session.chat(question: "Explain", contextRefs: [.card(lecture.cards[0].id)], messageID: messageID)
+        #expect(session.lecture.currentChat.messages.map(\.id) == [messageID])
+        #expect(session.lecture.currentChat.messages.first?.editJobID == jobID)
+        // A send whose commit succeeded but refresh failed must reuse its existing job.
+        let repeatedID = try await session.chat(question: "Explain", contextRefs: [.card(lecture.cards[0].id)], messageID: messageID)
+        #expect(repeatedID == jobID)
+        #expect(session.lecture.currentChat.messages.filter { $0.role == .user }.count == 1)
+        #expect(session.lecture.jobs.filter { $0.kind == .chat }.count == 1)
+        await gate.release(); await runner.waitUntilIdle(); try await session.refresh()
+        let completedID = try await session.chat(question: "Explain", contextRefs: [], messageID: messageID)
+        #expect(completedID == jobID)
+        #expect(session.lecture.currentChat.messages.filter { $0.role == .user }.map(\.id) == [messageID])
+        #expect(session.lecture.jobs.filter { $0.kind == .chat }.count == 1)
+    }
+    @Test @MainActor func failedPreparationCanReuseOptimisticMessageIdentity() async throws {
+        let (store, _, lecture, root) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let gate = V2Gate(try response(lecture.cards, count: 0))
+        let runner = JobRunner(store: store, providers: [gate])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+        let messageID = UUID()
+        await #expect(throws: AIError.self) {
+            try await session.chat(question: "Explain", contextRefs: [.slide(999)], messageID: messageID)
+        }
+        #expect(session.lecture.currentChat.messages.isEmpty)
+        #expect(session.lecture.jobs.isEmpty)
+        _ = try await session.chat(question: "Explain", contextRefs: [], messageID: messageID)
+        #expect(session.lecture.currentChat.messages.map(\.id) == [messageID])
+        await gate.release(); await runner.waitUntilIdle()
+    }
     @Test @MainActor func bulkWaitsForApprovalAndConflictKeepsAnswer() async throws {
         let (store, module, lecture, root) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let provider = FakeAIProvider(responses: [try response(lecture.cards, count: 4), AIResponse(content: "{\"learningPoints\":[]}")])

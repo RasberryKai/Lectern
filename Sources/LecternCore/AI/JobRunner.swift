@@ -284,30 +284,61 @@ public actor JobRunner {
     private func run(_ work: Work) async {
         var autoDistilAnchor: Int?
         var chatSucceeded = false
+        var executionTrace: AIInteractionTrace?
         do {
-            try Task.checkCancellation()
-            guard let provider = providers[work.job.backend] else { throw AIError.configuration("Provider unavailable.") }
-            emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Sending"))
-            let response = try await provider.execute(work.request) { event in
-                Task { await self.receive(work: work, event: event) }
-            }
-            try Task.checkCancellation()
-            if work.request.chatSnapshot != nil { try await landLectureChat(work, response: response); chatSucceeded = true }
-            else { autoDistilAnchor = try await land(work, response: response) }
-            emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"))
-        } catch {
-            do {
-                let cancelled = error is CancellationError || Task.isCancelled
-                _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { lecture in
-                    guard let i = lecture.jobs.firstIndex(where: { $0.id == work.job.id }), lecture.jobs[i].state == .running else { return }
-                    lecture.jobs[i].state = cancelled ? .cancelled : .failed
-                    lecture.jobs[i].error = cancelled ? nil : error.localizedDescription
-                    lecture.jobs[i].finishedAt = Date()
+            try await AIDiagnostics.withTrace(request: work.request, backend: work.job.backend) { trace in
+                executionTrace = trace
+                do {
+                    trace.record("job_execution_started", ["jobKind": work.job.kind.rawValue])
+                    trace.phase("provider_execution")
+                    try Task.checkCancellation()
+                    guard let provider = providers[work.job.backend] else { throw AIError.configuration("Provider unavailable.") }
+                    emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Sending"))
+                    trace.record("provider_call_started", ["backend": work.job.backend.rawValue, "model": work.job.model])
+                    let response = try await provider.execute(work.request) { event in
+                        trace.event(event)
+                        Task { await self.receive(work: work, event: event) }
+                    }
+                    recordRunnerResponse(response, trace: trace)
+                    try Task.checkCancellation()
+                    if work.request.chatSnapshot != nil {
+                        try await landLectureChat(work, response: response, trace: trace)
+                        chatSucceeded = true
+                    } else {
+                        autoDistilAnchor = try await land(work, response: response, trace: trace)
+                    }
+                    trace.record("job_landed", ["state": JobState.succeeded.rawValue])
+                    emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"))
+                } catch {
+                    let cancelled = error is CancellationError || Task.isCancelled
+                    let errorText = error.localizedDescription
+                    let logPath = diagnosticLogPath(trace)
+                    let diagnosticError = errorText + (logPath.map { "\nAI diagnostics: \($0)" } ?? "")
+                    trace.failure(error, event: cancelled ? "job_cancelled" : "job_execution_failed")
+                    trace.phase("failure_state_persistence")
+                    do {
+                        let updated = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { lecture in
+                            guard let i = lecture.jobs.firstIndex(where: { $0.id == work.job.id }), lecture.jobs[i].state == .running else { return }
+                            lecture.jobs[i].state = cancelled ? .cancelled : .failed
+                            lecture.jobs[i].error = cancelled ? nil : diagnosticError
+                            lecture.jobs[i].finishedAt = Date()
+                        }
+                        let state = updated.jobs.first(where: { $0.id == work.job.id })?.state.rawValue ?? "missing"
+                        trace.record("job_failure_state_persisted", ["state": state, "intendedState": cancelled ? "cancelled" : "failed"])
+                        emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id,
+                             event: .stage(cancelled ? "Cancelled" : "Failed"), warning: cancelled ? nil : diagnosticError)
+                    } catch let persistenceError {
+                        trace.failure(persistenceError, event: "job_failure_state_persistence_failed", fields: ["jobError": errorText])
+                        var warning = "\(errorText)\nJob-state persistence failed: \(persistenceError.localizedDescription)"
+                        if let logPath { warning += "\nAI diagnostics: \(logPath)" }
+                        emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id,
+                             event: .stage("Persistence failed"), warning: warning)
+                    }
+                    throw error
                 }
-                emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage(cancelled ? "Cancelled" : "Failed"), warning: cancelled ? nil : error.localizedDescription)
-            } catch {
-                emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Persistence failed"), warning: error.localizedDescription)
             }
+        } catch {
+            // The trace records this outcome; keep the runner alive for queued work.
         }
         active.removeValue(forKey: work.job.id)
         if chatSucceeded, !Task.isCancelled {
@@ -316,7 +347,12 @@ public actor JobRunner {
         }
         if let anchor = autoDistilAnchor {
             do { _ = try await distil(moduleID: work.moduleID, lectureID: work.lectureID, anchorPage: anchor, backend: work.job.backend, model: work.job.model) }
-            catch { emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"), warning: "Answer saved; learning-point extraction could not start: \(error.localizedDescription)") }
+            catch {
+                executionTrace?.record("automatic_distil_enqueue_failed", ["error": error.localizedDescription])
+                let logPath = executionTrace.flatMap(diagnosticLogPath)
+                let suffix = logPath.map { "\nAI diagnostics: \($0)" } ?? ""
+                emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"), warning: "Answer saved; learning-point extraction could not start: \(error.localizedDescription)\(suffix)")
+            }
         }
         schedule()
     }
@@ -324,6 +360,18 @@ public actor JobRunner {
     private func receive(work: Work, event: AIEvent) {
         guard active[work.job.id] != nil else { return }
         emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: event)
+    }
+    func recordRunnerResponse(_ response: AIResponse, trace: AIInteractionTrace) {
+        if let data = try? JSONEncoder().encode(response), let object = try? JSONSerialization.jsonObject(with: data) {
+            trace.writeJSON("runner-response.json", object)
+        }
+        trace.record("runner_response_captured", ["contentCharacters": response.content.count])
+    }
+    func diagnosticLogPath(_ trace: AIInteractionTrace) -> String? {
+        let directory = trace.directory
+        let files = ["summary.json", "events.jsonl", "request.json", "runner-response.json"]
+        guard files.contains(where: { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path) }) else { return nil }
+        return directory.path
     }
     func emit(moduleID: UUID, lectureID: UUID, jobID: UUID, event: AIEvent, warning: String? = nil) {
         var value = progress[jobID] ?? JobProgress(moduleID: moduleID, lectureID: lectureID, jobID: jobID, stage: "Queued", streamedText: "")
@@ -334,7 +382,8 @@ public actor JobRunner {
 
     /// Landing reads the latest lecture, so edits made while the provider ran are preserved.
     /// Cards/proposal/thread and succeeded state commit in the same atomic lecture write.
-    private func land(_ work: Work, response: AIResponse) async throws -> Int? {
+    private func land(_ work: Work, response: AIResponse, trace: AIInteractionTrace) async throws -> Int? {
+        trace.phase("response_validation")
         let data = Data(response.content.utf8)
         var generated: GeneratedCards?; var revised: RevisedCards?; var points: DistilledPoints?; var chat: ChatReply?
         switch work.job.kind {
@@ -353,6 +402,7 @@ public actor JobRunner {
             }
         }
         let frozenGenerated = generated, frozenRevised = revised, frozenPoints = points, frozenChat = chat
+        trace.phase("lecture_persistence")
         let result = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { lecture in
             guard let j = lecture.jobs.firstIndex(where: { $0.id == work.job.id }), lecture.jobs[j].state == .running else { throw LectureError.jobNotRunning(work.job.id) }
             switch work.job.kind {
@@ -401,6 +451,7 @@ public actor JobRunner {
                     }
                 }
         }
+        trace.record("lecture_persisted", ["jobID": work.job.id.uuidString])
         if let output = generated, output.cards.isEmpty || output.cards.count > work.job.pages.count * 3 {
             emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"), warning: output.cards.isEmpty ? "No cards returned. Inspect skipped-slide reasons." : "More than 3 cards per slide on average. Review the scope and card quality.")
         }

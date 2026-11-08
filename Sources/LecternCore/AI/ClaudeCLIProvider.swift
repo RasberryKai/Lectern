@@ -21,15 +21,34 @@ public struct ClaudeCLIProvider: AIProvider {
     }
 
     public func execute(_ request: AIRequest, onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        let recordsEvents = AIDiagnostics.current?.jobID != request.jobID
+        return try await AIDiagnostics.withTrace(request: request, backend: backend) { trace in
+            let forwardEvent: @Sendable (AIEvent) -> Void = { event in
+                if recordsEvents { trace.event(event) }
+                onEvent(event)
+            }
+            let response = try await executeTraced(request, trace: trace, onEvent: forwardEvent)
+            trace.response(response)
+            return response
+        }
+    }
+
+    private func executeTraced(_ request: AIRequest, trace: AIInteractionTrace,
+                               onEvent: @escaping @Sendable (AIEvent) -> Void) async throws -> AIResponse {
+        trace.phase("cli_preflight")
         try Task.checkCancellation()
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw AIError.configuration("Claude Code CLI was not found at \(executableURL.path). Install it or set its path in AI settings.")
         }
 
+        trace.phase("cli_authentication")
         try await Self.requireSubscriptionLogin(executableURL: executableURL)
+        trace.phase("cli_preparing_input")
         try Task.checkCancellation()
         let pdfURL = request.chatSnapshot == nil ? Self.pdfURL(for: request) : nil
         let pdfSize = request.pdf?.count ?? (pdfURL.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int } ?? 0)
+        trace.record("cli_input_selected", ["pdfPath": pdfURL?.path ?? "", "pdfBytes": pdfSize,
+                                            "chatContext": request.chatSnapshot != nil])
         if pdfURL != nil, pdfSize > 96 * 1_024 * 1_024 {
             throw AIError.limit("The PDF is too large for a CLI job. Reduce its size or selected pages.")
         }
@@ -61,7 +80,9 @@ public struct ClaudeCLIProvider: AIProvider {
         defer { try? FileManager.default.removeItem(at: promptDirectory) }
         let promptURL = promptDirectory.appendingPathComponent("prompt.txt")
         do {
-            try Data(Self.inputPrompt(for: request, pdfURL: pdfURL).utf8).write(to: promptURL, options: .atomic)
+            let input = try Self.inputPrompt(for: request, pdfURL: pdfURL)
+            trace.writeText("cli-stdin.txt", input)
+            try Data(input.utf8).write(to: promptURL, options: .atomic)
         } catch {
             throw AIError.configuration("Could not write the private prompt file: \(error.localizedDescription)")
         }
@@ -82,6 +103,7 @@ public struct ClaudeCLIProvider: AIProvider {
                                        timeout: timeout,
                                        onText: { text in if request.chatSnapshot == nil { onEvent(.text(text)) } else { preview.append(text) } },
                                        onLine: { tracker?.receive($0) })
+        trace.phase("cli_execution")
         let result = try await withTaskCancellationHandler {
             try await invocation.run()
         } onCancel: {
@@ -98,6 +120,7 @@ public struct ClaudeCLIProvider: AIProvider {
             throw AIError.transport(message)
         }
 
+        trace.phase("cli_parsing_response")
         onEvent(.stage("Writing"))
         if let snapshot = request.chatSnapshot {
             return try Self.parseChatStream(result.stdout, request: request, snapshot: snapshot, emitFinalText: !preview.emitted, onEvent: onEvent)
@@ -118,7 +141,7 @@ public struct ClaudeCLIProvider: AIProvider {
         defer { try? FileManager.default.removeItem(at: directory) }
         let invocation = CLIInvocation(executableURL: executableURL, arguments: ["auth", "status"],
             workingDirectory: directory, promptURL: URL(fileURLWithPath: "/dev/null"), streaming: false,
-            outputLimit: 64 * 1_024, errorLimit: 64 * 1_024, timeout: 10, onText: { _ in })
+            outputLimit: 64 * 1_024, errorLimit: 64 * 1_024, timeout: 10, onText: { _ in }, diagnosticPrefix: "cli-auth")
         let result = try await withTaskCancellationHandler {
             try await invocation.run()
         } onCancel: { invocation.cancel() }
@@ -148,12 +171,18 @@ public struct ClaudeCLIProvider: AIProvider {
         if let snapshot = request.chatSnapshot {
             let context = ChatProviderContext(request: request, snapshot: snapshot)
             let root = request.workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+            let inlineSlides = context.hasVerifiedInlineSlides
             var required = snapshot.initialRefs.flatMap { ref -> [String] in
                 switch ref {
                 case .slide(let page): return [String(format: "slides/%03d.png", page), String(format: "slides/%03d.txt", page)]
                 case .card(let id): return [snapshot.cardPath(for: id)].compactMap { $0 } + (snapshot.cards.first(where: { $0.id == id })?.sourcePages.flatMap { [String(format: "slides/%03d.png", $0), String(format: "slides/%03d.txt", $0)] } ?? [])
                 case .allCards: return context.hasVerifiedInlineDeck ? [] : ["cards.json"]
-                case .allSlides: return snapshot.slides.map { String(format: "slides/%03d.txt", $0.page) }
+                case .allSlides:
+                    return snapshot.slides.flatMap { slide -> [String] in
+                        let hasText = !slide.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        if !hasText { return [String(format: "slides/%03d.png", slide.page)] }
+                        return inlineSlides ? [] : [String(format: "slides/%03d.txt", slide.page)]
+                    }
                 }
             }
             required += (snapshot.images ?? []).filter(\.isCurrent).map(\.relativePath)
@@ -161,7 +190,7 @@ public struct ClaudeCLIProvider: AIProvider {
             let paths = required.map { root.appendingPathComponent($0).path }
             let cardPath = snapshot.cardContextVersion == 1 ? "cards/C12.json (displayed card number)" : "cards/<UUID>.json"
             return request.prompt + "\n\nFROZEN CHAT FILES: Read only files in " + root.path +
-                ". Slides are slides/007.png and slides/007.txt (three-digit original page number); individual cards are " + cardPath + " and the full deck is cards.json. Read the full deck only when the question needs it or All cards is attached. Never read a PDF or any other filesystem location. Before answering, Read these attached context files: " +
+                ". Slides are slides/007.png and slides/007.txt (three-digit original page number); individual cards are " + cardPath + " and the full deck is cards.json. All slides text supplied in FROZEN ATTACHED CONTEXT is already available; do not reread those text files. Pages without extracted text require reading their PNG images. Read the full deck only when the question needs it or All cards is attached. Never read a PDF or any other filesystem location. Before answering, Read these attached context files: " +
                 String(decoding: try JSONEncoder().encode(Array(Set(paths)).sorted()), as: UTF8.self) +
                 ". Look up other frozen slides/cards or indexed prior uploaded images only when needed. Return strict chat JSON including message, edits and quiz. Card edits are proposals in edits, using the frozen base revision ID."
         }
@@ -238,9 +267,19 @@ public struct ClaudeCLIProvider: AIProvider {
                 }
             }
         }
+        // Provider failures (including usage limits) explain why no reads occurred.
+        // Report them before checking whether a successful answer used its context.
+        guard let final else { throw AIError.invalidResponse("Claude chat stream ended without a result.") }
+        var response = try parseStructuredResult(JSONSerialization.data(withJSONObject: final))
         if snapshot.initialRefs.contains(.allCards), context.hasVerifiedInlineDeck, !read.contains(.allCards) {
             // Supplied context is evidence too, as with initial Messages API attachments.
             read.append(.allCards); onEvent(.read(.allCards))
+        }
+        if snapshot.initialRefs.contains(.allSlides), context.hasVerifiedInlineSlides {
+            for slide in snapshot.slides where !slide.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let ref = ContextRef.slide(slide.page)
+                if !read.contains(ref) { read.append(ref); onEvent(.read(ref)) }
+            }
         }
         for image in (snapshot.images ?? []).filter(\.isCurrent) {
             guard completedFiles.contains(image.relativePath) else { throw AIError.invalidResponse("Claude did not read the uploaded image. Retry the request.") }
@@ -251,12 +290,16 @@ public struct ClaudeCLIProvider: AIProvider {
             case .slide(let page): complete = read.contains(.slide(page))
             case .card(let id): complete = read.contains(.card(id)) || read.contains(.allCards)
             case .allCards: complete = read.contains(.allCards) || (!snapshot.cards.isEmpty && snapshot.cards.allSatisfy { read.contains(.card($0.id)) })
-            case .allSlides: complete = snapshot.slides.allSatisfy { read.contains(.slide($0.page)) }
+            case .allSlides:
+                complete = snapshot.slides.allSatisfy { slide in
+                    if slide.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return completedFiles.contains(String(format: "slides/%03d.png", slide.page))
+                    }
+                    return read.contains(.slide(slide.page))
+                }
             }
             guard complete else { throw AIError.slideRead("Claude did not read the attached chat context. Retry the request.") }
         }
-        guard let final else { throw AIError.invalidResponse("Claude chat stream ended without a result.") }
-        var response = try parseStructuredResult(JSONSerialization.data(withJSONObject: final))
         response.read = read
         let initial = Set(snapshot.initialRefs.flatMap { ref -> [ContextRef] in
             switch ref {
@@ -278,13 +321,11 @@ public struct ClaudeCLIProvider: AIProvider {
             throw AIError.invalidResponse("Claude Code returned an invalid JSON response envelope.")
         }
         try validateFileAccess(envelope)
-        if envelope["is_error"] as? Bool == true {
-            let text = envelope["result"] as? String ?? "Claude Code reported an error."
+        if envelope["is_error"] as? Bool == true || (envelope["subtype"] as? String)?.hasPrefix("error") == true {
+            let text = message(from: data, stderr: Data(), fallback: "Claude Code reported an error.")
+            if envelope["subtype"] as? String == "error_max_turns" { throw AIError.limit(text) }
             if looksLikeLimit(text) { throw AIError.limit(text) }
             throw AIError.transport(text)
-        }
-        if envelope["subtype"] as? String == "error_max_turns" {
-            throw AIError.limit(envelope["result"] as? String ?? "Claude Code reached its turn limit.")
         }
         // --json-schema finishes through the CLI's structured-output tool.
         // Only a successful envelope with a payload proves that tool completed.
@@ -328,7 +369,7 @@ public struct ClaudeCLIProvider: AIProvider {
         }
         try validateFileAccess(envelope)
         if envelope["is_error"] as? Bool == true || (envelope["subtype"] as? String)?.hasPrefix("error") == true {
-            let text = envelope["result"] as? String ?? "Claude Code reported an error."
+            let text = message(from: data, stderr: Data(), fallback: "Claude Code reported an error.")
             if looksLikeLimit(text) { throw AIError.limit(text) }
             throw AIError.transport(text)
         }
@@ -416,21 +457,49 @@ public struct ClaudeCLIProvider: AIProvider {
         return environment
     }
 
-    private static func message(from stdout: Data, stderr: Data, fallback: String) -> String {
-        guard let envelope = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any] else {
-            let detail = String(decoding: stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            return detail.isEmpty ? fallback : String(detail.prefix(1_024))
+    static func message(from stdout: Data, stderr: Data, fallback: String) -> String {
+        func detail(_ value: Any?) -> String? {
+            guard let text = value as? String else { return nil }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : String(trimmed.prefix(1_024))
         }
-        let result = envelope["result"] as? String
-        let errors = envelope["errors"] as? [String]
-        return result?.isEmpty == false ? String(result!.prefix(1_024)) : errors?.first.map { String($0.prefix(1_024)) } ?? fallback
+        let events: [[String: Any]]
+        if let envelope = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any] {
+            events = [envelope]
+        } else {
+            // Chat/Ask stdout is newline-delimited JSON, even on a nonzero exit.
+            events = String(decoding: stdout, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap {
+                try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+            }
+        }
+        let result = events.last { $0["type"] as? String == "result" } ?? (events.count == 1 ? events.first : nil)
+        if let result {
+            if let text = detail(result["result"]) { return text }
+            for error in result["errors"] as? [String] ?? [] {
+                if let text = detail(error) { return text }
+            }
+        }
+        // Some CLI failures end with an error event, without a result envelope.
+        for event in events.reversed() where event["type"] as? String == "error" || event["error"] != nil {
+            if let text = detail((event["error"] as? [String: Any])?["message"]) ?? detail(event["message"]) { return text }
+            let content = (event["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+            for block in content where block["type"] as? String == "text" {
+                if let text = detail(block["text"]) { return text }
+            }
+        }
+        if let text = detail(String(decoding: stderr, as: UTF8.self)) { return text }
+        if let subtype = result?["subtype"] as? String, subtype.hasPrefix("error") {
+            if subtype == "error_max_turns" { return "Claude Code reached its turn limit." }
+            return "Claude Code reported an error (\(subtype))."
+        }
+        return fallback
     }
 
     private static func looksLikeLimit(_ text: String) -> Bool {
         let lower = text.lowercased()
         return lower.contains("rate limit") || lower.contains("overloaded") ||
             lower.contains("usage limit") || lower.contains("weekly limit") ||
-            lower.contains("capacity")
+            lower.contains("hit your limit") || lower.contains("reached your limit") || lower.contains("capacity")
     }
 
     private static func validateStopReason(_ reason: String?, response: String) throws {
@@ -480,6 +549,8 @@ private final class CLIInvocation: @unchecked Sendable {
     private let timeout: TimeInterval
     private let onText: @Sendable (String) -> Void
     private let onLine: @Sendable (Data) -> Void
+    private let trace: AIInteractionTrace?
+    private let diagnosticPrefix: String
     private var stdout = Data()
     private var stderr = Data()
     private var partialLine = Data()
@@ -501,7 +572,10 @@ private final class CLIInvocation: @unchecked Sendable {
          errorLimit: Int,
          timeout: TimeInterval,
          onText: @escaping @Sendable (String) -> Void,
-         onLine: @escaping @Sendable (Data) -> Void = { _ in }) {
+         onLine: @escaping @Sendable (Data) -> Void = { _ in },
+         diagnosticPrefix: String = "cli") {
+        self.trace = AIDiagnostics.current
+        self.diagnosticPrefix = diagnosticPrefix
         self.streaming = streaming
         self.outputLimit = outputLimit
         self.errorLimit = errorLimit
@@ -512,6 +586,18 @@ private final class CLIInvocation: @unchecked Sendable {
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
         process.environment = ClaudeCLIProvider.sanitizedEnvironment()
+        trace?.writeJSON(diagnosticPrefix + "-invocation.json", [
+            "executable": executableURL.path,
+            "resolvedExecutable": executableURL.resolvingSymlinksInPath().path,
+            "arguments": arguments,
+            "workingDirectory": workingDirectory.path,
+            "timeoutSeconds": timeout,
+            "outputLimitBytes": outputLimit,
+            "stderrTailLimitBytes": errorLimit,
+            "PATH": process.environment?["PATH"] ?? "",
+            "safeMode": process.environment?["CLAUDE_CODE_SAFE_MODE"] ?? "",
+            "streaming": streaming
+        ])
         process.standardInput = FileHandle(forReadingAtPath: promptURL.path) ?? FileHandle.nullDevice
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -530,8 +616,14 @@ private final class CLIInvocation: @unchecked Sendable {
             if bytes.isEmpty { self?.closedError(); return }
             self?.receiveError(bytes)
         }
-        do { try process.run() }
-        catch { throw AIError.configuration("Claude Code could not start: \(error.localizedDescription)") }
+        do {
+            try process.run()
+            trace?.record("process_started", ["process": diagnosticPrefix, "pid": process.processIdentifier])
+        }
+        catch {
+            trace?.failure(error, event: "process_launch_failed", fields: ["process": diagnosticPrefix])
+            throw AIError.configuration("Claude Code could not start: \(error.localizedDescription)")
+        }
         if Task.isCancelled { cancel() }
 
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [weak self] in
@@ -548,7 +640,25 @@ private final class CLIInvocation: @unchecked Sendable {
         waitForPipesToDrain(until: Date().addingTimeInterval(2))
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
-        return snapshotResult()
+        let result = snapshotResult()
+        trace?.flush(diagnosticPrefix + "-stdout.txt")
+        trace?.flush(diagnosticPrefix + "-stderr.txt")
+        if result.stderr.count == errorLimit {
+            // Keep the final error even when noisy stderr exhausted the raw log cap.
+            trace?.writeText(diagnosticPrefix + "-stderr-tail.txt", String(decoding: result.stderr, as: UTF8.self))
+        }
+        trace?.writeJSON(diagnosticPrefix + "-exit.json", [
+            "pid": process.processIdentifier,
+            "terminationStatus": result.terminationStatus,
+            "terminationReason": process.terminationReason == .exit ? "exit" : "signal",
+            "cancelled": result.wasCancelled, "timedOut": result.timedOut,
+            "outputExceeded": result.outputExceeded,
+            "retainedStdoutBytes": result.stdout.count, "retainedStderrBytes": result.stderr.count,
+            "pipesDrained": pipesDrained()
+        ])
+        trace?.record("process_exited", ["process": diagnosticPrefix, "terminationStatus": result.terminationStatus,
+                                         "timedOut": result.timedOut, "cancelled": result.wasCancelled])
+        return result
     }
 
     func cancel() { stop(asTimeout: false, outputLimit: false) }
@@ -614,6 +724,7 @@ private final class CLIInvocation: @unchecked Sendable {
     }
 
     private func receiveOutput(_ bytes: Data) {
+        trace?.appendBytes(diagnosticPrefix + "-stdout.txt", bytes)
         lock.lock(); defer { lock.unlock() }
         guard stdout.count + bytes.count <= outputLimit else {
             outputExceeded = true
@@ -646,6 +757,7 @@ private final class CLIInvocation: @unchecked Sendable {
     }
 
     private func receiveError(_ bytes: Data) {
+        trace?.appendBytes(diagnosticPrefix + "-stderr.txt", bytes)
         lock.lock(); defer { lock.unlock() }
         stderr.append(bytes)
         if stderr.count > errorLimit { stderr.removeFirst(stderr.count - errorLimit) }

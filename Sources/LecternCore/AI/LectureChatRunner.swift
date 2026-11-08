@@ -4,7 +4,7 @@ import AppKit
 
 extension JobRunner {
     @discardableResult
-    public func chat(moduleID: UUID, lectureID: UUID, question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> UUID {
+    public func chat(moduleID: UUID, lectureID: UUID, question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], messageID: UUID = UUID(), backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> UUID {
         try await store.assertModuleEditable(moduleID: moduleID)
         try ChatAttachment.validateSelection(attachments)
         guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { throw AIError.configuration("Ask a question first.") }
@@ -13,6 +13,7 @@ extension JobRunner {
         guard reservations.insert(key).inserted else { throw AIError.configuration("An answer is already preparing.") }
         defer { reservations.remove(key); schedule() }
         let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
+        if let existing = lecture.currentChat.messages.first(where: { $0.id == messageID }), let jobID = existing.editJobID { return jobID }
         guard !lecture.jobs.contains(where: { ($0.kind == .chat || $0.kind == .ask) && $0.state == .running }) else { throw AIError.configuration("Wait for this answer or stop it first.") }
         var job = Job(kind: .chat, pages: lecture.slides.map { $0.pageIndex + 1 }, backend: backend, threadID: lecture.currentChat.id, model: backend == .messagesAPI && model == "opus" ? AISettings.defaultMessagesAPIModel : model)
         job.isLectureChat = true
@@ -21,7 +22,7 @@ extension JobRunner {
         defer { if !committed { try? FileManager.default.removeItem(at: directory) } }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: directory.appendingPathComponent("slides"), withIntermediateDirectories: true)
-        var userMessage = ChatMessage(role: .user, text: question)
+        var userMessage = ChatMessage(id: messageID, role: .user, text: question)
         userMessage.attachments = attachments
         var snapshot = try Self.chatSnapshot(lecture: lecture, refs: contextRefs, source: store.sourceURL(moduleID: moduleID, lectureID: lectureID), directory: directory)
         var images: [ChatSnapshotImage] = []
@@ -153,11 +154,13 @@ extension JobRunner {
         \(try json(effectiveQuestion))
         """
     }
-    func landLectureChat(_ work: Work, response: AIResponse) async throws {
+    func landLectureChat(_ work: Work, response: AIResponse, trace: AIInteractionTrace) async throws {
+        trace.phase("response_validation")
         let reply = try JSONDecoder().decode(ChatReply.self, from: Data(response.content.utf8))
         guard Set(reply.edits.map(\.cardID)).count == reply.edits.count,
               reply.edits.allSatisfy({ edit in work.job.chatCardVersions?.contains(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) == true && !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw AIError.invalidResponse("Claude returned invalid card edits.") }
         guard !reply.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reply.quiz?.isEmpty == false else { throw AIError.invalidResponse("Claude returned an empty answer.") }
+        trace.phase("lecture_persistence")
         _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { lecture in
             guard let j = lecture.jobs.firstIndex(where: { $0.id == work.job.id }), lecture.jobs[j].state == .running, lecture.currentChat.id == work.job.threadID else { throw LectureError.jobNotRunning(work.job.id) }
             var message = ChatMessage(role: .assistant, text: reply.message); message.editJobID = work.job.id; message.quiz = reply.quiz ?? []; message.read = response.read; message.searchedLecture = response.searchedLecture
@@ -174,11 +177,13 @@ extension JobRunner {
             lecture.currentChat.messages.append(message); lecture.currentChat.updatedAt = Date()
             lecture.jobs[j].state = .succeeded; lecture.jobs[j].usage = response.usage; lecture.jobs[j].finishedAt = Date()
         }
+        trace.record("lecture_chat_persisted", ["jobID": work.job.id.uuidString])
     }
     func distilLectureChat(_ work: Work, distilID: UUID) async {
+        var failureHandled = false
         do {
             let lecture = try await store.loadLecture(moduleID: work.moduleID, lectureID: work.lectureID)
-            guard let chat = ([lecture.currentChat] + lecture.archivedChats).first(where: { $0.id == work.job.threadID }), let provider = providers[work.job.backend] else { return }
+            guard let chat = ([lecture.currentChat] + lecture.archivedChats).first(where: { $0.id == work.job.threadID }) else { return }
             let directory = store.jobDirectory(moduleID: work.moduleID, lectureID: work.lectureID, jobID: distilID)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let exchange = chat.messages.filter { $0.editJobID == work.job.id }
@@ -207,20 +212,60 @@ extension JobRunner {
             var distilJob = Job(id: distilID, kind: .distil, pages: work.job.pages, backend: work.job.backend, threadID: work.job.threadID, prompt: request.prompt, model: request.model)
             distilJob.inputHash = try Self.inputHash(request)
             let frozenDistilJob = distilJob
-            try JSONEncoder().encode(Snapshot(request: request, learningPointIDs: [])).write(to: directory.appendingPathComponent("snapshot.json"), options: .atomic)
-            _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { $0.jobs.append(frozenDistilJob) }
-            let response = try await provider.execute(request) { _ in }
-            let points = try JSONDecoder().decode(DistilledPoints.self, from: Data(response.content.utf8))
-            guard points.learningPoints.count <= 3, points.learningPoints.allSatisfy({ !$0.text.isEmpty && !$0.pages.isEmpty && $0.pages.allSatisfy(work.job.pages.contains) }) else { throw AIError.invalidResponse("Invalid learning-point sources.") }
-            _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { latest in
-                if let j = latest.jobs.firstIndex(where: { $0.id == distilID }) { latest.jobs[j].state = .succeeded; latest.jobs[j].usage = response.usage; latest.jobs[j].finishedAt = Date() }
-                for point in points.learningPoints where !latest.learningPoints.contains(where: { $0.text == point.text }) { latest.learningPoints.append(LearningPoint(text: point.text, pages: point.pages)) }
-                let summary = (points.summary ?? chat.summary).split(separator: "\n").prefix(3).joined(separator: "\n")
-                if latest.currentChat.id == chat.id, latest.currentChat.messages.count == chat.messages.count { latest.currentChat.summary = summary; latest.currentChat.summarizedMessageCount = olderCount }
-                else if let c = latest.archivedChats.firstIndex(where: { $0.id == chat.id && $0.messages.count == chat.messages.count }) { latest.archivedChats[c].summary = summary; latest.archivedChats[c].summarizedMessageCount = olderCount }
+            try await AIDiagnostics.withTrace(request: request, backend: work.job.backend) { trace in
+                trace.record("background_distillation_started", ["parentJobID": work.job.id.uuidString])
+                do {
+                    trace.phase("snapshot_persistence")
+                    try JSONEncoder().encode(Snapshot(request: request, learningPointIDs: [])).write(to: directory.appendingPathComponent("snapshot.json"), options: .atomic)
+                    _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { $0.jobs.append(frozenDistilJob) }
+                    trace.record("distil_job_persisted", ["parentJobID": work.job.id.uuidString])
+
+                    trace.phase("provider_execution")
+                    guard let provider = providers[work.job.backend] else { throw AIError.configuration("Provider unavailable.") }
+                    let response = try await provider.execute(request) { event in trace.event(event) }
+                    recordRunnerResponse(response, trace: trace)
+
+                    trace.phase("response_validation")
+                    let points = try JSONDecoder().decode(DistilledPoints.self, from: Data(response.content.utf8))
+                    guard points.learningPoints.count <= 3, points.learningPoints.allSatisfy({ !$0.text.isEmpty && !$0.pages.isEmpty && $0.pages.allSatisfy(work.job.pages.contains) }) else { throw AIError.invalidResponse("Invalid learning-point sources.") }
+
+                    trace.phase("lecture_persistence")
+                    _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { latest in
+                        if let j = latest.jobs.firstIndex(where: { $0.id == distilID }) { latest.jobs[j].state = .succeeded; latest.jobs[j].usage = response.usage; latest.jobs[j].finishedAt = Date() }
+                        for point in points.learningPoints where !latest.learningPoints.contains(where: { $0.text == point.text }) { latest.learningPoints.append(LearningPoint(text: point.text, pages: point.pages)) }
+                        let summary = (points.summary ?? chat.summary).split(separator: "\n").prefix(3).joined(separator: "\n")
+                        if latest.currentChat.id == chat.id, latest.currentChat.messages.count == chat.messages.count { latest.currentChat.summary = summary; latest.currentChat.summarizedMessageCount = olderCount }
+                        else if let c = latest.archivedChats.firstIndex(where: { $0.id == chat.id && $0.messages.count == chat.messages.count }) { latest.archivedChats[c].summary = summary; latest.archivedChats[c].summarizedMessageCount = olderCount }
+                    }
+                    trace.record("background_distillation_landed", ["parentJobID": work.job.id.uuidString, "jobID": distilID.uuidString])
+                    emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"))
+                } catch let operationError {
+                    failureHandled = true
+                    let logPath = diagnosticLogPath(trace)
+                    var message = operationError.localizedDescription
+                    if let logPath { message += "\nAI diagnostics: \(logPath)" }
+                    trace.failure(operationError, event: "background_distillation_failed", fields: ["parentJobID": work.job.id.uuidString])
+                    trace.phase("failure_state_persistence")
+                    let persistedMessage = message
+                    do {
+                        let updated = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { latest in
+                            if let j = latest.jobs.firstIndex(where: { $0.id == distilID }) {
+                                latest.jobs[j].state = .failed; latest.jobs[j].error = persistedMessage; latest.jobs[j].finishedAt = Date()
+                            }
+                        }
+                        trace.record("background_distil_failure_state_persisted", ["parentJobID": work.job.id.uuidString,
+                                                                                     "jobFound": updated.jobs.contains(where: { $0.id == distilID })])
+                    } catch let persistenceError {
+                        trace.failure(persistenceError, event: "background_distil_failure_state_persistence_failed", fields: ["parentJobID": work.job.id.uuidString])
+                        message += "\nJob-state persistence failed: \(persistenceError.localizedDescription)"
+                    }
+                    emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"),
+                         warning: "Answer saved; learning points could not be extracted: \(message)")
+                    throw operationError
+                }
             }
-            emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"))
         } catch {
+            guard !failureHandled else { return }
             let message = error.localizedDescription
             _ = try? await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { latest in
                 if let j = latest.jobs.firstIndex(where: { $0.id == distilID }) { latest.jobs[j].state = .failed; latest.jobs[j].error = message; latest.jobs[j].finishedAt = Date() }

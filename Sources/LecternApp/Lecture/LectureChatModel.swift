@@ -10,10 +10,16 @@ struct ChatMention: Identifiable {
 
 struct ChatPreparationFailure {
     let chatID: UUID
+    let messageID: UUID
     let question: String
     let refs: [ContextRef]
     let attachments: [ChatAttachment]
     let message: String
+}
+
+struct PendingChatMessage {
+    let chatID: UUID
+    let message: ChatMessage
 }
 
 extension LectureWindowModel {
@@ -24,7 +30,12 @@ extension LectureWindowModel {
     var earlierChats: [LectureChat] {
         ([lecture.currentChat] + lecture.archivedChats).filter { $0.id != displayedChat.id && (!$0.messages.isEmpty || !$0.draft.isEmpty || !$0.draftAttachments.isEmpty) }.sorted { $0.updatedAt > $1.updatedAt }
     }
-    var chatMessages: [ChatMessage] { displayedChat.messages }
+    var chatMessages: [ChatMessage] {
+        let messages = displayedChat.messages
+        guard let pendingChatMessage, displayedChat.id == pendingChatMessage.chatID,
+              !messages.contains(where: { $0.id == pendingChatMessage.message.id }) else { return messages }
+        return messages + [pendingChatMessage.message]
+    }
     var chatLearningPoints: [LearningPoint] { lecture.learningPoints }
     var runningChat: Job? { runningJobs.first { $0.kind == .chat || $0.kind == .ask } }
     var chatFailures: [Job] {
@@ -90,23 +101,40 @@ extension LectureWindowModel {
         let chatID = lecture.currentChat.id
         guard failure == nil || failure?.chatID == chatID else { return }
         guard !question.isEmpty || !attachments.isEmpty else { return }
+        let messageID = failure?.messageID ?? UUID()
+        var message = ChatMessage(id: messageID, role: .user, text: question)
+        message.context = refs
+        message.attachments = attachments
+        pendingChatMessage = PendingChatMessage(chatID: chatID, message: message)
+        chatPreparationFailure = nil
         isStartingChat = true
-        defer { isStartingChat = false }
+        defer { isStartingChat = false; pendingChatMessage = nil }
         chatDraftSaveTask?.cancel()
+        let submittedDraft = chatDraft
+        // Clear the submitted content before any saving or context preparation can suspend.
+        if failure == nil || chatDraft.trimmingCharacters(in: .whitespacesAndNewlines) == question { chatDraft = "" }
+        let sentIDs = Set(attachments.map(\.id))
+        chatDraftAttachments.removeAll { sentIDs.contains($0.id) }
         do {
             try await flushAllThrowing()
-            _ = try await session.chat(question: question, contextRefs: refs, attachments: attachments, backend: settings.backend, model: settings.selectedModel)
-            chatDraftSaveTask?.cancel()
-            chatPreparationFailure = nil
-            // Preserve text typed during the asynchronous job start.
-            if chatDraft.trimmingCharacters(in: .whitespacesAndNewlines) == question { chatDraft = "" }
-            let sentIDs = Set(attachments.map(\.id))
-            chatDraftAttachments.removeAll { sentIDs.contains($0.id) }
-            try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments)
-            try await session.refresh()
+            _ = try await session.chat(question: question, contextRefs: refs, attachments: attachments, messageID: messageID, backend: settings.backend, model: settings.selectedModel)
         } catch {
-            chatPreparationFailure = ChatPreparationFailure(chatID: chatID, question: question, refs: refs, attachments: attachments, message: Self.describe(error))
+            // A refresh can fail after the job was committed; first check for the saved message.
+            try? await session.refresh()
+            if lecture.currentChat.messages.contains(where: { $0.id == messageID }) {
+                errorMessage = Self.describe(error)
+            } else {
+                chatPreparationFailure = ChatPreparationFailure(chatID: chatID, messageID: messageID, question: question, refs: refs, attachments: attachments, message: Self.describe(error))
+                // Keep a newer draft intact; the failure retains the original request for retry.
+                if chatDraft.isEmpty && chatDraftAttachments.isEmpty {
+                    chatDraft = failure == nil ? submittedDraft : question
+                    chatDraftAttachments = attachments
+                }
+            }
         }
+        chatDraftSaveTask?.cancel()
+        do { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments, chatID: chatID) }
+        catch { errorMessage = Self.describe(error) }
         app.scheduleReload()
     }
     func newChat() async {

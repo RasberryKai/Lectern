@@ -2,9 +2,9 @@ import Foundation
 
 extension LectureSession {
     @discardableResult
-    public func chat(question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> UUID {
+    public func chat(question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], messageID: UUID = UUID(), backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> UUID {
         try await flushEdits()
-        let id = try await runner.chat(moduleID: lecture.moduleID, lectureID: lecture.id, question: question, contextRefs: contextRefs, attachments: attachments, backend: backend, model: model)
+        let id = try await runner.chat(moduleID: lecture.moduleID, lectureID: lecture.id, question: question, contextRefs: contextRefs, attachments: attachments, messageID: messageID, backend: backend, model: model)
         try await refresh(); return id
     }
     public func setChatDraft(_ text: String, attachments: [ChatAttachment]? = nil, chatID expectedChatID: UUID? = nil) async throws {

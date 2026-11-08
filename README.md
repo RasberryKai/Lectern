@@ -67,6 +67,8 @@ The CLI backend launches the installed, unmodified `claude`, keeps its own authe
 
 The API fallback uses Keychain, direct Messages requests, structured output, PDF blocks for generation/revision, and streamed lookup tools for lecture chat. Provider/model settings are available through `AISettingsStore`. Model IDs and published pricing are configurable/dated; cost summaries distinguish reported cost from token-based estimates and unpriced jobs.
 
+Every AI execution records a private local trace with prompts, raw transport output, timing, and failures through validation and saving. Use `lectern job-logs MODULE_ID LECTURE_ID JOB_ID` to find each attempt; see [AI diagnostics](Docs/AI_DIAGNOSTICS.md) for the log format, debugging steps, redaction, and retention.
+
 Anki export uses a stable **first regular field** `LecternID`, not a fabricated Anki GUID. Run `lectern anki-setup` for the required one-time note type setup. The generated header selects an existing note type; it cannot create one. Scheduling remains in Anki. Real import/update/rendering requires a manual Anki check.
 
 ## Layout

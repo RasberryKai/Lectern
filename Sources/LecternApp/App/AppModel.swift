@@ -76,6 +76,7 @@ final class AppModel {
     @ObservationIgnored private var reloadTask: Task<Void, Never>? = nil
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var started = false
+    @ObservationIgnored private var librarySessionLock: LibrarySessionLock?
 
     private init() {
         let environment = ProcessInfo.processInfo.environment
@@ -100,6 +101,12 @@ final class AppModel {
     func start() async {
         guard !started else { return }
         started = true
+        do {
+            librarySessionLock = try LibrarySessionLock(rootURL: store.rootURL)
+        } catch {
+            phase = .failed(error.localizedDescription)
+            return
+        }
         settings = await settingsStore.load()
         providerConfiguration.update(settings)
         refreshAPIKeyState()

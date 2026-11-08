@@ -88,9 +88,7 @@ struct ChatProviderContext {
     /// Existing job prompts already carry All cards inline. Verify the actual payload,
     /// rather than assuming an attachment chip proves that its contents were supplied.
     var hasVerifiedInlineDeck: Bool {
-        guard let start = request.prompt.range(of: "\nFROZEN ATTACHED CONTEXT:\n"),
-              let end = request.prompt.range(of: "\nLOOKUP: ", options: .backwards), start.upperBound <= end.lowerBound else { return false }
-        return request.prompt[start.upperBound..<end.lowerBound].split(separator: "\n").contains { line in
+        inlineContextLines.contains { line in
             if snapshot.cardContextVersion == 1 {
                 guard let cards = try? JSONDecoder().decode([ChatCardContent].self, from: Data(line.utf8)) else { return false }
                 return cards == ChatCardContent.deck(snapshot.cards)
@@ -98,6 +96,18 @@ struct ChatProviderContext {
             guard let cards = try? JSONDecoder().decode([Card].self, from: Data(line.utf8)) else { return false }
             return cards == snapshot.cards
         }
+    }
+    var hasVerifiedInlineSlides: Bool {
+        let expected = snapshot.slides.map { ChatSlide(page: $0.page, text: $0.text, note: $0.note, imagePath: nil) }
+        return inlineContextLines.contains { line in
+            guard let slides = try? JSONDecoder().decode([ChatSlide].self, from: Data(line.utf8)) else { return false }
+            return slides == expected
+        }
+    }
+    private var inlineContextLines: [Substring] {
+        guard let start = request.prompt.range(of: "\nFROZEN ATTACHED CONTEXT:\n"),
+              let end = request.prompt.range(of: "\nLOOKUP: ", options: .backwards), start.upperBound <= end.lowerBound else { return [] }
+        return request.prompt[start.upperBound..<end.lowerBound].split(separator: "\n")
     }
     func reference(for relative: String) -> ContextRef? {
         if relative == "cards.json" { return .allCards }

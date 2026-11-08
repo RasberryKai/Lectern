@@ -28,6 +28,10 @@ import LecternCore
         if command == "anki-setup" { print(AnkiExporter.setupInstructions); return }
         if command == "demo" && root == nil { root = FileManager.default.temporaryDirectory.appendingPathComponent("Lectern-demo-\(UUID())") }
         let store = root.map { LibraryStore(rootURL: $0) } ?? LibraryStore()
+        // Commands that recover or execute jobs must not interrupt a live app's runner.
+        let sessionCommands: Set<String> = ["migrate-default", "generate", "revise", "ask", "retry", "demo"]
+        let sessionLock = try sessionCommands.contains(command) ? LibrarySessionLock(rootURL: store.rootURL) : nil
+        defer { withExtendedLifetime(sessionLock) {} }
         let runner = JobRunner(store: store, providers: [ClaudeCLIProvider(settings: savedSettings), MessagesAPIProvider(settings: savedSettings)])
         let service = LibraryService(store: store, runner: runner)
         func arg(_ index: Int) throws -> String {
@@ -116,11 +120,16 @@ import LecternCore
             _ = try await runner.recoverInterruptedJobs()
             try await runner.retry(moduleID: id(1), lectureID: id(2), jobID: id(3)); await runner.waitUntilIdle()
             try await printJob(store: store, moduleID: id(1), lectureID: id(2), jobID: id(3))
+        case "job-logs":
+            let directory = store.jobDirectory(moduleID: try id(1), lectureID: try id(2), jobID: try id(3)).appendingPathComponent("ai-logs")
+            try printLogs(in: directory)
         case "show":
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
             print(String(decoding: try encoder.encode(await store.loadLecture(moduleID: id(1), lectureID: id(2))), as: UTF8.self))
         case "doctor":
             print("Library: \(store.rootURL.path)")
+            print("AI traces: <library>/Modules/<module>/Lectures/<lecture>/jobs/<job>/ai-logs/<attempt>/summary.json")
+            print("Find a job's traces: lectern job-logs MODULE_ID LECTURE_ID JOB_ID")
             let executable = ClaudeCLIProvider.resolveExecutable(configuredPath: savedSettings.claudeCLIPath)
             print("CLI executable: \(executable.path) (\(FileManager.default.isExecutableFile(atPath: executable.path) ? "installed" : "configure path"))")
             print("Log in using: claude auth login. Lectern never reads subscription tokens.")
@@ -133,7 +142,21 @@ import LecternCore
         let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
         guard let job = lecture.jobs.first(where: { $0.id == jobID }) else { throw LectureError.missingJob(jobID) }
         print("\(job.id): \(job.state.rawValue)")
+        let logs = store.jobDirectory(moduleID: moduleID, lectureID: lectureID, jobID: jobID).appendingPathComponent("ai-logs")
+        if FileManager.default.fileExists(atPath: logs.path) { print("AI logs: \(logs.path)") }
         if let error = job.error { throw AIError.transport(error) }
+    }
+    static func printLogs(in directory: URL) throws {
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            print("No AI traces for this job. Traces are recorded for new executions; ordinary job snapshots expire after 7 days (saved chat snapshots are retained).")
+            return
+        }
+        for attempt in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let summary = attempt.appendingPathComponent("summary.json")
+            guard FileManager.default.fileExists(atPath: summary.path) else { continue }
+            print(summary.path)
+            print(try String(contentsOf: summary, encoding: .utf8))
+        }
     }
     static func demo(store: LibraryStore) async throws {
         try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
@@ -175,6 +198,7 @@ import LecternCore
     --model MODEL overrides the backend's model.
 
     demo                                     Offline end-to-end run in a new temporary library
+    job-logs MODULE_ID LECTURE_ID JOB_ID       Trace paths and summaries for every execution attempt
     list                                     Modules and lectures
     overview                                 Active module progress and totals
     create-module NAME
