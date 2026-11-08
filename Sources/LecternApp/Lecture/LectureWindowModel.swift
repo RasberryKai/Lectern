@@ -443,13 +443,28 @@ final class LectureWindowModel {
 
     func generate(additionalInstructions: String) async {
         guard !readOnly else { return }
+        var started = false
         await run {
             try await flushNoteNow()
             _ = try await session.generate(backend: backend, model: model,
                                            additionalInstructions: additionalInstructions, replaceExistingCards: true)
+            started = true
             try await session.refresh()
         }
         app.scheduleReload()
+        // Review shows the generation overlay until the cards land, then reveals them.
+        if started { setMode(.review) }
+    }
+
+    /// Called when a Generate stops running. In Review, show the new cards; with none,
+    /// leave the job undismissed so Prepare's landing banner can explain the skipped slides.
+    func revealGenerated(_ jobID: UUID) {
+        guard mode == .review, let job = lecture.jobs.first(where: { $0.id == jobID }), job.state == .succeeded else { return }
+        let fresh = activeCards.filter { if case .generated(let id) = $0.origin { return id == jobID }; return false }
+        guard let first = fresh.first else { return }
+        dismissedJobIDs.insert(jobID)
+        setReviewFilter(fresh.allSatisfy { $0.verdict == .unreviewed } ? .unreviewed : .all)
+        selectCard(first.id)
     }
 
     func sendFeedback() async {

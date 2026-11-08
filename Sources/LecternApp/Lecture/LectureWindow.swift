@@ -59,6 +59,7 @@ struct LectureWorkspace: View {
     @Environment(AppModel.self) private var app
     @Bindable var model: LectureWindowModel
     @FocusState private var focus: EditorField?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,7 +75,17 @@ struct LectureWorkspace: View {
             Group {
                 switch model.mode {
                 case .prepare: PrepareView(model: model, focus: $focus)
-                case .review: ReviewView(model: model, focus: $focus)
+                case .review:
+                    ZStack {
+                        ReviewView(model: model, focus: $focus)
+                        if let job = model.runningGenerate {
+                            GenerationOverlay(model: model, job: job)
+                                .transition(reduceMotion ? AnyTransition.opacity
+                                            : .asymmetric(insertion: .opacity, removal: .opacity.combined(with: .scale(scale: 1.03))))
+                                .zIndex(1)
+                        }
+                    }
+                    .animation(.easeInOut(duration: reduceMotion ? 0.15 : 0.4), value: model.runningGenerate?.id)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -89,6 +100,9 @@ struct LectureWorkspace: View {
         }
         .background(KeyMonitor { event, editing in handleKey(event, editing: editing) })
         .onChange(of: model.session.lecture) { _, _ in model.syncEditor() }
+        .onChange(of: model.runningGenerate?.id) { old, new in
+            if let old, new == nil { model.revealGenerated(old) }
+        }
         .onChange(of: app.requestedModes[model.ref.lectureID]) { _, mode in
             guard let mode else { return }
             app.requestedModes.removeValue(forKey: model.ref.lectureID)
@@ -150,6 +164,8 @@ struct LectureWorkspace: View {
             NSApp.keyWindow?.makeFirstResponder(nil)
             return true
         }
+        // Card shortcuts would act on cards hidden behind the generation overlay.
+        if model.mode == .review, model.runningGenerate != nil { return false }
         guard !editing else { return false }
         return model.mode == .prepare ? handlePrepareKey(event, modifiers: modifiers) : handleReviewKey(event, modifiers: modifiers, letter: letter)
     }

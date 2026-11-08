@@ -7,7 +7,8 @@ struct JobBar: View {
     let model: LectureWindowModel
 
     var body: some View {
-        let running = model.runningJobs.filter { $0.kind == .generate || $0.kind == .revise }
+        // In Review a running Generate is shown full-size by GenerationOverlay instead.
+        let running = model.runningJobs.filter { $0.kind == .revise || ($0.kind == .generate && model.mode != .review) }
         let attention = model.attentionJobs.filter { $0.kind == .generate || $0.kind == .revise }
         if !running.isEmpty || !attention.isEmpty {
             VStack(spacing: 0) {
