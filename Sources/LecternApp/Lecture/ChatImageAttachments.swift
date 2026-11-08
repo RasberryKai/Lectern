@@ -28,7 +28,7 @@ nonisolated enum ChatImageInput: Sendable {
     }
 
     /// Decode one frame, apply orientation, and bound the upload independently of
-    /// the source format. Claude accepts the resulting PNG/JPEG on both backends.
+    /// the source format. Each provider accepts the resulting PNG/JPEG.
     func normalized() throws -> (data: Data, filename: String, mediaType: String) {
         let bytes: Data
         let filename: String

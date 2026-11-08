@@ -106,9 +106,7 @@ private struct Sidebar: View {
                 Circle().fill(status.ready ? Theme.good : Theme.amber).frame(width: 7, height: 7)
                 Text(status.text).font(Theme.small).foregroundStyle(Theme.quiet)
             }
-            .help(model.settings.backend == .claudeCLI
-                  ? "Uses \(model.cliExecutable.path). Sign in once with `claude auth login` in Terminal."
-                  : "The API key is stored in your Keychain.")
+            .help(backendHelp)
             .padding(.horizontal, 22).padding(.bottom, 12)
             SettingsLink {
                 Text("Settings").font(Theme.body).foregroundStyle(Theme.ink)
@@ -120,6 +118,14 @@ private struct Sidebar: View {
 
     private func isSelected(_ id: UUID) -> Bool {
         model.selection == .module(id) || model.selection == .export(id)
+    }
+
+    private var backendHelp: String {
+        switch model.settings.backend {
+        case .claudeCLI: "Uses \(model.cliExecutable.path). Sign in with `claude auth login` in Terminal."
+        case .codexCLI: "Uses \(model.codexExecutable.path). Sign in once with the button in Settings; Codex manages the Lectern-specific account credentials."
+        case .messagesAPI: "The API key is stored in your Keychain."
+        }
     }
 
     @ViewBuilder private var archived: some View {

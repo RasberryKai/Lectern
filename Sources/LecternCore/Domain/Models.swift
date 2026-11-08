@@ -181,7 +181,7 @@ public struct SlideThread: Codable, Equatable, Identifiable, Sendable {
 }
 public enum JobKind: String, Codable, CaseIterable, Sendable { case generate, revise, ask, chat, distil }
 public enum JobState: String, Codable, Sendable { case running, succeeded, failed, cancelled, interrupted }
-public enum AIBackend: String, Codable, CaseIterable, Sendable { case claudeCLI, messagesAPI }
+public enum AIBackend: String, Codable, CaseIterable, Sendable { case claudeCLI, messagesAPI, codexCLI }
 public struct AIUsage: Codable, Equatable, Sendable {
     public var inputTokens: Int
     public var outputTokens: Int

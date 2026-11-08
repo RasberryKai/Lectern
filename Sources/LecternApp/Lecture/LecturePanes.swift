@@ -146,7 +146,7 @@ struct LectureSidePanel: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                tab(.chat, title: "Ask Claude", icon: "sparkles")
+                tab(.chat, title: "Ask AI", icon: "sparkles")
                 tab(.content, title: model.mode == .prepare ? "Cards" : "Slide", icon: model.mode == .prepare ? "rectangle.on.rectangle" : "display")
                 Spacer(minLength: 0)
                 ChatHistoryControls(model: model)

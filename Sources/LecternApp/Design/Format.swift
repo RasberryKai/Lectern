@@ -112,7 +112,7 @@ enum Format {
         switch first {
         case .selectSlides: return "Finish selecting slides"
         case .generateMissingCoverage(let pages): return "Generate cards for \(count(pages.count, "slide"))"
-        case .waitingForJobs: return "Waiting for Claude"
+        case .waitingForJobs: return "Waiting for AI"
         case .addCards: return "Add cards"
         }
     }

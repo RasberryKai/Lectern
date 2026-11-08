@@ -156,7 +156,7 @@ struct GenerateSheet: View {
             .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
 
             HStack {
-                Image(systemName: app.settings.backend == .claudeCLI ? "terminal" : "key")
+                Image(systemName: app.settings.backend.iconName)
                 Text("\(app.settings.backend.displayName) · \(app.settings.selectedModel) · \(app.settings.backend.billingNote)")
                     .font(Theme.body)
                 Spacer()

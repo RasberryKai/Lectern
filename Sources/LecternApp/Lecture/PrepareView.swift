@@ -48,7 +48,7 @@ struct PrepareView: View {
             VStack(alignment: .leading, spacing: 14) {
                 if let landed = model.landedGenerate { LandingBanner(model: model, job: landed) }
                 ForEach(Array(model.lecture.skippedSlides.filter { $0.slide == page }.suffix(1).enumerated()), id: \.offset) { _, skipped in
-                    Label("Claude skipped this slide: \(skipped.reason)", systemImage: "arrow.uturn.right")
+                    Label("AI skipped this slide: \(skipped.reason)", systemImage: "arrow.uturn.right")
                         .font(Theme.small).foregroundStyle(Theme.amber)
                 }
                 ZStack {

@@ -57,7 +57,7 @@ struct GenerationOverlay: View {
         switch model.progress(job.id)?.stage ?? "Queued" {
         case "Queued": "Waiting for a free slot"
         case "Sending": "Sending your slides and notes"
-        case "Starting Claude": "Claude is reading your slides"
+        case "Starting Claude", "Starting Codex": "\(job.backend.assistantName) is reading your slides"
         case "Writing", "Checking": "Checking the new cards"
         case let other: other
         }

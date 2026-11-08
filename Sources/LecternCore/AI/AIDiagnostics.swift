@@ -137,6 +137,12 @@ final class AIInteractionTrace: @unchecked Sendable {
         writeText(filename, String(decoding: data, as: UTF8.self))
     }
 
+    func writeJSONLine(_ filename: String, _ value: Any) {
+        lock.lock(); defer { lock.unlock() }
+        guard let data = try? JSONSerialization.data(withJSONObject: sanitize(value), options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes]) else { return }
+        append(filename, data: data + Data([10]))
+    }
+
     func writeText(_ filename: String, _ text: String) {
         lock.lock(); defer { lock.unlock() }
         append(filename, data: Data(redact(text).utf8))
@@ -285,7 +291,10 @@ final class AIInteractionTrace: @unchecked Sendable {
             }
         }
         if let array = value as? [Any] { return array.map(sanitize) }
-        if let string = value as? String { return redact(string) }
+        if let string = value as? String {
+            if string.hasPrefix("data:image/") { return "[image data omitted; \(string.utf8.count) encoded bytes]" }
+            return redact(string)
+        }
         return value
     }
 
@@ -303,7 +312,8 @@ final class AIInteractionTrace: @unchecked Sendable {
         if let regex = try? NSRegularExpression(pattern: #"(?i)(""# + Self.credentialKeyPattern + #""\s*:\s*")(?:\\.|[^"\\])*(")"#) {
             result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1[REDACTED]$2")
         }
-        for pattern in [#"sk-ant-[A-Za-z0-9_-]+"#, #"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"#,
+        for pattern in [#"(?i)data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+"#,
+                        #"sk-ant-[A-Za-z0-9_-]+|sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{16,}"#, #"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+"#,
                         #"(?i)(?<![A-Za-z0-9_-])("# + Self.credentialKeyPattern + #"\s*[=:]\s*)[^\s,;\"}]+"#] {
             if let regex = try? NSRegularExpression(pattern: pattern) {
                 result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "[REDACTED]")

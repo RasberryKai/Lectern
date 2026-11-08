@@ -24,6 +24,8 @@ nonisolated struct ConfigurableProvider: AIProvider {
         switch backend {
         case .claudeCLI:
             return try await ClaudeCLIProvider(settings: settings).execute(request, onEvent: onEvent)
+        case .codexCLI:
+            return try await CodexCLIProvider(settings: settings).execute(request, onEvent: onEvent)
         case .messagesAPI:
             return try await MessagesAPIProvider(settings: settings, keychain: keychain).execute(request, onEvent: onEvent)
         }
@@ -34,13 +36,46 @@ extension AIBackend {
     var displayName: String {
         switch self {
         case .claudeCLI: "Claude CLI"
+        case .codexCLI: "Codex CLI"
         case .messagesAPI: "Anthropic API"
         }
     }
     var billingNote: String {
         switch self {
         case .claudeCLI: "your subscription"
+        case .codexCLI: "your ChatGPT account"
         case .messagesAPI: "billed per token"
+        }
+    }
+
+    var assistantName: String {
+        switch self {
+        case .claudeCLI: "Claude"
+        case .codexCLI: "Codex"
+        case .messagesAPI: "AI"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .claudeCLI, .codexCLI: "terminal"
+        case .messagesAPI: "key"
+        }
+    }
+
+    var foundStatus: String {
+        switch self {
+        case .claudeCLI: "Claude CLI found"
+        case .codexCLI: "Codex CLI found"
+        case .messagesAPI: "Anthropic API key saved"
+        }
+    }
+
+    var missingStatus: String {
+        switch self {
+        case .claudeCLI: "Claude CLI not found"
+        case .codexCLI: "Codex CLI not found"
+        case .messagesAPI: "API key missing"
         }
     }
 }

@@ -132,10 +132,16 @@ public actor JobRunner {
         defer { reservations.remove(key); schedule() }
         let resolvedModel: String
         if kind == .distil {
-            resolvedModel = backend == .claudeCLI ? AISettings.learningPointCLIModel : AISettings.learningPointAPIModel
+            switch backend {
+            case .claudeCLI: resolvedModel = AISettings.learningPointCLIModel
+            case .messagesAPI: resolvedModel = AISettings.learningPointAPIModel
+            case .codexCLI: resolvedModel = Self.codexModel(model)
+            }
         } else if backend == .messagesAPI {
             resolvedModel = model == "opus" || model.isEmpty ? AISettings.defaultMessagesAPIModel : model
             guard resolvedModel.hasPrefix("claude-") else { throw AIError.configuration("Messages API needs a full model ID such as claude-opus-5-5.") }
+        } else if backend == .codexCLI {
+            resolvedModel = Self.codexModel(model)
         } else { resolvedModel = model.isEmpty ? AISettings.defaultCLIModel : model }
         let modules = try await store.modules()
         guard let module = modules.first(where: { $0.id == moduleID }) else { throw AIError.configuration("Module no longer exists.") }
@@ -263,6 +269,10 @@ public actor JobRunner {
         emit(moduleID: moduleID, lectureID: lectureID, jobID: job.id, event: .stage("Queued"))
         schedule()
         return job.id
+    }
+
+    private static func codexModel(_ model: String) -> String {
+        model.isEmpty || model == "opus" ? AISettings.defaultCodexModel : model
     }
 
     static func inputHash(_ request: AIRequest) throws -> String {
@@ -394,11 +404,11 @@ public actor JobRunner {
         case .distil:
             points = try JSONDecoder().decode(DistilledPoints.self, from: data)
             guard let points, points.learningPoints.count <= 3, points.learningPoints.allSatisfy({ !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0.pages.isEmpty && $0.pages.allSatisfy(work.job.pages.contains) }) else { throw AIError.invalidResponse("Invalid learning points or source slide references.") }
-        case .ask: guard !response.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AIError.invalidResponse("Claude returned an empty answer.") }
+        case .ask: guard !response.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AIError.invalidResponse("AI returned an empty answer.") }
         case .chat:
             chat = try JSONDecoder().decode(ChatReply.self, from: data)
             guard let chat, !chat.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw AIError.invalidResponse("Claude returned an empty chat message.")
+                throw AIError.invalidResponse("AI returned an empty chat message.")
             }
         }
         let frozenGenerated = generated, frozenRevised = revised, frozenPoints = points, frozenChat = chat

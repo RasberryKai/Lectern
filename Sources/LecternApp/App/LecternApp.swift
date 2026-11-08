@@ -29,7 +29,7 @@ struct LecternApp: App {
         Settings {
             SettingsView()
                 .environment(model)
-                .frame(width: 720, height: 620)
+                .frame(width: 760, height: 760)
         }
     }
 }

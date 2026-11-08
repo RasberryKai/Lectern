@@ -91,6 +91,7 @@ final class AppModel {
         self.keychain = keychain
         runner = JobRunner(store: store, providers: [
             ConfigurableProvider(backend: .claudeCLI, configuration: configuration, keychain: keychain),
+            ConfigurableProvider(backend: .codexCLI, configuration: configuration, keychain: keychain),
             ConfigurableProvider(backend: .messagesAPI, configuration: configuration, keychain: keychain)
         ])
         library = LibraryService(store: store, runner: runner)
@@ -339,7 +340,7 @@ final class AppModel {
         let running = try await runningJobs(in: moduleID)
         if !running.isEmpty {
             guard cancellingJobs else {
-                throw LibraryError.invalid("Claude is still working on \(Format.count(running.count, "job")) in this module. Wait or cancel them first.")
+                throw LibraryError.invalid("AI is still working on \(Format.count(running.count, "job")) in this module. Wait or cancel them first.")
             }
             for job in running { try await runner.cancel(moduleID: moduleID, lectureID: job.lectureID, jobID: job.jobID) }
         }
@@ -368,12 +369,15 @@ final class AppModel {
 
     var cliExecutable: URL { ClaudeCLIProvider.resolveExecutable(configuredPath: settings.claudeCLIPath) }
     var cliFound: Bool { FileManager.default.isExecutableFile(atPath: cliExecutable.path) }
+    var codexExecutable: URL { CodexCLIProvider.resolveExecutable(configuredPath: settings.codexCLIPath) }
+    var codexFound: Bool { FileManager.default.isExecutableFile(atPath: codexExecutable.path) }
 
     /// Short status for the sidebar footer. CLI login itself is checked by the provider at call time.
     var backendStatus: (text: String, ready: Bool) {
         switch settings.backend {
-        case .claudeCLI: cliFound ? ("Claude CLI found", true) : ("Claude CLI not found", false)
-        case .messagesAPI: apiKeySaved ? ("Anthropic API key saved", true) : ("API key missing", false)
+        case .claudeCLI: cliFound ? (settings.backend.foundStatus, true) : (settings.backend.missingStatus, false)
+        case .codexCLI: codexFound ? (settings.backend.foundStatus, true) : (settings.backend.missingStatus, false)
+        case .messagesAPI: apiKeySaved ? (settings.backend.foundStatus, true) : (settings.backend.missingStatus, false)
         }
     }
 

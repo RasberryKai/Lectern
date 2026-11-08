@@ -15,7 +15,13 @@ extension JobRunner {
         let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
         if let existing = lecture.currentChat.messages.first(where: { $0.id == messageID }), let jobID = existing.editJobID { return jobID }
         guard !lecture.jobs.contains(where: { ($0.kind == .chat || $0.kind == .ask) && $0.state == .running }) else { throw AIError.configuration("Wait for this answer or stop it first.") }
-        var job = Job(kind: .chat, pages: lecture.slides.map { $0.pageIndex + 1 }, backend: backend, threadID: lecture.currentChat.id, model: backend == .messagesAPI && model == "opus" ? AISettings.defaultMessagesAPIModel : model)
+        let resolvedModel: String
+        switch backend {
+        case .claudeCLI: resolvedModel = model.isEmpty ? AISettings.defaultCLIModel : model
+        case .messagesAPI: resolvedModel = model == "opus" || model.isEmpty ? AISettings.defaultMessagesAPIModel : model
+        case .codexCLI: resolvedModel = model.isEmpty || model == "opus" ? AISettings.defaultCodexModel : model
+        }
+        var job = Job(kind: .chat, pages: lecture.slides.map { $0.pageIndex + 1 }, backend: backend, threadID: lecture.currentChat.id, model: resolvedModel)
         job.isLectureChat = true
         let directory = store.jobDirectory(moduleID: moduleID, lectureID: lectureID, jobID: job.id)
         var committed = false
@@ -158,8 +164,8 @@ extension JobRunner {
         trace.phase("response_validation")
         let reply = try JSONDecoder().decode(ChatReply.self, from: Data(response.content.utf8))
         guard Set(reply.edits.map(\.cardID)).count == reply.edits.count,
-              reply.edits.allSatisfy({ edit in work.job.chatCardVersions?.contains(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) == true && !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw AIError.invalidResponse("Claude returned invalid card edits.") }
-        guard !reply.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reply.quiz?.isEmpty == false else { throw AIError.invalidResponse("Claude returned an empty answer.") }
+              reply.edits.allSatisfy({ edit in work.job.chatCardVersions?.contains(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) == true && !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw AIError.invalidResponse("AI returned invalid card edits.") }
+        guard !reply.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reply.quiz?.isEmpty == false else { throw AIError.invalidResponse("AI returned an empty answer.") }
         trace.phase("lecture_persistence")
         _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { lecture in
             guard let j = lecture.jobs.firstIndex(where: { $0.id == work.job.id }), lecture.jobs[j].state == .running, lecture.currentChat.id == work.job.threadID else { throw LectureError.jobNotRunning(work.job.id) }
@@ -201,7 +207,13 @@ extension JobRunner {
             let summarizedCount = min(olderCount, chat.summarizedMessageCount ?? 0)
             let newlyOlderMessages = Array(chat.messages.dropFirst(summarizedCount).prefix(olderCount - summarizedCount))
             let sourceText = work.request.chatSnapshot?.slides.filter { readPages.contains($0.page) }.map { "S\($0.page): \($0.text)\nNote: \($0.note)" }.joined(separator: "\n") ?? ""
-            var request = AIRequest(jobID: distilID, kind: .distil, model: work.job.backend == .claudeCLI ? AISettings.learningPointCLIModel : AISettings.learningPointAPIModel,
+            let distilModel: String
+            switch work.job.backend {
+            case .claudeCLI: distilModel = AISettings.learningPointCLIModel
+            case .messagesAPI: distilModel = AISettings.learningPointAPIModel
+            case .codexCLI: distilModel = work.job.model
+            }
+            var request = AIRequest(jobID: distilID, kind: .distil, model: distilModel,
                 prompt: "Extract at most 3 NEW grounded learning points from LATEST EXCHANGE only, no duplicate or excluded points. pages must belong to READ SOURCE TEXT. If no grounded source text is available, return no learning points. Also return summary: at most THREE LINES, update PREVIOUS SUMMARY only with NEWLY OLDER MESSAGES. If NEWLY OLDER MESSAGES is empty retain previous summary exactly. Never summarize the latest exchange into the older summary.\nLATEST EXCHANGE:\n" + String(decoding: try JSONEncoder().encode(exchange), as: UTF8.self)
                 + "\nEXISTING POINTS:\n" + String(decoding: try JSONEncoder().encode(lecture.learningPoints), as: UTF8.self)
                 + "\nPREVIOUS SUMMARY:\n" + chat.summary

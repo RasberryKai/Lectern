@@ -33,7 +33,7 @@ struct ModuleSettingsSheet: View {
         .frame(width: 520)
         .background(Theme.surface)
         .task { await load() }
-        .confirmationDialog("Claude is still working on \(Format.count(runningJobCount, "job")) in this module",
+        .confirmationDialog("AI is still working on \(Format.count(runningJobCount, "job")) in this module",
                             isPresented: $confirmCancelJobs) {
             Button("Cancel jobs and archive", role: .destructive) { Task { await archive(cancellingJobs: true) } }
             Button("Keep working", role: .cancel) {}

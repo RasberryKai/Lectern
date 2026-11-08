@@ -104,6 +104,32 @@ struct AIDiagnosticsTests {
         #expect(contents.contains("binary omitted"))
     }
 
+    @Test func codexRPCLogsOmitNativeImageURLsAndOpenAIKeys() throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let trace = AIInteractionTrace(request: request(in: root), backend: .codexCLI)
+        let encoded = "private-image-payload"
+        let key = "sk-proj-privateCredential123456789"
+        trace.writeJSONLine("codex-rpc-sent.jsonl", ["method": "turn/start", "params": ["input": [
+            ["type": "image", "url": "data:image/png;base64," + encoded],
+            ["type": "text", "text": "Study this slide"]
+        ]]])
+        trace.writeJSONLine("codex-rpc-received.jsonl", ["id": 7, "result": ["contentItems": [
+            ["type": "inputImage", "imageUrl": "data:image/jpeg;base64," + encoded]
+        ]]])
+        trace.writeText("codex-stderr.txt", "Failure with " + key)
+        trace.writeText("codex-malformed-output.txt", "broken message data:image/png;base64," + encoded)
+        trace.finish(status: "failed")
+        let contents = try FileManager.default.contentsOfDirectory(at: trace.directory, includingPropertiesForKeys: nil)
+            .map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        #expect(!contents.contains(encoded))
+        #expect(!contents.contains(key))
+        #expect(contents.contains("image data omitted"))
+        #expect(contents.contains("Study this slide"))
+        let line = try text(trace.directory, "codex-rpc-sent.jsonl")
+        #expect(try JSONSerialization.jsonObject(with: Data(line.utf8)) is [String: Any])
+    }
+
     @Test func boundedArtifactsReportTruncationAndKeepFinalSummary() throws {
         let root = try root()
         defer { try? FileManager.default.removeItem(at: root) }

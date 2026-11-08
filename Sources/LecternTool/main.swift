@@ -19,8 +19,15 @@ import LecternCore
         }
         let command = arguments.first ?? "help"
         let api = arguments.contains("--api"); arguments.removeAll { $0 == "--api" }
+        let codex = arguments.contains("--codex"); arguments.removeAll { $0 == "--codex" }
+        guard !(api && codex) else { throw LibraryError.invalid("Choose only one AI backend flag: --api or --codex.") }
         let savedSettings = await AISettingsStore().load()
-        var model = api ? savedSettings.messagesAPIModel : savedSettings.cliModel
+        let backend: AIBackend = api ? .messagesAPI : codex ? .codexCLI : savedSettings.backend
+        var model = switch backend {
+        case .claudeCLI: savedSettings.cliModel
+        case .messagesAPI: savedSettings.messagesAPIModel
+        case .codexCLI: savedSettings.codexModel
+        }
         if let i = arguments.firstIndex(of: "--model"), arguments.indices.contains(i + 1) {
             model = arguments[i + 1]; arguments.removeSubrange(i...i + 1)
         }
@@ -32,7 +39,7 @@ import LecternCore
         let sessionCommands: Set<String> = ["migrate-default", "generate", "revise", "ask", "retry", "demo"]
         let sessionLock = try sessionCommands.contains(command) ? LibrarySessionLock(rootURL: store.rootURL) : nil
         defer { withExtendedLifetime(sessionLock) {} }
-        let runner = JobRunner(store: store, providers: [ClaudeCLIProvider(settings: savedSettings), MessagesAPIProvider(settings: savedSettings)])
+        let runner = JobRunner(store: store, providers: [ClaudeCLIProvider(settings: savedSettings), MessagesAPIProvider(settings: savedSettings), CodexCLIProvider(settings: savedSettings)])
         let service = LibraryService(store: store, runner: runner)
         func arg(_ index: Int) throws -> String {
             guard arguments.indices.contains(index) else { throw LibraryError.invalid("Missing argument. Run lectern help.") }; return arguments[index]
@@ -88,17 +95,17 @@ import LecternCore
             print("Library: \(store.rootURL.path)")
         case "generate":
             _ = try await runner.recoverInterruptedJobs()
-            let job = try await runner.generate(moduleID: id(1), lectureID: id(2), backend: api ? .messagesAPI : .claudeCLI, model: model,
+            let job = try await runner.generate(moduleID: id(1), lectureID: id(2), backend: backend, model: model,
                                                 regenerateAll: arguments.contains("--all"))
             await runner.waitUntilIdle(); try await printJob(store: store, moduleID: id(1), lectureID: id(2), jobID: job)
         case "revise":
             _ = try await runner.recoverInterruptedJobs()
-            let job = try await runner.revise(moduleID: id(1), lectureID: id(2), cardID: id(3), feedback: arg(4), backend: api ? .messagesAPI : .claudeCLI, model: model)
+            let job = try await runner.revise(moduleID: id(1), lectureID: id(2), cardID: id(3), feedback: arg(4), backend: backend, model: model)
             await runner.waitUntilIdle(); try await printJob(store: store, moduleID: id(1), lectureID: id(2), jobID: job)
         case "ask":
             _ = try await runner.recoverInterruptedJobs()
             guard let page = Int(try arg(3)) else { throw LibraryError.invalid("Source slide must be a number.") }
-            let job = try await runner.ask(moduleID: id(1), lectureID: id(2), anchorPage: page, question: arg(4), backend: api ? .messagesAPI : .claudeCLI, model: model)
+            let job = try await runner.ask(moduleID: id(1), lectureID: id(2), anchorPage: page, question: arg(4), backend: backend, model: model)
             await runner.waitUntilIdle(); try await printJob(store: store, moduleID: id(1), lectureID: id(2), jobID: job)
             let lecture = try await store.loadLecture(moduleID: id(1), lectureID: id(2))
             if let answer = lecture.threads.first(where: { $0.anchorPage == page })?.messages.last { print(answer.text) }
@@ -194,7 +201,7 @@ import LecternCore
     static let help = """
     Lectern — local Swift backend, macOS 26+
     Optional: --root PATH (default ~/Library/Application Support/Lectern/Library)
-    AI commands use your installed Claude CLI; --api opts into paid API billing.
+    AI commands use your saved backend; --api selects the paid API and --codex selects Codex CLI.
     --model MODEL overrides the backend's model.
 
     demo                                     Offline end-to-end run in a new temporary library

@@ -48,7 +48,7 @@ private struct CardList: View {
     @Bindable var model: LectureWindowModel
 
     private let filters: [(ReviewFilter, String)] = [
-        (.all, "All"), (.unreviewed, "To review"), (.aiFlagged, "From Claude"),
+        (.all, "All"), (.unreviewed, "To review"), (.aiFlagged, "AI flagged"),
         (.needsAdjustment, "Needs work"), (.bad, "Bad"), (.good, "Good"), (.proposals, "Proposals")
     ]
 
@@ -161,10 +161,10 @@ private struct CardDetail: View {
             VStack(alignment: .leading, spacing: 0) {
                 if let flag = card.flag {
                     VStack(alignment: .leading, spacing: 10) {
-                        Label { Text("**Claude flagged this card.** \(flag)") } icon: { Image(systemName: "sparkles") }
+                        Label { Text("**AI flagged this card.** \(flag)") } icon: { Image(systemName: "sparkles") }
                             .font(Theme.body).foregroundStyle(Theme.ai)
                         HStack(spacing: 20) {
-                            Button("Fix it with Claude") { model.fixFlagWithClaude(cardID: card.id); focus.wrappedValue = .ask }
+                            Button("Fix it with AI") { model.fixFlagWithClaude(cardID: card.id); focus.wrappedValue = .ask }
                                 .buttonStyle(LinkButtonStyle(color: Theme.ai))
                             Button("Dismiss") { model.dismissFlag(cardID: card.id) }
                                 .buttonStyle(LinkButtonStyle(color: Theme.quiet))
@@ -282,10 +282,10 @@ private struct CardDetail: View {
             }
             if !model.feedbackDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 HStack(spacing: 10) {
-                    Button("Send to Claude ↩") { Task { await model.sendFeedback() } }
+                    Button("Send to AI ↩") { Task { await model.sendFeedback() } }
                         .buttonStyle(SecondaryButtonStyle(foreground: Theme.aiStrong, stroke: Theme.ai))
                         .disabled(model.readOnly || card.proposal != nil)
-                        .help(card.proposal != nil ? "Resolve the current proposal first." : "Claude rewrites the card; you keep reviewing.")
+                        .help(card.proposal != nil ? "Resolve the current proposal first." : "AI rewrites the card; you keep reviewing.")
                     Button("Make module rule") { Task { await model.makeModuleRule() } }
                         .buttonStyle(LinkButtonStyle())
                         .disabled(model.readOnly)
@@ -372,7 +372,7 @@ private struct ProposalCard: View {
             }
             switch proposal.state {
             case .pending:
-                HStack { ProgressView().controlSize(.small); Text("Waiting for Claude…").font(Theme.small) }
+                HStack { ProgressView().controlSize(.small); Text("Waiting for AI…").font(Theme.small) }
             case .failed:
                 Text("This proposal failed. Discard it and send the feedback again.").font(Theme.small).foregroundStyle(Theme.bad)
             case .ready:

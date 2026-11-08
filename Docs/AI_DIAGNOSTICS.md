@@ -26,6 +26,11 @@ Default location:
       cli-auth-stdout.txt
       cli-auth-stderr.txt
       cli-auth-exit.json
+      codex-invocation.json
+      codex-rpc-sent.jsonl
+      codex-rpc-received.jsonl
+      codex-stderr.txt
+      codex-exit.json
       http-01-request.json
       http-01-response.json
       http-01-body.json (or .sse / .error.txt)
@@ -67,6 +72,9 @@ files and frozen job snapshot. Compare attempts when a retry behaves differently
   optional `cli-stderr-tail.txt` keeps the final error after noisy stderr.
   The subscription-auth check has separate files. Read both stdout and stderr:
   Claude can put the useful error in either, including JSON result envelopes.
+  Codex CLI attempts also retain the sanitized JSON-RPC requests and responses,
+  so a failed turn can be traced past process startup into the Codex protocol
+  exchange. Credential values are excluded from these records.
 - API files preserve each request/response body or SSE stream, status, request
   ID, retry-after, selected rate-limit headers, tool calls and results. Request
   headers are allowlisted; authorization headers are never serialized.

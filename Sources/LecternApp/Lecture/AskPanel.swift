@@ -50,7 +50,7 @@ struct AskPanel: View {
         return model.focusedPage.map { "Ask about slide \($0)" } ?? "Ask about this lecture"
     }
     private var composerPlaceholder: String {
-        model.mode == .review ? "\(emptyTitle), or tell Claude what to change…" : "\(emptyTitle), or anything in this lecture…"
+        model.mode == .review ? "\(emptyTitle), or tell the AI what to change…" : "\(emptyTitle), or anything in this lecture…"
     }
     private var starterPrompts: [String] {
         model.mode == .review ? ["Why is this the right answer?", "Make the back shorter", "Give me a memory hook", "Quiz me on this slide"] : ["Explain this slide simply", "What will the exam ask from this?", "Quiz me on this slide", "Which words here matter most?"]
@@ -59,7 +59,7 @@ struct AskPanel: View {
         VStack(alignment: .leading, spacing: 14) {
             LogoMark().fill(Theme.accent).frame(width: 32, height: 32)
             Text(emptyTitle).font(Theme.serif(21))
-            Text("Claude already sees what you’re looking at. Mention other slides or cards with @, or just ask: it finds them in the lecture.").font(Theme.body).foregroundStyle(Theme.quiet)
+            Text("AI already sees what you’re looking at. Mention other slides or cards with @, or just ask: it finds them in the lecture.").font(Theme.body).foregroundStyle(Theme.quiet)
             ForEach(starterPrompts, id: \.self) { text in
                 Button(text) { model.setChatDraft(text); focus.wrappedValue = .ask }
                     .buttonStyle(.plain).font(Theme.small).foregroundStyle(Theme.ink).padding(.horizontal, 12).padding(.vertical, 7)
@@ -74,7 +74,7 @@ struct AskPanel: View {
                 if let text = progress?.streamedText, !text.isEmpty { ChatMarkdownView(text: text, streaming: true, onCitation: model.openChatCitation) }
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.mini)
-                    Text(progress?.stage == "Queued" ? "Waiting for a free slot…" : (progress?.streamedText.isEmpty == false ? "Claude is answering…" : (progress?.stage ?? "Reading your context…")))
+                    Text(progress?.stage == "Queued" ? "Waiting for a free slot…" : (progress?.streamedText.isEmpty == false ? "\(job.backend.assistantName) is answering…" : (progress?.stage ?? "Reading your context…")))
                         .font(Theme.caption).foregroundStyle(Theme.faint)
                 }
             }
@@ -99,7 +99,7 @@ struct AskPanel: View {
         }
         ForEach(model.chatFailures) { job in
             VStack(alignment: .leading, spacing: 9) {
-                Label("Claude couldn’t finish", systemImage: "exclamationmark.triangle").font(.system(size: 12.5, weight: .semibold))
+                Label("AI couldn’t finish", systemImage: "exclamationmark.triangle").font(.system(size: 12.5, weight: .semibold))
                 Text(job.error ?? "Lectern closed before the answer finished.").font(Theme.small).textSelection(.enabled)
                 HStack {
                     Button("Try again") { Task { await model.retry(job.id) } }.buttonStyle(SecondaryButtonStyle())
@@ -136,7 +136,7 @@ struct AskPanel: View {
                 .accessibilityHidden(mentionQuery == nil)
             composerBox(maximumHeight: maximumHeight)
             attachmentError
-            Label("Claude sees attached images and the context chips, and looks up other slides or cards when needed.", systemImage: "magnifyingglass")
+            Label("AI sees attached images and the context chips, and looks up other slides or cards when needed.", systemImage: "magnifyingglass")
                 .font(.system(size: 10.5)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
         }.padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 8)
             .onChange(of: model.chatDraft) { _, draft in

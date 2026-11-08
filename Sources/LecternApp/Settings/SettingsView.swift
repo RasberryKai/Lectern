@@ -5,7 +5,7 @@ import SwiftUI
 struct SettingsView: View {
     var body: some View {
         TabView {
-            AISettingsTab().tabItem { Label("Claude", systemImage: "sparkles") }
+            AISettingsTab().tabItem { Label("AI", systemImage: "sparkles") }
             RulesTab().tabItem { Label("Card rules", systemImage: "text.book.closed") }
             UsageTab().tabItem { Label("API usage", systemImage: "dollarsign.circle") }
             LibraryTab().tabItem { Label("Library", systemImage: "books.vertical") }
@@ -15,7 +15,7 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Claude backend
+// MARK: - AI backends
 
 private struct AISettingsTab: View {
     @Environment(AppModel.self) private var model
@@ -24,12 +24,17 @@ private struct AISettingsTab: View {
     @State private var message: String?
     @State private var error: String?
     @State private var loaded = false
+    @State private var codexSignInTask: Task<Void, Never>?
+    @State private var codexStatus: String?
+    @State private var codexBusy = false
 
     var body: some View {
-        Form {
+        ScrollView(.vertical) {
+          Form {
             Section {
                 Picker("Backend", selection: $draft.backend) {
                     Text("Claude CLI (your subscription)").tag(AIBackend.claudeCLI)
+                    Text("Codex (ChatGPT account)").tag(AIBackend.codexCLI)
                     Text("Anthropic API (API key, billed per token)").tag(AIBackend.messagesAPI)
                 }
                 .pickerStyle(.radioGroup)
@@ -48,6 +53,27 @@ private struct AISettingsTab: View {
                 Label(found ? "Found at \(resolved.path)" : "Not found at \(resolved.path)", systemImage: found ? "checkmark.circle" : "xmark.circle")
                     .font(Theme.small).foregroundStyle(found ? Theme.good : Theme.bad)
                 Text("Sign in once in Terminal with `claude auth login` using an ordinary Claude Pro/Max/Team/Enterprise account. Lectern runs the unmodified CLI and never reads its login. Extra-usage credits on your account can still be charged after included limits.")
+                    .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
+            }
+            Section("Codex CLI") {
+                TextField("Model", text: $draft.codexModel, prompt: Text(AISettings.defaultCodexModel))
+                HStack {
+                    TextField("CLI path", text: Binding(get: { draft.codexCLIPath ?? "" }, set: { draft.codexCLIPath = $0.isEmpty ? nil : $0 }),
+                              prompt: Text(CodexCLIProvider.resolveExecutable(configuredPath: nil).path))
+                    Button("Choose…") { chooseCodexCLI() }
+                }
+                let resolved = CodexCLIProvider.resolveExecutable(configuredPath: draft.codexCLIPath)
+                let found = FileManager.default.isExecutableFile(atPath: resolved.path)
+                Label(found ? "Found at \(resolved.path)" : "Not found at \(resolved.path)", systemImage: found ? "checkmark.circle" : "xmark.circle")
+                    .font(Theme.small).foregroundStyle(found ? Theme.good : Theme.bad)
+                HStack {
+                    Button(codexBusy ? "Waiting for ChatGPT sign-in…" : "Sign in with ChatGPT") { startCodexSignIn() }
+                        .disabled(codexBusy || !found)
+                    Button("Check sign-in") { Task { await checkCodexStatus() } }
+                        .disabled(codexBusy || !found)
+                }
+                if let codexStatus { Text(codexStatus).font(Theme.small).foregroundStyle(codexStatusColor).textSelection(.enabled) }
+                Text("Sign in here once with your ChatGPT account. Codex manages credentials in a Lectern-specific account folder, separate from other Codex setups; Lectern never reads them.")
                     .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
             }
             Section("Anthropic API") {
@@ -69,9 +95,12 @@ private struct AISettingsTab: View {
                 Button("Revert") { draft = model.settings; message = nil }.disabled(draft == model.settings)
                 Button("Save") { Task { await save() } }.keyboardShortcut(.defaultAction).disabled(draft == model.settings)
             }
+          }
+          .formStyle(.grouped)
         }
-        .formStyle(.grouped)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { if !loaded { draft = model.settings; loaded = true } }
+        .onDisappear { codexSignInTask?.cancel(); codexSignInTask = nil; codexBusy = false }
     }
 
     private func save() async {
@@ -88,6 +117,49 @@ private struct AISettingsTab: View {
         panel.message = "Choose the claude executable"
         panel.showsHiddenFiles = true
         if panel.runModal() == .OK, let url = panel.url { draft.claudeCLIPath = url.path }
+    }
+
+    private func chooseCodexCLI() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.message = "Choose the codex executable"
+        panel.showsHiddenFiles = true
+        if panel.runModal() == .OK, let url = panel.url { draft.codexCLIPath = url.path }
+    }
+
+    private func startCodexSignIn() {
+        codexSignInTask?.cancel()
+        let executable = CodexCLIProvider.resolveExecutable(configuredPath: draft.codexCLIPath)
+        codexBusy = true
+        codexStatus = "Waiting for the Codex sign-in link…"
+        codexSignInTask = Task { @MainActor in
+            defer { codexBusy = false; codexSignInTask = nil }
+            do {
+                try await CodexCLIProvider.signIn(executableURL: executable) { url in
+                    Task { @MainActor in NSWorkspace.shared.open(url) }
+                }
+                codexStatus = "Signed in with ChatGPT."
+            } catch is CancellationError {
+                codexStatus = "Sign-in cancelled."
+            } catch {
+                codexStatus = "Sign-in failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func checkCodexStatus() async {
+        let executable = CodexCLIProvider.resolveExecutable(configuredPath: draft.codexCLIPath)
+        codexBusy = true
+        defer { codexBusy = false }
+        do { codexStatus = try await CodexCLIProvider.accountStatus(executableURL: executable) }
+        catch { codexStatus = "Could not check sign-in: \(error.localizedDescription)" }
+    }
+
+    private var codexStatusColor: Color {
+        let status = codexStatus?.lowercased() ?? ""
+        if status.contains("failed") || status.contains("could not") { return Theme.bad }
+        if status.hasPrefix("signed in") { return Theme.good }
+        return Theme.quiet
     }
 
     private func saveKey() {
@@ -177,7 +249,7 @@ private struct UsageTab: View {
                     GridRow { Text("Output tokens"); Text(summary.outputTokens.formatted()).monospacedDigit() }
                 }
                 .font(Theme.body)
-                Text("Covers API-key jobs only. Claude CLI jobs run on your subscription and aren't counted. Estimates use published prices current on 2 Nov 2026 and are not an invoice; failed or cancelled requests can still be charged without usage data.")
+                Text("Covers API-key jobs only. Claude and Codex CLI jobs use their respective accounts and aren't counted. Estimates use published prices current on 2 Nov 2026 and are not an invoice; failed or cancelled requests can still be charged without usage data.")
                     .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
             } else if let error {
                 Text(error).foregroundStyle(Theme.bad)
