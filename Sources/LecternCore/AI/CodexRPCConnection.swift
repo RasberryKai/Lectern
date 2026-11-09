@@ -22,6 +22,7 @@ final class CodexRPCConnection: @unchecked Sendable {
     private var buffer = Data()
     private var stderrTail = Data()
     private var receivedBytes = 0
+    private var retainedBytes = 0
     private var nextID = 0
     private var started = false
     private var exited = false
@@ -31,6 +32,10 @@ final class CodexRPCConnection: @unchecked Sendable {
     private var timeoutItem: DispatchWorkItem?
     private let byteLimit = 64 * 1_024 * 1_024
     private let lineLimit = 16 * 1_024 * 1_024
+    // Codex echoes user images and dynamic-tool output in item/turn notifications.
+    // Bound the wire separately, then apply response limits after removing echoes.
+    private let wireLineLimit = 128 * 1_024 * 1_024
+    private let wireByteLimit = 512 * 1_024 * 1_024
 
     static var defaultHome: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -200,7 +205,7 @@ final class CodexRPCConnection: @unchecked Sendable {
         trace?.writeJSON("codex-exit.json", lock.withLock {
             ["pid": started ? process.processIdentifier : 0, "exited": exited, "outputClosed": outputClosed,
              "terminationStatus": exited ? process.terminationStatus : -1, "cancelled": cancelled,
-             "receivedBytes": receivedBytes] as [String: Any]
+             "receivedBytes": receivedBytes, "retainedBytes": retainedBytes] as [String: Any]
         })
         continuation.finish()
     }
@@ -222,25 +227,80 @@ final class CodexRPCConnection: @unchecked Sendable {
 
     private func receive(_ data: Data) {
         lock.lock(); defer { lock.unlock() }
+        guard !stopping else { return }
         receivedBytes += data.count
-        guard receivedBytes <= byteLimit else { fail(AIError.limit("Codex output exceeded the 64 MiB interaction limit."), reason: "output_limit"); return }
-        buffer.append(data)
-        while let newline = buffer.firstIndex(of: 10) {
-            let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
-            guard line.count <= lineLimit else { fail(AIError.limit("A Codex message exceeded 16 MiB."), reason: "message_limit"); return }
-            if !line.isEmpty {
-                if case .dropped = continuation.yield(line) {
-                    fail(AIError.limit("Codex output exceeded the pending message limit."), reason: "queue_limit"); return
-                }
-            }
+        guard receivedBytes <= wireByteLimit else {
+            fail(AIError.limit("Codex traffic exceeded the 512 MiB interaction limit."), reason: "wire_limit"); return
         }
-        if buffer.count > lineLimit { fail(AIError.limit("A Codex message exceeded 16 MiB."), reason: "message_limit") }
+        // Scan only new bytes. Rescanning an accumulating base64 line on every
+        // pipe callback makes large lecture inputs quadratic to receive.
+        var start = data.startIndex
+        while start < data.endIndex {
+            let newline = data[start...].firstIndex(of: 10)
+            let end = newline ?? data.endIndex
+            guard buffer.count + data.distance(from: start, to: end) <= wireLineLimit else {
+                fail(AIError.limit("A Codex wire message exceeded 128 MiB."), reason: "wire_message_limit"); return
+            }
+            buffer.append(data[start..<end])
+            guard let newline else { return }
+            guard yieldMessage(buffer) else { buffer.removeAll(); return }
+            buffer.removeAll(keepingCapacity: true)
+            start = data.index(after: newline)
+        }
+    }
+
+    /// Input/tool-result echoes are not model output. Preserve all requests,
+    /// answers, usage, errors and completion status; remove only unused payloads.
+    private func compactEchoes(_ line: Data) -> Data {
+        guard var message = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              message["id"] == nil,
+              let method = message["method"] as? String,
+              var params = message["params"] as? [String: Any] else { return line }
+        switch method {
+        case "item/started", "item/completed":
+            guard var item = params["item"] as? [String: Any] else { return line }
+            switch item["type"] as? String {
+            case "userMessage": item["content"] = []
+            case "dynamicToolCall": item.removeValue(forKey: "contentItems")
+            default: return line
+            }
+            params["item"] = item
+        case "turn/started", "turn/completed":
+            guard var turn = params["turn"] as? [String: Any] else { return line }
+            turn["items"] = []
+            params["turn"] = turn
+        default: return line
+        }
+        message["params"] = params
+        guard let compacted = try? JSONSerialization.data(withJSONObject: message) else { return line }
+        if line.count > lineLimit {
+            trace?.record("codex_input_echo_compacted", ["method": method, "wireBytes": line.count,
+                                                         "retainedBytes": compacted.count])
+        }
+        return compacted
+    }
+
+    private func yieldMessage(_ raw: Data) -> Bool {
+        guard !raw.isEmpty else { return true }
+        let line = compactEchoes(raw)
+        guard line.count <= lineLimit else {
+            fail(AIError.limit("A Codex response message exceeded 16 MiB."), reason: "message_limit"); return false
+        }
+        retainedBytes += line.count
+        guard retainedBytes <= byteLimit else {
+            fail(AIError.limit("Codex output exceeded the 64 MiB interaction limit."), reason: "output_limit"); return false
+        }
+        if case .dropped = continuation.yield(line) {
+            fail(AIError.limit("Codex output exceeded the pending message limit."), reason: "queue_limit"); return false
+        }
+        return true
     }
 
     private func endOutput() {
         lock.lock(); defer { lock.unlock() }
         outputClosed = true
-        if !buffer.isEmpty { continuation.yield(buffer); buffer.removeAll() }
+        if !stopping { _ = yieldMessage(buffer) }
+        buffer.removeAll()
         finishIfClosed()
     }
 

@@ -56,6 +56,38 @@ import Testing
         }
     }
 
+    @Test func largeInputAndToolEchoesDoNotConsumeResponseLimits() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = try fixture(in: root, mode: "largeEchoes")
+        let request = try makeRequest(root: root)
+        let response = try await CodexCLIProvider(executableURL: executable, timeout: 30,
+            codexHomeURL: root.appendingPathComponent("home")).execute(request, onEvent: { _ in })
+        #expect(try JSONDecoder().decode(GeneratedCards.self, from: Data(response.content.utf8)).cards.first?.front == "Fixture question")
+        let logs = try traceDirectory(in: request.workingDirectory)
+        let exit = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: logs.appendingPathComponent("codex-exit.json"))) as? [String: Any])
+        #expect((exit["receivedBytes"] as? Int ?? 0) > 64 * 1_024 * 1_024)
+        #expect((exit["retainedBytes"] as? Int ?? Int.max) < 10_000)
+        let received = try Data(contentsOf: logs.appendingPathComponent("codex-rpc-received.jsonl"))
+        #expect(received.count < 10_000)
+        #expect(!String(decoding: received, as: UTF8.self).contains("data:image/png;base64,"))
+    }
+
+    @Test(arguments: ["oversizedAnswer", "oversizedRequest", "oversizedEOF"])
+    func largeAnswersAndServerRequestsStillFail(mode: String) async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = try fixture(in: root, mode: mode)
+        do {
+            _ = try await CodexCLIProvider(executableURL: executable, timeout: 30,
+                codexHomeURL: root.appendingPathComponent("home")).execute(makeRequest(root: root), onEvent: { _ in })
+            Issue.record("Expected the semantic message limit to remain enforced.")
+        } catch let error as AIError {
+            guard case .limit(let message) = error else { throw error }
+            #expect(message.contains("response message exceeded 16 MiB"))
+        }
+    }
+
     @Test func turnQuotaFailureRemainsLimitWhenProcessExitsSuccessfully() async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -258,6 +290,25 @@ private func fixture(in root: URL, mode: String) throws -> URL {
             send({"id": request_id, "result": {"thread": {"id": "thread-fixture"}, "model": params.get("model")}})
         elif method == "turn/start":
             send({"id": request_id, "result": {"turn": {"id": "turn-fixture"}}})
+            if mode in ("largeEchoes", "oversizedAnswer", "oversizedRequest", "oversizedEOF"):
+                image = "data:image/png;base64," + "A" * (17 * 1024 * 1024)
+                user = {"id": "user-1", "type": "userMessage", "content": [{"type": "image", "url": image}]}
+                if mode == "largeEchoes":
+                    for lifecycle in ("item/started", "item/completed"):
+                        send({"method": lifecycle, "params": {"threadId": "thread-fixture", "item": user}})
+                    send({"method": "item/completed", "params": {"item": {"type": "dynamicToolCall", "contentItems": [{"type": "inputImage", "imageUrl": image}], "success": True}}})
+                elif mode == "oversizedRequest":
+                    # Requests must never be compacted, even with echo-like method names.
+                    send({"id": 9002, "method": "item/completed", "params": {"item": user}})
+                    break
+                else:
+                    oversized = {"method": "item/completed", "params": {"item": {"type": "agentMessage", "phase": "final_answer", "text": image}}}
+                    if mode == "oversizedEOF":
+                        sys.stdout.write(json.dumps(oversized, separators=(",", ":")))
+                        sys.stdout.flush()
+                    else:
+                        send(oversized)
+                    break
             if mode in ("hang", "cancel"):
                 time.sleep(30)
                 break
@@ -288,7 +339,14 @@ private func fixture(in root: URL, mode: String) throws -> URL {
                     output.write("TOOL_RESULT=" + json.dumps(tool_result, separators=(",", ":")) + "\n")
             send({"method": "thread/tokenUsage/updated", "params": {"threadId": "thread-fixture", "turnId": "turn-fixture", "tokenUsage": {"total": {"inputTokens": 12, "outputTokens": 7}}}})
             send({"method": "item/completed", "params": {"threadId": "thread-fixture", "turnId": "turn-fixture", "item": {"type": "agentMessage", "phase": "final_answer", "text": text}}})
-            send({"method": "turn/completed", "params": {"threadId": "thread-fixture", "turnId": "turn-fixture", "turn": {"id": "turn-fixture", "status": "completed"}}})
+            final = {"method": "turn/completed", "params": {"threadId": "thread-fixture", "turnId": "turn-fixture", "turn": {"id": "turn-fixture", "status": "completed"}}}
+            if mode == "largeEchoes":
+                final["params"]["turn"]["items"] = [user]
+                # Completion status and trailing frames must survive EOF without newline.
+                sys.stdout.write(json.dumps(final, separators=(",", ":")))
+                sys.stdout.flush()
+            else:
+                send(final)
             break
     """#.replacingOccurrences(of: "MODE_PLACEHOLDER", with: mode)
     try Data(source.utf8).write(to: executable)

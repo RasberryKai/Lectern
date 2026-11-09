@@ -146,6 +146,7 @@ extension LectureWindowModel {
         chatAttachmentError = nil
         chatPreparationFailure = nil
         chatContext = ChatContext()
+        askVisible = true
         panes.openChat(mode)
     }
     func resumeChat(_ id: UUID) async {

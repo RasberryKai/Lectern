@@ -130,6 +130,11 @@ struct LectureWorkspace: View {
     private func handleKey(_ event: NSEvent, editing: Bool) -> Bool {
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
+        if modifiers == .command, letter == "n" {
+            guard !generationOverlayVisible else { return true }
+            Task { await model.newChat() }
+            return true
+        }
         if modifiers == [.command, .shift], letter == "a" {
             // The chat sits behind the generation overlay; don't focus it there.
             guard !generationOverlayVisible else { return true }

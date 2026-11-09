@@ -44,6 +44,10 @@ struct AskPanel: View {
                 composer(maximumHeight: max(100, geometry.size.height * 0.45))
             }
         }
+        .task(id: model.displayedChat.id) {
+            guard !model.readOnly, !(model.mode == .review && model.runningGenerate != nil) else { return }
+            focus.wrappedValue = .ask
+        }
     }
     private var emptyTitle: String {
         if model.mode == .review, let id = model.selectedCardID { return "Ask about card \(model.cardNumbers[id] ?? 1)" }
@@ -164,6 +168,7 @@ struct AskPanel: View {
                                      focused: focus.wrappedValue == .ask, editable: !model.readOnly, maximumHeight: max(76, maximumHeight - 80),
                                      onFocus: { focus.wrappedValue = $0 ? .ask : nil }, onSend: send, onMenuKey: menuKey,
                                      onImages: { images in Task { await model.importChatImages(images) }; focus.wrappedValue = .ask })
+                    .focused(focus, equals: .ask)
                     .frame(height: composerHeight).padding(.horizontal, 5)
             }
             HStack {
@@ -251,7 +256,8 @@ struct ChatHistoryControls: View {
             Button { history.toggle() } label: { Image(systemName: "clock.arrow.circlepath") }
                 .help("Earlier chats").popover(isPresented: $history, arrowEdge: .bottom) { historyList }
             Button { Task { await model.newChat() } } label: { Image(systemName: "square.and.pencil") }
-                .help("New chat").disabled(model.readOnly || model.runningChat != nil || model.isStartingChat || model.isImportingChatImages)
+                .help("New chat · ⌘N").accessibilityLabel("New chat")
+                .disabled(model.readOnly || model.runningChat != nil || model.isStartingChat || model.isImportingChatImages)
         }.buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Theme.quiet)
     }
     private var historyList: some View {

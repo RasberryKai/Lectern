@@ -56,6 +56,7 @@ final class AppModel {
     private(set) var dashboard: DashboardSnapshot? = nil
     private(set) var modules: [Module] = []
     private(set) var settings: AISettings = .default
+    private(set) var settingsLoaded = false
     private(set) var apiKeySaved = false
     private(set) var bootstrapReport: BootstrapReport? = nil
     var showBootstrapReport = false
@@ -77,6 +78,8 @@ final class AppModel {
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var started = false
     @ObservationIgnored private var librarySessionLock: LibrarySessionLock?
+    @ObservationIgnored private var settingsSaveTask: Task<Void, Error>?
+    @ObservationIgnored private var settingsRevision = 0
 
     private init() {
         let environment = ProcessInfo.processInfo.environment
@@ -102,15 +105,17 @@ final class AppModel {
     func start() async {
         guard !started else { return }
         started = true
+        // Preferences remain available even when the library cannot be opened.
+        settings = await settingsStore.load()
+        providerConfiguration.update(settings)
+        settingsLoaded = true
+        refreshAPIKeyState()
         do {
             librarySessionLock = try LibrarySessionLock(rootURL: store.rootURL)
         } catch {
             phase = .failed(error.localizedDescription)
             return
         }
-        settings = await settingsStore.load()
-        providerConfiguration.update(settings)
-        refreshAPIKeyState()
         do {
             let skipLegacy = ProcessInfo.processInfo.environment["LECTERN_SKIP_LEGACY_IMPORT"] == "1"
             let report = try await library.bootstrap(importLegacy: !skipLegacy)
@@ -358,9 +363,28 @@ final class AppModel {
     // MARK: Settings
 
     func updateSettings(_ new: AISettings) async throws {
-        try await settingsStore.save(new)
-        settings = new
-        providerConfiguration.update(new)
+        try Task.checkCancellation()
+        settingsRevision += 1
+        let revision = settingsRevision
+        let previous = settingsSaveTask
+        let task = Task { [settingsStore] in
+            // Autosave tasks can be cancelled by subsequent edits. Once accepted,
+            // finish writes in order and publish only the newest saved settings.
+            _ = try? await previous?.value
+            try await settingsStore.save(new)
+        }
+        settingsSaveTask = task
+        do {
+            try await task.value
+            guard revision == settingsRevision else { return }
+            settings = new
+            providerConfiguration.update(new)
+            settingsSaveTask = nil
+        } catch {
+            guard revision == settingsRevision else { return }
+            settingsSaveTask = nil
+            throw error
+        }
     }
 
     func refreshAPIKeyState() {

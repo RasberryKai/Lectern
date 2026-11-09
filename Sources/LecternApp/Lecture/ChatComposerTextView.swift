@@ -62,9 +62,8 @@ struct ChatComposerTextView: NSViewRepresentable {
         editor.isEditable = editable
         editor.unregisterDraggedTypes()
         editor.registerForDraggedTypes([.string])
-        if focused && scroll.window?.firstResponder !== editor {
-            DispatchQueue.main.async { if self.focused { scroll.window?.makeFirstResponder(editor) } }
-        }
+        editor.wantsFocus = focused
+        editor.focusIfNeeded()
         context.coordinator.resize(editor)
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -83,9 +82,22 @@ struct ChatComposerTextView: NSViewRepresentable {
     }
 }
 private final class ComposerEditor: NSTextView {
+    var wantsFocus = false
     var command: ((NSEvent) -> Bool)?
     var focusChanged: ((Bool) -> Void)?
     var receiveImages: (([ChatImageInput]) -> Void)?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        focusIfNeeded()
+    }
+    func focusIfNeeded() {
+        guard wantsFocus, isEditable else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.wantsFocus, self.isEditable,
+                  let window = self.window, window.firstResponder !== self else { return }
+            window.makeFirstResponder(self)
+        }
+    }
     override func paste(_ sender: Any?) {
         let images = ChatImageInput.images(on: .general)
         if isEditable, !images.isEmpty { receiveImages?(images); return }

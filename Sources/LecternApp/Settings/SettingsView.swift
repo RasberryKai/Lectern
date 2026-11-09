@@ -38,6 +38,11 @@ private struct AISettingsTab: View {
                     Text("Anthropic API (API key, billed per token)").tag(AIBackend.messagesAPI)
                 }
                 .pickerStyle(.radioGroup)
+                Text("Active backend: \(model.settings.backend.displayName) · \(model.settings.selectedModel)")
+                    .font(Theme.small).foregroundStyle(Theme.quiet)
+                Text("Changes save automatically for new jobs. Running jobs keep their original backend and model.")
+                    .font(Theme.small).foregroundStyle(Theme.quiet)
+                if let error { Text(error).font(Theme.small).foregroundStyle(Theme.bad) }
                 Text("Every job records the backend and model it used. Lectern never falls back to another backend on its own.")
                     .font(Theme.small).foregroundStyle(Theme.quiet)
             }
@@ -89,25 +94,33 @@ private struct AISettingsTab: View {
                     .font(Theme.small).foregroundStyle(Theme.quiet)
             }
             if let message { Text(message).font(Theme.small).foregroundStyle(Theme.good) }
-            if let error { Text(error).font(Theme.small).foregroundStyle(Theme.bad) }
-            HStack {
-                Spacer()
-                Button("Revert") { draft = model.settings; message = nil }.disabled(draft == model.settings)
-                Button("Save") { Task { await save() } }.keyboardShortcut(.defaultAction).disabled(draft == model.settings)
-            }
           }
           .formStyle(.grouped)
+          .disabled(!loaded)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { if !loaded { draft = model.settings; loaded = true } }
+        .onChange(of: model.settingsLoaded, initial: true) { _, ready in
+            if ready, !loaded { draft = model.settings; loaded = true }
+        }
+        .task(id: draft) {
+            guard loaded, draft != model.settings else { return }
+            await save(draft)
+        }
+        .task(id: draft.backend) {
+            if draft.backend == .codexCLI, !codexBusy,
+               FileManager.default.isExecutableFile(atPath: CodexCLIProvider.resolveExecutable(configuredPath: draft.codexCLIPath).path) {
+                await checkCodexStatus()
+            }
+        }
         .onDisappear { codexSignInTask?.cancel(); codexSignInTask = nil; codexBusy = false }
     }
 
-    private func save() async {
+    private func save(_ settings: AISettings) async {
         do {
-            try await model.updateSettings(draft)
-            message = "Saved. New jobs use these settings; running jobs keep theirs."
+            try await model.updateSettings(settings)
             error = nil
+        } catch is CancellationError {
+            // A newer draft owns saving and status reporting.
         } catch { self.error = error.localizedDescription }
     }
 

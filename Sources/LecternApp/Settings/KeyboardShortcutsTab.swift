@@ -10,6 +10,7 @@ struct KeyboardShortcutsTab: View {
             }
             Section {
                 shortcut("Toggle AI chat", "⌘⇧A")
+                shortcut("New chat", "⌘N")
                 shortcut("Toggle Cards in Prepare / Source in Review", "⌘⇧S")
                 Text("These work while typing in a lecture. Press the shortcut again to hide the active pane. Switching tabs keeps the pane open. ⌘A keeps its usual Select All behavior.")
                     .font(Theme.small).foregroundStyle(Theme.quiet)

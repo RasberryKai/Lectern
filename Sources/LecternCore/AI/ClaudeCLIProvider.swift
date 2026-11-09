@@ -554,6 +554,9 @@ private final class CLIInvocation: @unchecked Sendable {
     private var stdout = Data()
     private var stderr = Data()
     private var partialLine = Data()
+    // Read tool results echo base64 slide images. Bound each wire event separately
+    // from the retained response, so lecture inputs do not exhaust the answer cap.
+    private let maximumStreamLineBytes = 32 * 1_024 * 1_024
     private var continuation: CheckedContinuation<Void, Never>?
     private var didTerminate = false
     private var cancelled = false
@@ -693,6 +696,16 @@ private final class CLIInvocation: @unchecked Sendable {
 
     private func snapshotResult() -> CLIProcessResult {
         lock.lock(); defer { lock.unlock() }
+        if streaming, !outputExceeded, !partialLine.isEmpty {
+            let line = Self.compactToolResult(partialLine)
+            if retainOutput(line) {
+                trace?.appendBytes(diagnosticPrefix + "-stdout.txt", line)
+                emitTextDelta(from: line)
+            } else {
+                outputExceeded = true
+            }
+            partialLine.removeAll()
+        }
         return CLIProcessResult(terminationStatus: process.terminationStatus,
                                 stdout: stdout,
                                 stderr: stderr,
@@ -724,23 +737,65 @@ private final class CLIInvocation: @unchecked Sendable {
     }
 
     private func receiveOutput(_ bytes: Data) {
-        trace?.appendBytes(diagnosticPrefix + "-stdout.txt", bytes)
         lock.lock(); defer { lock.unlock() }
-        guard stdout.count + bytes.count <= outputLimit else {
-            outputExceeded = true
-            lock.unlock()
-            stop(asTimeout: false, outputLimit: true)
-            lock.lock()
+        guard !outputExceeded else { return }
+        guard streaming else {
+            trace?.appendBytes(diagnosticPrefix + "-stdout.txt", bytes)
+            if !retainOutput(bytes) { stopForOutputLimit() }
             return
         }
-        stdout.append(bytes)
-        guard streaming else { return }
-        partialLine.append(bytes)
-        while let newline = partialLine.firstIndex(of: 0x0A) {
-            let line = Data(partialLine[..<newline])
-            partialLine.removeSubrange(...newline)
+        var start = bytes.startIndex
+        while start < bytes.endIndex {
+            let newline = bytes[start...].firstIndex(of: 0x0A)
+            let end = newline ?? bytes.endIndex
+            guard partialLine.count + bytes.distance(from: start, to: end) <= maximumStreamLineBytes else {
+                stopForOutputLimit()
+                return
+            }
+            partialLine.append(bytes[start..<end])
+            guard let newline else { return }
+            let line = Self.compactToolResult(partialLine)
+            partialLine.removeAll(keepingCapacity: true)
+            guard retainOutput(line + Data([0x0A])) else {
+                stopForOutputLimit()
+                return
+            }
+            trace?.appendBytes(diagnosticPrefix + "-stdout.txt", line + Data([0x0A]))
             emitTextDelta(from: line)
+            start = bytes.index(after: newline)
         }
+    }
+
+    private func retainOutput(_ bytes: Data) -> Bool {
+        guard stdout.count + bytes.count <= outputLimit else { return false }
+        stdout.append(bytes)
+        return true
+    }
+
+    // Caller holds lock; stop acquires it itself.
+    private func stopForOutputLimit() {
+        outputExceeded = true
+        lock.unlock()
+        stop(asTimeout: false, outputLimit: true)
+        lock.lock()
+    }
+
+    private static func compactToolResult(_ line: Data) -> Data {
+        guard var event = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              event["type"] as? String == "user",
+              var message = event["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]] else { return line }
+        // Read tracking needs the tool ID and success flag, never echoed file data.
+        message["content"] = content.map { block -> [String: Any] in
+            guard block["type"] as? String == "tool_result" else { return block }
+            var result = block
+            result["content"] = "[tool result content omitted]"
+            return result
+        }
+        event["message"] = message
+        event.removeValue(forKey: "tool_use_result")
+        event.removeValue(forKey: "tool_result_meta")
+        return (try? JSONSerialization.data(withJSONObject: event)) ?? line
     }
 
     private func emitTextDelta(from line: Data) {
@@ -766,7 +821,6 @@ private final class CLIInvocation: @unchecked Sendable {
     private func closedOutput() {
         lock.lock(); defer { lock.unlock() }
         outputReadClosed = true
-        if streaming, !partialLine.isEmpty { emitTextDelta(from: partialLine); partialLine.removeAll() }
     }
 
     private func closedError() { lock.lock(); errorReadClosed = true; lock.unlock() }

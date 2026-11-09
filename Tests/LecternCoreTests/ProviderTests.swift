@@ -389,6 +389,77 @@ struct ProviderTests {
         #expect(empty.read.isEmpty)
     }
 
+    @Test(arguments: [false, true])
+    func cliChatImageEchoesDoNotExhaustResponseLimitOrHideReadErrors(readFails: Bool) async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var request = try chatRequest(in: root)
+        request.chatSnapshot!.initialRefs = [.slide(7)]
+        let image = String(repeating: "A", count: 9 * 1_024 * 1_024)
+        let fixture = root.appendingPathComponent("stream.jsonl")
+        var stream = Data()
+        for index in 0..<2 {
+            let events: [[String: Any]] = [
+                ["type": "assistant", "message": ["content": [["type": "tool_use", "id": "r\(index)", "name": "Read", "input": ["file_path": "slides/007.png"]]]]],
+                ["type": "user", "tool_use_result": ["base64": image], "message": ["content": [
+                    ["type": "tool_result", "tool_use_id": "r\(index)", "is_error": readFails,
+                     "content": [["type": "image", "source": ["type": "base64", "data": image]]]]
+                ]]]
+            ]
+            for event in events {
+                stream.append(try JSONSerialization.data(withJSONObject: event))
+                stream.append(10)
+            }
+        }
+        // No trailing newline: the final event still needs to be parsed.
+        stream.append(Data(#"{"type":"result","subtype":"success","stop_reason":"tool_use","structured_output":{"message":"Answer","edits":[],"quiz":[]}}"#.utf8))
+        try stream.write(to: fixture)
+        let cli = try fakeCLI(in: root, body: #"""
+        if [ "$1" = "auth" ]; then
+          printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+          exit 0
+        fi
+        cat > /dev/null
+        cat stream.jsonl
+        """#)
+        do {
+            let response = try await ClaudeCLIProvider(executableURL: cli, timeout: 15).execute(request, onEvent: { _ in })
+            #expect(!readFails)
+            #expect(response.read == [.slide(7)])
+            #expect(response.content.contains("Answer"))
+        } catch let error as AIError {
+            guard readFails, case .configuration(let message) = error else { throw error }
+            #expect(message.contains("could not read"))
+        }
+        let logs = try #require(FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("ai-logs"), includingPropertiesForKeys: nil).first)
+        let retained = try Data(contentsOf: logs.appendingPathComponent("cli-stdout.txt"))
+        #expect(retained.count < 10_000)
+        #expect(!String(decoding: retained, as: UTF8.self).contains(String(image.prefix(100))))
+    }
+
+    @Test func cliAskStillRejectsAnOversizedAnswer() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = root.appendingPathComponent("stream.jsonl")
+        let event: [String: Any] = ["type": "result", "subtype": "success", "result": String(repeating: "A", count: 17 * 1_024 * 1_024)]
+        try JSONSerialization.data(withJSONObject: event).write(to: fixture)
+        let cli = try fakeCLI(in: root, body: #"""
+        if [ "$1" = "auth" ]; then
+          printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+          exit 0
+        fi
+        cat > /dev/null
+        cat stream.jsonl
+        """#)
+        let request = AIRequest(jobID: UUID(), kind: .ask, model: "opus", prompt: "Question", pdf: nil, workingDirectory: root)
+        do {
+            _ = try await ClaudeCLIProvider(executableURL: cli, timeout: 15).execute(request, onEvent: { _ in })
+            Issue.record("Expected the answer limit to remain enforced.")
+        } catch let error as AIError {
+            guard case .limit = error else { throw error }
+        }
+    }
+
     @Test func cliSingleCardContextReadsOnlyThatCardAndReportsItHonestly() throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         var request = try chatRequest(in: root)
