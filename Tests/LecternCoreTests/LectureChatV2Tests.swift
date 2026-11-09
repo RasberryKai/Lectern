@@ -18,6 +18,14 @@ private actor V2Gate: AIProvider {
     func release() { released = true }
 }
 @Suite struct LectureChatV2Tests {
+    @Test func learningPointsSavedBeforeTheDrawerDecodeAsReviewed() throws {
+        let fresh = LearningPoint(text: "New", pages: [1])
+        #expect(!fresh.reviewed)
+        var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(fresh)) as! [String: Any]
+        #expect(try JSONDecoder().decode(LearningPoint.self, from: JSONSerialization.data(withJSONObject: object)).reviewed == false)
+        object.removeValue(forKey: "reviewed")
+        #expect(try JSONDecoder().decode(LearningPoint.self, from: JSONSerialization.data(withJSONObject: object)).reviewed)
+    }
     func fixture() async throws -> (LibraryStore, Module, Lecture, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-v2-\(UUID())")
         let store = LibraryStore(rootURL: root); let module = try await store.createModule(name: "V2")

@@ -168,7 +168,17 @@ public struct LearningPoint: Codable, Equatable, Identifiable, Sendable {
     public var pages: [Int]
     public var included: Bool
     public var usedBy: [UUID]
-    public init(id: UUID = UUID(), text: String, pages: [Int] = [], included: Bool = true, usedBy: [UUID] = []) { self.id = id; self.text = text; self.pages = pages; self.included = included; self.usedBy = usedBy }
+    /// False while the point waits in the chat drawer for the student to keep or drop it.
+    /// Points saved before the drawer existed decode as reviewed, so they don't all resurface at once.
+    public var reviewed: Bool
+    public init(id: UUID = UUID(), text: String, pages: [Int] = [], included: Bool = true, usedBy: [UUID] = [], reviewed: Bool = false) { self.id = id; self.text = text; self.pages = pages; self.included = included; self.usedBy = usedBy; self.reviewed = reviewed }
+    private enum CodingKeys: String, CodingKey { case id, text, pages, included, usedBy, reviewed }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id); text = try c.decode(String.self, forKey: .text); pages = try c.decode([Int].self, forKey: .pages)
+        included = try c.decode(Bool.self, forKey: .included); usedBy = try c.decode([UUID].self, forKey: .usedBy)
+        reviewed = try c.decodeIfPresent(Bool.self, forKey: .reviewed) ?? true
+    }
 }
 public struct SlideThread: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID

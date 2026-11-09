@@ -5,6 +5,7 @@ import SwiftUI
 /// One lecture conversation, kept alive across slide navigation and Prepare/Review.
 struct AskPanel: View {
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var model: LectureWindowModel
     let page: Int
     let cardID: UUID?
@@ -12,6 +13,7 @@ struct AskPanel: View {
     @State private var composerHeight: CGFloat = 76
     @State private var mentionSelection = 0
     @State private var dismissedMentionDraft: String?
+    @State private var learningPointsExpanded = false
 
     private var mentionQuery: String? {
         guard dismissedMentionDraft != model.chatDraft,
@@ -32,7 +34,6 @@ struct AskPanel: View {
                             }
                             runningAnswer
                             errors
-                            learningPoints
                             Color.clear.frame(height: 1).id("chat-end")
                         }.padding(.horizontal, 18).padding(.vertical, 18)
                     }
@@ -118,19 +119,6 @@ struct AskPanel: View {
     private func needsSettings(_ message: String) -> Bool {
         ["login", "auth", "sign in", "subscription profile", "configure", "api key"].contains { message.localizedCaseInsensitiveContains($0) }
     }
-    private var learningPoints: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(model.chatLearningPoints.filter(\.included)) { point in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: "checkmark.circle").foregroundStyle(Theme.ai)
-                    Text("Noted for your cards: \(point.text)").font(Theme.caption).foregroundStyle(Theme.quiet)
-                    Spacer(minLength: 0)
-                    Button { Task { await model.removeChatLearningPoint(point.id) } } label: { Image(systemName: "xmark").font(.system(size: 9)) }
-                        .buttonStyle(.plain).help("Drop this learning point").disabled(model.readOnly)
-                }
-            }
-        }
-    }
     private func composer(maximumHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             mentionMenu
@@ -138,7 +126,16 @@ struct AskPanel: View {
                 .opacity(mentionQuery == nil ? 0 : 1)
                 .allowsHitTesting(mentionQuery != nil)
                 .accessibilityHidden(mentionQuery == nil)
-            composerBox(maximumHeight: maximumHeight)
+            VStack(spacing: 0) {
+                if mentionQuery == nil && !model.newChatLearningPoints.isEmpty {
+                    LearningPointDrawer(model: model, expanded: $learningPointsExpanded)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                        .zIndex(0)
+                }
+                composerBox(maximumHeight: maximumHeight).zIndex(1)
+            }
+            .animation(reduceMotion ? nil : .snappy(duration: 0.28), value: model.newChatLearningPoints.map(\.id))
+            .clipped()
             attachmentError
             Label("AI sees attached images and the context chips, and looks up other slides or cards when needed.", systemImage: "magnifyingglass")
                 .font(.system(size: 10.5)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)

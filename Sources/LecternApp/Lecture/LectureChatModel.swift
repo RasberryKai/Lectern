@@ -37,6 +37,8 @@ extension LectureWindowModel {
         return messages + [pendingChatMessage.message]
     }
     var chatLearningPoints: [LearningPoint] { lecture.learningPoints }
+    /// Points distilled from the chat that the student hasn't kept or dropped yet: what the drawer above the composer shows.
+    var newChatLearningPoints: [LearningPoint] { lecture.learningPoints.filter { $0.included && !$0.reviewed } }
     var runningChat: Job? { runningJobs.first { $0.kind == .chat || $0.kind == .ask } }
     var chatFailures: [Job] {
         lecture.jobs.filter { ($0.kind == .chat || $0.kind == .ask) && $0.threadID == displayedChat.id && [.failed, .interrupted].contains($0.state) && !dismissedJobIDs.contains($0.id) }
@@ -172,6 +174,16 @@ extension LectureWindowModel {
             _ = try await app.store.updateLecture(moduleID: ref.moduleID, lectureID: ref.lectureID) { lecture in
                 guard let index = lecture.learningPoints.firstIndex(where: { $0.id == id }) else { return }
                 lecture.learningPoints[index].included = false
+                lecture.learningPoints[index].reviewed = true
+            }
+            try await session.refresh()
+        }
+    }
+    func keepChatLearningPoints(_ ids: [UUID]) async {
+        guard !readOnly, !ids.isEmpty else { return }
+        await run {
+            _ = try await app.store.updateLecture(moduleID: ref.moduleID, lectureID: ref.lectureID) { lecture in
+                for index in lecture.learningPoints.indices where ids.contains(lecture.learningPoints[index].id) { lecture.learningPoints[index].reviewed = true }
             }
             try await session.refresh()
         }
