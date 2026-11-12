@@ -61,7 +61,7 @@ struct ModuleSettingsSheet: View {
                     Button("+") { planned = min(Module.maximumPlannedLectureCount, planned + 1) }
                         .buttonStyle(SecondaryButtonStyle())
                 }
-                Text("Empty slots show in the module and on the Overview. Can't go below the \(minimum) imported.")
+                Text("Empty slots show in the module and on the Overview. Can't go below the highest imported slot (\(minimum)).")
                     .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -119,7 +119,7 @@ struct ModuleSettingsSheet: View {
         do {
             let module = try await model.store.loadModule(moduleID: moduleID)
             name = module.name
-            minimum = try await model.store.lectures(in: moduleID).count
+            minimum = module.lectureSlots.values.max() ?? 0
             planned = module.plannedLectureCount
             archived = module.isArchived
             if let exam = module.examDate { hasExam = true; examDate = exam.date(in: .current) }
@@ -137,8 +137,8 @@ struct ModuleSettingsSheet: View {
             dismiss()
         } catch {
             // An import may have raced this draft; show the new minimum.
-            if let lectures = try? await model.store.lectures(in: moduleID) {
-                minimum = lectures.count
+            if let module = try? await model.store.loadModule(moduleID: moduleID) {
+                minimum = module.lectureSlots.values.max() ?? 0
                 planned = max(planned, minimum)
             }
             self.error = error.localizedDescription

@@ -64,7 +64,8 @@ struct ChatProviderContext {
         return try ChatContextJSON.encode(payload)
     }
     func cardIDs(_ references: [String]) throws -> [UUID] {
-        try references.map { reference in
+        guard !references.isEmpty else { throw AIError.invalidResponse("get_cards requires at least one card reference, such as C12.") }
+        return try references.map { reference in
             if let id = UUID(uuidString: reference), snapshot.cards.contains(where: { $0.id == id }) { return id }
             if reference.hasPrefix("C"), let number = Int(reference.dropFirst()),
                number > 0, number <= snapshot.cards.count, reference == "C\(number)" {

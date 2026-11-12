@@ -39,6 +39,10 @@ public struct LectureSlot: Equatable, Identifiable, Sendable {
     public let lectureID: UUID?
     public let status: LectureProgressStatus
     public let statusOverride: LectureProgressStatus?
+
+    public init(id: ID, lectureID: UUID?, status: LectureProgressStatus, statusOverride: LectureProgressStatus?) {
+        self.id = id; self.lectureID = lectureID; self.status = status; self.statusOverride = statusOverride
+    }
 }
 
 public enum NextUpAction: Equatable, Sendable {
@@ -145,14 +149,16 @@ public enum DashboardBuilder {
 
     private static func moduleProgress(_ module: Module, lectures: [Lecture], now: Date, timeZone: TimeZone) -> ModuleProgress {
         let progress = lectures.filter { !$0.isArchived }.map(lectureProgress)
+        let positions = module.resolvedLectureSlots(for: progress.map(\.lectureID))
+        let bySlot = Dictionary(uniqueKeysWithValues: progress.map { (positions[$0.lectureID]!, $0) })
         // Persisted plans are validated by the store. Keep standalone invalid inputs from
         // allocating unbounded empty slots, while never dropping an imported lecture.
-        let planned = max(min(module.plannedLectureCount, Module.maximumPlannedLectureCount), progress.count)
+        let planned = max(min(module.plannedLectureCount, Module.maximumPlannedLectureCount), positions.values.max() ?? 0)
         let slots = (0..<planned).map { index in
             LectureSlot(id: .init(moduleID: module.id, index: index + 1),
-                        lectureID: index < progress.count ? progress[index].lectureID : nil,
-                        status: index < progress.count ? progress[index].status : module.slotStatusOverrides[index + 1] ?? .notImported,
-                        statusOverride: index < progress.count ? progress[index].statusOverride : module.slotStatusOverrides[index + 1])
+                        lectureID: bySlot[index + 1]?.lectureID,
+                        status: bySlot[index + 1]?.status ?? module.slotStatusOverrides[index + 1] ?? .notImported,
+                        statusOverride: bySlot[index + 1]?.statusOverride ?? module.slotStatusOverrides[index + 1])
         }
         var counts = Dictionary(uniqueKeysWithValues: LectureProgressStatus.allCases.map { ($0, 0) })
         for slot in slots { counts[slot.status, default: 0] += 1 }

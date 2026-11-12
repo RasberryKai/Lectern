@@ -206,6 +206,47 @@ import Testing
         #expect(requestLog.contains(attachmentID.uuidString))
         #expect(requestLog.contains(png.base64EncodedString()))
     }
+
+    @Test(arguments: ["largeDeck", "retryCardLookup"])
+    func bulkCardLookupReturnsEveryRevisionAndCanRecover(mode: String) async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = try fixture(in: root, mode: mode)
+        var request = try makeRequest(root: root, kind: .chat)
+        let cards = (1...129).map { Card(front: "Term \($0)", back: "Definition \($0)") }
+        var snapshot = ChatSnapshot(slides: [], cards: cards, initialRefs: [.allCards])
+        snapshot.cardContextVersion = 1
+        var hashes: [String: String] = [:]
+        try FileManager.default.createDirectory(at: request.workingDirectory.appendingPathComponent("cards"), withIntermediateDirectories: true)
+        func write<T: Encodable>(_ value: T, path: String) throws {
+            let data = try JSONEncoder().encode(value)
+            try data.write(to: request.workingDirectory.appendingPathComponent(path))
+            hashes[path] = PromptBuilder.hash(data)
+        }
+        try write(ChatCardContent.deck(cards), path: "cards.json")
+        for index in cards.indices {
+            try write(ChatCardContent(cards[index], number: index + 1, includeEditIDs: true), path: snapshot.cardPath(at: index))
+        }
+        snapshot.assetHashes = hashes
+        request.chatSnapshot = snapshot
+
+        let response = try await makeProvider(executable: executable, root: root).execute(request, onEvent: { _ in })
+        let reply = try JSONDecoder().decode(ChatReply.self, from: Data(response.content.utf8))
+        #expect(reply.edits.count == cards.count)
+        #expect(response.read == [.allCards] + cards.map { .card($0.id) })
+        for (edit, card) in zip(reply.edits, cards) {
+            #expect(edit.cardID == card.id)
+            #expect(edit.baseRevisionID == card.currentRevisionID)
+            #expect(edit.front == card.back)
+            #expect(edit.back == card.front)
+        }
+        let log = try String(contentsOf: root.appendingPathComponent("\(mode)/requests.jsonl"), encoding: .utf8)
+        #expect(log.contains("\"success\":true"))
+        if mode == "retryCardLookup" {
+            #expect(log.components(separatedBy: "\"success\":false").count == 4)
+            #expect(log.contains("Unknown card C999"))
+        }
+    }
 }
 
 private func makeProvider(executable: URL, root: URL) -> CodexCLIProvider {
@@ -320,7 +361,32 @@ private func fixture(in root: URL, mode: String) throws -> URL {
                 tool_result = read()
                 if tool_result is None or "contentItems" not in tool_result.get("result", {}):
                     sys.exit(9)
+            if mode in ("largeDeck", "retryCardLookup"):
+                if mode == "retryCardLookup":
+                    for index, arguments in enumerate(({"ids": []}, {"ids": ["C999"]}, {"ids": True})):
+                        send({"id": 8000 + index, "method": "item/tool/call", "params": {
+                            "tool": "get_cards", "arguments": arguments}})
+                        rejected = read()
+                        if rejected is None or rejected.get("result", {}).get("success") is not False:
+                            sys.exit(10)
+                # Read the 129-card deck, then check duplicate displayed/UUID aliases.
+                refs = ["C" + str(index) for index in range(1, 130)]
+                send({"id": 9001, "method": "item/tool/call", "params": {
+                    "tool": "get_cards", "arguments": {"ids": refs}}})
+                tool_result = read()
+                if tool_result is None or tool_result.get("result", {}).get("success") is not True:
+                    sys.exit(11)
+                cards = json.loads(tool_result["result"]["contentItems"][0]["text"])
+                send({"id": 9002, "method": "item/tool/call", "params": {
+                    "tool": "get_cards", "arguments": {"ids": ["C1", "C1", cards[0]["cardID"]]}}})
+                duplicate_result = read()
+                if len(json.loads(duplicate_result["result"]["contentItems"][0]["text"])) != 3:
+                    sys.exit(12)
             text = "{\"cards\":[{\"front\":\"Fixture question\",\"back\":\"Fixture answer\",\"sourceSlides\":[1],\"flag\":null}],\"skipped\":[]}"
+            if mode in ("largeDeck", "retryCardLookup"):
+                text = json.dumps({"message": "Flipped the cards.", "quiz": [], "edits": [
+                    {"cardID": card["cardID"], "baseRevisionID": card["baseRevisionID"],
+                     "front": card["back"], "back": card["front"]} for card in cards]})
             if mode == "toolRoundTrip":
                 text = "{\"message\":\"Read the frozen material.\",\"edits\":[],\"quiz\":[]}"
             if mode == "commentary":

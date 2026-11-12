@@ -520,6 +520,32 @@ struct ProviderTests {
         #expect(!json.contains("history"))
     }
 
+    @Test func messagesChatCanReadMoreThan100CardsForBulkEdits() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        var request = try chatRequest(in: root)
+        let cards = (1...129).map { Card(front: "Term \($0)", back: "Definition \($0)") }
+        request.chatSnapshot!.cards = cards
+        request.chatSnapshot!.initialRefs = [.allCards]
+        let first = sseChat(blocks: [
+            ["type": "tool_use", "id": "bulk", "name": "get_cards", "input": ["ids": (1...129).map { "C\($0)" }]]
+        ], stop: "tool_use", input: 10, output: 3)
+        let second = sseChat(blocks: [["type": "text", "text": #"{"message":"Ready to edit.","edits":[],"quiz":[]}"#]], stop: "end_turn", input: 20, output: 9)
+        let session = URLSessionStub.makeSession(status: 200, body: first)
+        URLSessionStub.state.enqueue(second)
+        let provider = MessagesAPIProvider(apiKey: { "fixture" }, session: session, endpoint: URL(string: "https://api.example.test/v1/messages")!)
+        let result = try await provider.execute(request, onEvent: { _ in })
+        #expect(result.read == [.allCards] + cards.map { .card($0.id) })
+        #expect(!result.searchedLecture)
+        let data = try #require(URLSessionStub.state.lastRequest()?.httpBody)
+        let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let messages = try #require(body["messages"] as? [[String: Any]])
+        let content = try #require(messages.last?["content"] as? [[String: Any]])
+        let blocks = try #require(content.first?["content"] as? [[String: Any]])
+        let text = try #require(blocks.first?["text"] as? String)
+        let lookup = try JSONDecoder().decode([ChatCardContent].self, from: Data(text.utf8))
+        #expect(lookup == cards.enumerated().map { ChatCardContent($0.element, number: $0.offset + 1, includeEditIDs: true) })
+    }
+
     @Test(arguments: [false, true]) func messagesChatRereadingAttachedContextDoesNotClaimLectureSearch(allCards: Bool) async throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         var request = try chatRequest(in: root)

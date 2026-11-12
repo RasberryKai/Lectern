@@ -6,6 +6,8 @@ public struct Module: Codable, Equatable, Identifiable, Sendable {
     public var name: String
     public var instructions: String
     public var lectureIDs: [UUID]
+    /// One-based positions for imported lectures; gaps remain empty planned slots.
+    public var lectureSlots: [UUID: Int] = [:]
     public var plannedLectureCount: Int
     /// Manual statuses for empty, one-based planned slots. Imported lectures own their override.
     public var slotStatusOverrides: [Int: LectureProgressStatus] = [:]
@@ -16,13 +18,14 @@ public struct Module: Codable, Equatable, Identifiable, Sendable {
         self.id = id; self.name = name; self.instructions = instructions; self.lectureIDs = lectureIDs
         self.plannedLectureCount = plannedLectureCount ?? lectureIDs.count; self.examDate = examDate; self.archivedAt = archivedAt
     }
-    private enum CodingKeys: String, CodingKey { case id, name, instructions, lectureIDs, plannedLectureCount, slotStatusOverrides, examDate, archivedAt }
+    private enum CodingKeys: String, CodingKey { case id, name, instructions, lectureIDs, lectureSlots, plannedLectureCount, slotStatusOverrides, examDate, archivedAt }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
         name = try values.decode(String.self, forKey: .name)
         instructions = try values.decode(String.self, forKey: .instructions)
         lectureIDs = try values.decode([UUID].self, forKey: .lectureIDs)
+        lectureSlots = try values.decodeIfPresent([UUID: Int].self, forKey: .lectureSlots) ?? [:]
         plannedLectureCount = try values.decodeIfPresent(Int.self, forKey: .plannedLectureCount) ?? lectureIDs.count
         slotStatusOverrides = try values.decodeIfPresent([Int: LectureProgressStatus].self, forKey: .slotStatusOverrides) ?? [:]
         examDate = try values.decodeIfPresent(ExamDate.self, forKey: .examDate)
@@ -30,6 +33,32 @@ public struct Module: Codable, Equatable, Identifiable, Sendable {
         guard (0...Self.maximumPlannedLectureCount).contains(plannedLectureCount) else { throw DecodingError.dataCorruptedError(forKey: .plannedLectureCount, in: values, debugDescription: "Planned lecture count must be between 0 and \(Self.maximumPlannedLectureCount).") }
         guard slotStatusOverrides.allSatisfy({ $0.key > 0 && $0.key <= plannedLectureCount && $0.value != .notImported }) else {
             throw DecodingError.dataCorruptedError(forKey: .slotStatusOverrides, in: values, debugDescription: "Manual statuses must refer to planned slots. Use Automatic for Not imported.")
+        }
+        guard Set(lectureSlots.keys).isSubset(of: Set(lectureIDs)),
+              Set(lectureSlots.values).count == lectureSlots.count,
+              lectureSlots.values.allSatisfy({ (1...Self.maximumPlannedLectureCount).contains($0) }) else {
+            throw DecodingError.dataCorruptedError(forKey: .lectureSlots, in: values, debugDescription: "Imported lecture slots must be unique and within the lecture limit.")
+        }
+    }
+
+    /// Older libraries used contiguous imported rows. Resolve those without moving explicit slots.
+    public func resolvedLectureSlots(for activeIDs: [UUID]) -> [UUID: Int] {
+        let active = Set(activeIDs)
+        var slots = lectureSlots.filter { active.contains($0.key) }
+        var occupied = Set(slots.values)
+        var next = 1
+        for id in activeIDs where slots[id] == nil {
+            while occupied.contains(next) { next += 1 }
+            slots[id] = next
+            occupied.insert(next)
+        }
+        return slots
+    }
+
+    public var nextImportSlot: Int? {
+        let occupied = Set(lectureSlots.values)
+        return (1...Self.maximumPlannedLectureCount).first {
+            !occupied.contains($0) && slotStatusOverrides[$0] != .done
         }
     }
 }
