@@ -33,9 +33,9 @@ struct ReviewView: View {
                 if model.lecture.pageCount > 0 {
                     Button("Go to Prepare") { model.setMode(.prepare) }.buttonStyle(PrimaryButtonStyle())
                 }
-            } else if model.testMode && model.reviewFilter == .unreviewed {
+            } else if model.testMode && model.reviewFilter == .unreviewed && model.count(for: .unreviewed) == 0 {
                 Text("Every card is tested").font(Theme.serif(22))
-                Text("\(model.count(for: .good)) Good cards go to Anki. Needs work and Bad cards stay here.")
+                Text("\(Format.count(model.count(for: .good), "Good card")) ready for Anki. Needs work and Bad cards stay here.")
                     .font(Theme.body).foregroundStyle(Theme.quiet)
                 HStack(spacing: 10) {
                     Button("Export to Anki") {
@@ -45,7 +45,12 @@ struct ReviewView: View {
                 }
             } else {
                 Text("Nothing in this filter").font(Theme.serif(22))
-                Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
+                if model.reviewSearch.isEmpty {
+                    Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
+                } else {
+                    Button("Clear search") { model.reviewSearch = ""; model.setReviewFilter(model.reviewFilter) }
+                        .buttonStyle(SecondaryButtonStyle())
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
