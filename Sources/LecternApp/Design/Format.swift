@@ -35,8 +35,9 @@ enum Format {
     }
 
     static func lectureTitle(_ lectureID: UUID, in module: ModuleProgress) -> String {
-        guard let index = module.lectures.firstIndex(where: { $0.lectureID == lectureID }) else { return "Lecture" }
-        return lectureTitle(index: index, name: module.lectures[index].name)
+        guard let lecture = module.lectures.first(where: { $0.lectureID == lectureID }),
+              let slot = module.slots.first(where: { $0.lectureID == lectureID }) else { return "Lecture" }
+        return lectureTitle(index: slot.id.index - 1, name: lecture.name)
     }
 
     static func count(_ value: Int, _ singular: String, _ plural: String? = nil) -> String {

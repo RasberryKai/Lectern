@@ -91,7 +91,7 @@ struct ExportView: View {
                 Picker("Lectures", selection: $lectureScope) {
                     Text("Whole module").tag(UUID?.none)
                     ForEach(Array(lectures.enumerated()), id: \.element.id) { index, lecture in
-                        Text(Format.lectureTitle(index: index, name: lecture.name)).tag(UUID?.some(lecture.id))
+                        Text(Format.lectureTitle(index: (module?.lectureSlots[lecture.id] ?? (index + 1)) - 1, name: lecture.name)).tag(UUID?.some(lecture.id))
                     }
                 }
                 .labelsHidden().fixedSize()
@@ -134,7 +134,7 @@ struct ExportView: View {
             .eyebrow().padding(.horizontal, 18).padding(.vertical, 10)
             ForEach(Array(scopedLectures.enumerated()), id: \.element.id) { _, lecture in
                 Divider().overlay(Theme.border)
-                let index = lectures.firstIndex { $0.id == lecture.id } ?? 0
+                let index = (module?.lectureSlots[lecture.id] ?? 1) - 1
                 HStack {
                     Text(Format.lectureTitle(index: index, name: lecture.name)).frame(maxWidth: .infinity, alignment: .leading).lineLimit(1)
                     Text(included(lecture)).frame(width: 130, alignment: .leading)

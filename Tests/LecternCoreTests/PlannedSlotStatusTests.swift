@@ -4,6 +4,74 @@ import Testing
 @testable import LecternCore
 
 struct PlannedSlotStatusTests {
+    @Test func importingFromFifthSlotPreservesEarlierCompletedSlotsAcrossReloadAndBackup() async throws {
+        let (store, module, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await store.updateModuleSettings(moduleID: module.id, name: module.name, plannedLectureCount: 12, examDate: nil)
+        for index in 1...4 {
+            try await store.setEmptySlotStatus(.done, slotID: .init(moduleID: module.id, index: index))
+        }
+        let pdf = PDFDocument()
+        let page = PDFPage()
+        page.setBounds(CGRect(x: 0, y: 0, width: 300, height: 400), for: .mediaBox)
+        pdf.insert(page, at: 0)
+        let source = root.appendingPathComponent("Lecture Five.pdf")
+        #expect(pdf.write(to: source))
+        let target = try #require(await store.loadModule(moduleID: module.id).nextImportSlot)
+        #expect(target == 5)
+        let fifth = try await store.importPDF(from: source, moduleID: module.id, slot: target)
+        let sixth = try await store.importPDFs([source, source], name: "Lecture Six", moduleID: module.id, slot: 6)
+        #expect(fifth.progressOverride == nil)
+        #expect(sixth.pageCount == 2)
+
+        let reopened = LibraryStore(rootURL: store.rootURL)
+        let progress = try #require(await reopened.dashboard().modules.first)
+        #expect(progress.slots.prefix(4).allSatisfy { $0.lectureID == nil && $0.status == .done })
+        #expect(progress.slots[4].lectureID == fifth.id)
+        #expect(progress.slots[5].lectureID == sixth.id)
+        #expect(progress.totals.doneLectureCount == 4)
+        #expect(try await reopened.lectures(in: module.id).count == 2)
+        #expect(try await reopened.loadModule(moduleID: module.id).nextImportSlot == 7)
+        // Empty earlier slots remain editable, and importing there does not renumber 5 or 6.
+        try await reopened.setEmptySlotStatus(.toReview, slotID: .init(moduleID: module.id, index: 2))
+        let second = try await reopened.importPDF(from: source, moduleID: module.id, slot: 2)
+        #expect(second.progressOverride == .toReview)
+        #expect(try await reopened.lectures(in: module.id).map(\.id) == [second.id, fifth.id, sixth.id])
+        #expect(try await reopened.dashboard().modules[0].slots[4].lectureID == fifth.id)
+
+        let backup = root.appendingPathComponent("module.json")
+        try await reopened.exportModuleBackup(moduleID: module.id, to: backup)
+        let restored = LibraryStore(rootURL: root.appendingPathComponent("Restored"))
+        _ = try await restored.restoreModuleBackup(from: backup)
+        #expect(try await restored.dashboard().modules[0].slots == reopened.dashboard().modules[0].slots)
+
+        let lectureBackup = root.appendingPathComponent("lecture.json")
+        try await reopened.exportBackup(moduleID: module.id, lectureID: fifth.id, to: lectureBackup)
+        let single = LibraryStore(rootURL: root.appendingPathComponent("Single"))
+        _ = try await single.restoreBackup(from: lectureBackup)
+        #expect(try await single.dashboard().modules[0].slots[4].lectureID == fifth.id)
+    }
+
+    @Test func occupiedOrInvalidSlotsAreRejectedAndSettingsCannotRemoveAnImportedSlot() async throws {
+        let (store, module, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fifth = try await store.createLecture(Lecture(moduleID: module.id, name: "Fifth"), slot: 5)
+        for index in [0, 5, Module.maximumPlannedLectureCount + 1] {
+            await #expect(throws: LibraryError.self) {
+                try await store.createLecture(Lecture(moduleID: module.id, name: "Invalid"), slot: index)
+            }
+        }
+        await #expect(throws: LibraryError.self) {
+            try await store.updateModuleSettings(moduleID: module.id, name: module.name, plannedLectureCount: 4, examDate: nil)
+        }
+        #expect(try await store.lectures(in: module.id).map(\.id) == [fifth.id])
+        #expect(try await store.dashboard().modules[0].slots[4].lectureID == fifth.id)
+        try await store.setEmptySlotStatus(.done, slotID: .init(moduleID: module.id, index: 1))
+        await #expect(throws: LibraryError.self) {
+            try await store.setEmptySlotStatus(.done, slotID: .init(moduleID: module.id, index: 5))
+        }
+    }
+
     private func fixture() async throws -> (LibraryStore, Module, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-slot-status-\(UUID())")
         let store = LibraryStore(rootURL: root.appendingPathComponent("Library"))

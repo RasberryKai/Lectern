@@ -186,7 +186,7 @@ struct ImportPDFsSheet: View {
         Task {
             do {
                 switch pending.target {
-                case .newLecture: try await model.importMerged(urls, name: name, into: pending.moduleID)
+                case .newLecture(let slot): try await model.importMerged(urls, name: name, into: pending.moduleID, slot: slot)
                 case .append(let lectureID, _, _): try await model.appendConfirmed(urls, to: LectureRef(moduleID: pending.moduleID, lectureID: lectureID))
                 }
                 dismiss()

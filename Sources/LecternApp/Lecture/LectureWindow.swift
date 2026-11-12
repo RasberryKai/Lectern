@@ -315,8 +315,8 @@ private struct EnlargedSlideSheet: View {
                 Button("Close") { dismiss() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.cancelAction)
                 Button("") { dismiss() }.keyboardShortcut(.space, modifiers: []).opacity(0).frame(width: 0, height: 0)
             }
-            SlideImage(sourceURL: model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID),
-                       pageIndex: page - 1, width: 1100, cornerRadius: 8)
+            ZoomableSlideView(sourceURL: model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID),
+                              pageIndex: page - 1)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             let note = model.noteText(for: page - 1)
             if !note.isEmpty { Text("Note: \(note)").font(Theme.body).foregroundStyle(Theme.quiet) }

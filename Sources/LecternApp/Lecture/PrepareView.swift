@@ -52,7 +52,7 @@ struct PrepareView: View {
                         .font(Theme.small).foregroundStyle(Theme.amber)
                 }
                 ZStack {
-                    SlideImage(sourceURL: sourceURL, pageIndex: index, width: 1100, cornerRadius: 3)
+                    ZoomableSlideView(sourceURL: sourceURL, pageIndex: index)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(.horizontal, 34)
                     HStack {

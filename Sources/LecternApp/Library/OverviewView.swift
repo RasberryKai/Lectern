@@ -149,9 +149,9 @@ enum NextUpRouter {
             guard let moduleID = moduleID(of: lectureID, model: model) else { return }
             let sourceless = reasons.contains(.addCards)
             model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: sourceless ? .review : .prepare)
-        case .importLecture(let moduleID, _):
+        case .importLecture(let moduleID, let slotID):
             model.selection = .module(moduleID)
-            Task { await model.chooseAndImportPDFs(into: moduleID) }
+            Task { await model.chooseAndImportPDFs(into: moduleID, slot: slotID.index) }
         }
     }
 

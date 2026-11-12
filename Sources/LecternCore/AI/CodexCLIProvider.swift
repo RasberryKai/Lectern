@@ -206,12 +206,21 @@ public struct CodexCLIProvider: AIProvider {
                 toolCalls += 1
                 guard toolCalls <= 32 else { throw AIError.limit("Codex reached the lecture lookup limit. Ask a more focused question.") }
                 trace.phase("codex_tool_execution")
-                let output = try context.tool(params, onRead: { ref in
-                    if !read.contains(ref) { read.append(ref) }
-                    onEvent(.read(ref))
-                })
-                searched = true
-                try connection.send(["id": id, "result": ["contentItems": output, "success": true]])
+                do {
+                    let output = try context.tool(params, onRead: { ref in
+                        if !read.contains(ref) { read.append(ref) }
+                        onEvent(.read(ref))
+                    })
+                    searched = true
+                    try connection.send(["id": id, "result": ["contentItems": output, "success": true]])
+                } catch AIError.invalidResponse(let message) {
+                    // A bad lookup can be corrected within this turn. Asset and
+                    // transport failures still stop the job.
+                    trace.record("codex_tool_rejected", ["tool": params["tool"] as? String ?? "", "message": message])
+                    try connection.send(["id": id, "result": [
+                        "contentItems": [["type": "inputText", "text": message]], "success": false
+                    ]])
+                }
                 trace.phase("codex_execution")
             case "turn/completed":
                 guard let turn = params["turn"] as? [String: Any] else { throw AIError.invalidResponse("Codex returned a malformed completion.") }
@@ -257,14 +266,16 @@ public struct CodexCLIProvider: AIProvider {
     }
 
     private static var studyTools: [[String: Any]] {
-        func tool(_ name: String, _ description: String, _ key: String, _ type: String) -> [String: Any] {
-            ["type": "function", "name": name, "description": description,
+        func tool(_ name: String, _ description: String, _ key: String, _ type: String, maxItems: Int? = nil) -> [String: Any] {
+            var array: [String: Any] = ["type": "array", "items": ["type": type], "minItems": 1]
+            if let maxItems { array["maxItems"] = maxItems }
+            return ["type": "function", "name": name, "description": description,
              "inputSchema": ["type": "object", "additionalProperties": false, "required": [key],
-                             "properties": [key: ["type": "array", "items": ["type": type]]]]]
+                             "properties": [key: array]]]
         }
-        return [tool("read_slides", "Read frozen lecture slides as text and images by original slide number.", "pages", "integer"),
-                tool("get_cards", "Read frozen cards including edit revision IDs. Use displayed IDs such as C12.", "ids", "string"),
-                tool("read_images", "Read earlier uploaded images by their frozen attachment UUID.", "ids", "string")]
+        return [tool("read_slides", "Read frozen lecture slides as text and images by original slide number.", "pages", "integer", maxItems: 100),
+                tool("get_cards", "Read frozen cards including edit revision IDs. Use displayed IDs such as C12. Supports the entire deck, including more than 100 cards.", "ids", "string"),
+                tool("read_images", "Read earlier uploaded images by their frozen attachment UUID.", "ids", "string", maxItems: 4)]
     }
 }
 
@@ -334,7 +345,7 @@ private struct CodexStudyContext {
             blocks = try context.slides(pages)
             for page in pages { onRead(.slide(page)) }
         case "get_cards":
-            guard let ids = arguments["ids"] as? [String], !ids.isEmpty, ids.count <= 100 else { throw AIError.invalidResponse("get_cards requires 1–100 card IDs.") }
+            guard let ids = arguments["ids"] as? [String] else { throw AIError.invalidResponse("get_cards requires an array of card references, such as [\"C12\"].") }
             let values = try context.cardIDs(ids)
             blocks = [["type": "text", "text": try context.cards(values)]]
             for id in values { onRead(.card(id)) }

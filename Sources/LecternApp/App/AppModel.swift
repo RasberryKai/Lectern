@@ -234,18 +234,21 @@ final class AppModel {
     }
 
     /// One PDF imports straight away. Two or more open the import sheet, which merges them into one lecture.
-    func importPDFs(_ urls: [URL], into moduleID: UUID) async {
+    func importPDFs(_ urls: [URL], into moduleID: UUID, slot: Int? = nil) async {
         let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
         let skipped = urls.count - pdfs.count
         let skippedNote = skipped > 0 ? "Only PDF files can be imported; \(Format.count(skipped, "other file")) left out." : nil
         if pdfs.count >= 2 {
-            await openImportSheet(pdfs, into: moduleID)
+            await openImportSheet(pdfs, into: moduleID, slot: slot)
             if let skippedNote { errorMessage = skippedNote }
             return
         }
         var failures: [String] = []
         if let url = pdfs.first {
-            do { _ = try await store.importPDF(from: url, moduleID: moduleID) }
+            do {
+                let target = try await importSlot(in: moduleID, preferred: slot)
+                _ = try await store.importPDF(from: url, moduleID: moduleID, slot: target)
+            }
             catch { failures.append("\(url.lastPathComponent): \(error.localizedDescription)") }
         }
         if let skippedNote { failures.append(skippedNote) }
@@ -253,7 +256,7 @@ final class AppModel {
         if !failures.isEmpty { errorMessage = failures.joined(separator: "\n") }
     }
 
-    func chooseAndImportPDFs(into moduleID: UUID) async {
+    func chooseAndImportPDFs(into moduleID: UUID, slot: Int? = nil) async {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = true
@@ -261,15 +264,25 @@ final class AppModel {
         panel.message = "Choose lecture slides. Several PDFs become one lecture; you set the order next."
         panel.prompt = "Import"
         guard panel.runModal() == .OK else { return }
-        await importPDFs(panel.urls, into: moduleID)
+        await importPDFs(panel.urls, into: moduleID, slot: slot)
     }
 
-    private func openImportSheet(_ urls: [URL], into moduleID: UUID) async {
+    /// Prefer the first unfinished empty slot, leaving completed lectures without PDFs alone.
+    private func importSlot(in moduleID: UUID, preferred: Int?) async throws -> Int {
+        if let preferred { return preferred }
+        let module = try await store.loadModule(moduleID: moduleID)
+        guard let slot = module.nextImportSlot else { throw LibraryError.invalid("This module has reached its lecture limit.") }
+        return slot
+    }
+
+    private func openImportSheet(_ urls: [URL], into moduleID: UUID, slot: Int?) async {
         let ordered = PDFMerge.naturalOrder(urls)
         let files = await inspect(ordered)
-        let lectureCount = (try? await store.lectures(in: moduleID).count) ?? 0
-        pendingImport = PendingPDFImport(moduleID: moduleID, target: .newLecture(slot: lectureCount + 1), files: files,
+        do {
+            let target = try await importSlot(in: moduleID, preferred: slot)
+            pendingImport = PendingPDFImport(moduleID: moduleID, target: .newLecture(slot: target), files: files,
                                          name: PDFMerge.suggestedName(for: ordered.map(\.lastPathComponent)))
+        } catch { errorMessage = error.localizedDescription }
     }
 
     private func inspect(_ urls: [URL]) async -> [PendingPDFImport.File] {
@@ -291,7 +304,7 @@ final class AppModel {
                 errorMessage = "\(lecture.name) has no slides to add to. Import the PDFs as a new lecture instead."
                 return
             }
-            let index = modules.first { $0.id == ref.moduleID }?.lectureIDs.firstIndex(of: ref.lectureID) ?? 0
+            let index = (modules.first { $0.id == ref.moduleID }?.lectureSlots[ref.lectureID] ?? 1) - 1
             let ordered = PDFMerge.naturalOrder(pdfs)
             pendingImport = PendingPDFImport(moduleID: ref.moduleID,
                                              target: .append(lectureID: ref.lectureID, title: Format.lectureTitle(index: index, name: lecture.name), existingPages: lecture.pageCount),
@@ -323,8 +336,8 @@ final class AppModel {
     }
 
     /// Merges the sheet's files in order into one lecture and opens it in Prepare.
-    func importMerged(_ urls: [URL], name: String, into moduleID: UUID) async throws {
-        let lecture = try await store.importPDFs(urls, name: name, moduleID: moduleID)
+    func importMerged(_ urls: [URL], name: String, into moduleID: UUID, slot: Int) async throws {
+        let lecture = try await store.importPDFs(urls, name: name, moduleID: moduleID, slot: slot)
         try? await reloadNow()
         selection = .module(moduleID)
         openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: .prepare)

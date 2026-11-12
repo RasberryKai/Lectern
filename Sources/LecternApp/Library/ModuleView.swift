@@ -19,11 +19,24 @@ struct ModuleView: View {
     /// The lecture under the cursor while dropping: the files are added to it instead of becoming a new lecture.
     @State private var dropLectureID: UUID?
     @State private var rowFrames: [UUID: CGRect] = [:]
+    @State private var emptyRowFrames: [Int: CGRect] = [:]
+    @State private var dropSlot: Int?
     @State private var importing = false
 
     private var module: Module? { model.module(moduleID) }
     private var progress: ModuleProgress? { model.progress(moduleID) }
     private var archived: Bool { module?.isArchived ?? false }
+    private var slots: [LectureSlot] {
+        if let progress { return progress.slots }
+        guard let module else { return [] }
+        let positions = module.resolvedLectureSlots(for: lectures.map(\.id))
+        let bySlot = Dictionary(uniqueKeysWithValues: positions.map { ($0.value, $0.key) })
+        return (0..<module.plannedLectureCount).map { index in
+            LectureSlot(id: .init(moduleID: moduleID, index: index + 1), lectureID: bySlot[index + 1],
+                        status: module.slotStatusOverrides[index + 1] ?? .notImported,
+                        statusOverride: module.slotStatusOverrides[index + 1])
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,9 +49,11 @@ struct ModuleView: View {
                             SlotStrip(slots: progress.slots, height: 18) { slot in
                                 if let lectureID = slot.lectureID {
                                     model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: nil)
+                                } else if !archived {
+                                    Task { await model.chooseAndImportPDFs(into: moduleID, slot: slot.id.index) }
                                 }
                             }
-                            Text("Right-click any lecture block to set its status, even without a PDF.")
+                            Text("Click an empty lecture block to import its PDF. Right-click to set its status.")
                                 .font(Theme.small).foregroundStyle(Theme.quiet)
                         }
                     }
@@ -102,7 +117,7 @@ struct ModuleView: View {
     // MARK: Table
 
     private var table: some View {
-        VStack(spacing: 0) {
+        LazyVStack(spacing: 0) {
             HStack(spacing: 0) {
                 Text("Lecture").frame(maxWidth: .infinity, alignment: .leading)
                 Text("Slides selected").frame(width: 150, alignment: .leading)
@@ -117,25 +132,42 @@ struct ModuleView: View {
                 Text("No lectures yet. Drop lecture PDFs here or use Import PDFs….")
                     .font(Theme.body).foregroundStyle(Theme.quiet).padding(24)
             }
-            ForEach(Array(lectures.enumerated()), id: \.element.id) { index, lecture in
-                LectureRow(index: index, lecture: lecture, progress: progress?.lectures.first { $0.lectureID == lecture.id }, archived: archived,
-                           dropCount: dropLectureID == lecture.id ? dropCount : 0) { mode in
-                    model.openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: mode)
-                } archive: {
-                    setArchived(true, lecture: lecture)
+            ForEach(slots) { slot in
+                if let lectureID = slot.lectureID, let lecture = lectures.first(where: { $0.id == lectureID }) {
+                    LectureRow(index: slot.id.index - 1, lecture: lecture,
+                               progress: progress?.lectures.first { $0.lectureID == lecture.id }, archived: archived,
+                               dropCount: dropLectureID == lecture.id ? dropCount : 0) { mode in
+                        model.openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: mode)
+                    } archive: {
+                        setArchived(true, lecture: lecture)
+                    }
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("lectureTable")) } action: { rowFrames[lecture.id] = $0 }
+                    .onDisappear { rowFrames[lecture.id] = nil }
+                } else {
+                    emptySlotRow(slot)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("lectureTable")) } action: { emptyRowFrames[slot.id.index] = $0 }
+                        .onDisappear { emptyRowFrames[slot.id.index] = nil }
                 }
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("lectureTable")) } action: { rowFrames[lecture.id] = $0 }
                 Divider().overlay(Theme.border)
             }
-            emptySlots
+            if dropCount > 0 && dropLectureID == nil && dropSlot == nil {
+                dropTarget
+            } else {
+                Text("Drop PDFs on an empty slot to import there, or on an existing lecture to add slides.")
+                    .font(Theme.small).foregroundStyle(Theme.quiet)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20).padding(.vertical, 12)
+            }
         }
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border, lineWidth: 1))
         .coordinateSpace(.named("lectureTable"))
-        .onDrop(of: [.fileURL], delegate: PDFDropDelegate(count: $dropCount, lectureID: $dropLectureID, enabled: !archived,
-                                                          lectureAt: lectureAccepting) { urls, lectureID in
+        .onDrop(of: [.fileURL], delegate: PDFDropDelegate(count: $dropCount, lectureID: $dropLectureID, slot: $dropSlot, enabled: !archived,
+                                                          lectureAt: lectureAccepting, slotAt: { point in
+            emptyRowFrames.first { $0.value.contains(point) }?.key
+        }) { urls, lectureID, slot in
             if let lectureID { Task { await model.appendPDFs(urls, to: LectureRef(moduleID: moduleID, lectureID: lectureID)) } }
-            else { Task { await model.importPDFs(urls, into: moduleID) } }
+            else { Task { await model.importPDFs(urls, into: moduleID, slot: slot) } }
         })
     }
 
@@ -175,7 +207,7 @@ struct ModuleView: View {
 
     /// The next slot as a dashed drop target while files hover over the list.
     private var dropTarget: some View {
-        let slot = String(format: "%02d", lectures.count + 1)
+        let slot = String(format: "%02d", progress?.slots.first { $0.lectureID == nil && $0.status != .done }?.id.index ?? ((module?.plannedLectureCount ?? 0) + 1))
         let what = dropCount == 1 ? "Drop to import as lecture \(slot)" : "Drop to import \(dropCount) PDFs as lecture \(slot)"
         return HStack(spacing: 12) {
             Image(systemName: "arrow.down.to.line").font(.system(size: 15, weight: .medium))
@@ -190,62 +222,38 @@ struct ModuleView: View {
         .padding(.horizontal, 10).padding(.vertical, 8)
     }
 
-    @ViewBuilder private var emptySlots: some View {
-        let planned = module?.plannedLectureCount ?? 0
-        let next = lectures.count + 1
-        if dropCount > 0 && dropLectureID == nil {
-            dropTarget
-            if planned > next {
-                Divider().overlay(Theme.border)
-                moreSlotsLine(next: next, planned: planned)
+    private func emptySlotRow(_ slot: LectureSlot) -> some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Text(String(format: "%02d", slot.id.index)).font(.system(size: 13, weight: .semibold))
+                Text("Not imported yet").italic().foregroundStyle(Theme.quiet)
             }
-        } else if planned >= next {
-            HStack(spacing: 0) {
-                HStack(spacing: 6) {
-                    Text(String(format: "%02d", next)).font(.system(size: 13, weight: .semibold))
-                    Text("Not imported yet").italic().foregroundStyle(Theme.quiet)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Text("—").foregroundStyle(Theme.quiet).frame(width: 150, alignment: .leading)
-                Text("—").foregroundStyle(Theme.quiet).frame(width: 220, alignment: .leading)
-                Menu {
-                    LectureStatusOptions(current: module?.slotStatusOverrides[next]) { status in
-                        Task { await model.setEmptySlotStatus(status, for: .init(moduleID: moduleID, index: next)) }
-                    }
-                } label: {
-                    if let status = module?.slotStatusOverrides[next] {
-                        Pill(text: "\(Format.statusLabel(status)) · Manual", tone: .neutral)
-                    } else {
-                        Pill(text: "Planned", tone: .outline)
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .disabled(archived)
-                .frame(width: 300, alignment: .leading)
-                Button("Import PDF") { Task { await model.chooseAndImportPDFs(into: moduleID) } }
-                    .buttonStyle(LinkButtonStyle()).disabled(archived)
-                    .frame(width: 90, alignment: .trailing)
-            }
-            .font(Theme.body)
-            .padding(.horizontal, 20).padding(.vertical, 14)
-            if planned > next {
-                Divider().overlay(Theme.border)
-                moreSlotsLine(next: next, planned: planned)
-            }
-        } else {
-            Text("Drop one or several PDFs anywhere on this list to add the next lecture.")
-                .font(Theme.small).foregroundStyle(Theme.quiet)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20).padding(.vertical, 12)
-        }
-    }
-
-    private func moreSlotsLine(next: Int, planned: Int) -> some View {
-        Text("\(String(format: "%02d", next + 1)) to \(String(format: "%02d", planned)) · \(Format.count(planned - next, "more planned slot")). Right-click any lecture block above to set its status without a PDF.")
-            .font(Theme.small).foregroundStyle(Theme.quiet)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20).padding(.vertical, 12)
+            Text("—").foregroundStyle(Theme.quiet).frame(width: 150, alignment: .leading)
+            Text("—").foregroundStyle(Theme.quiet).frame(width: 220, alignment: .leading)
+            Menu {
+                LectureStatusOptions(current: slot.statusOverride) { status in
+                    Task { await model.setEmptySlotStatus(status, for: slot.id) }
+                }
+            } label: {
+                if let status = slot.statusOverride {
+                    Pill(text: "\(Format.statusLabel(status)) · Manual", tone: .neutral)
+                } else {
+                    Pill(text: "Planned", tone: .outline)
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(archived)
+            .frame(width: 300, alignment: .leading)
+            Button("Import PDF") { Task { await model.chooseAndImportPDFs(into: moduleID, slot: slot.id.index) } }
+                .buttonStyle(LinkButtonStyle()).disabled(archived || importing)
+                .frame(width: 90, alignment: .trailing)
+                .accessibilityLabel("Import PDF for lecture \(slot.id.index)")
+        }
+        .font(Theme.body)
+        .padding(.horizontal, 20).padding(.vertical, 14)
+        .background(dropSlot == slot.id.index && dropCount > 0 ? Theme.goodWash : Color.clear)
     }
 
     // MARK: Instructions and rules
@@ -306,26 +314,35 @@ private struct PDFDropDelegate: DropDelegate {
     @Binding var count: Int
     /// Set while the cursor is over a lecture that can take more pages.
     @Binding var lectureID: UUID?
+    @Binding var slot: Int?
     let enabled: Bool
     let lectureAt: (CGPoint) -> UUID?
+    let slotAt: (CGPoint) -> Int?
     /// The dropped files, and the lecture to add them to (nil: a new lecture).
-    let perform: ([URL], UUID?) -> Void
+    let perform: ([URL], UUID?, Int?) -> Void
 
     func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.fileURL]) }
     func dropEntered(info: DropInfo) {
         guard enabled else { return }
         count = info.itemProviders(for: [.fileURL]).count
         lectureID = lectureAt(info.location)
+        slot = slotAt(info.location)
     }
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        if enabled { let hovered = lectureAt(info.location); if hovered != lectureID { lectureID = hovered } }
+        if enabled {
+            let hovered = lectureAt(info.location)
+            if hovered != lectureID { lectureID = hovered }
+            let hoveredSlot = slotAt(info.location)
+            if hoveredSlot != slot { slot = hoveredSlot }
+        }
         return DropProposal(operation: enabled ? .copy : .forbidden)
     }
-    func dropExited(info: DropInfo) { count = 0; lectureID = nil }
+    func dropExited(info: DropInfo) { count = 0; lectureID = nil; slot = nil }
 
     func performDrop(info: DropInfo) -> Bool {
         let target = lectureAt(info.location)
-        count = 0; lectureID = nil
+        let targetSlot = slotAt(info.location)
+        count = 0; lectureID = nil; slot = nil
         guard enabled else { return false }
         let providers = info.itemProviders(for: [.fileURL])
         Task {
@@ -336,7 +353,7 @@ private struct PDFDropDelegate: DropDelegate {
                 }
                 if let url { urls.append(url) }
             }
-            if !urls.isEmpty { perform(urls, target) }
+            if !urls.isEmpty { perform(urls, target, targetSlot) }
         }
         return true
     }

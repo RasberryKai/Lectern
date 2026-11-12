@@ -197,7 +197,7 @@ public struct MessagesAPIProvider: AIProvider {
                     for page in pages { let ref = ContextRef.slide(page); if !read.contains(ref) { read.append(ref) }; onEvent(.read(ref)) }
                     if pages.contains(where: { !initial.refs.contains(.slide($0)) }) { searched = true }
                 case "get_cards":
-                    guard let strings = input["ids"] as? [String], !strings.isEmpty, strings.count <= 100 else { throw AIError.invalidResponse("get_cards requires 1–100 card references.") }
+                    guard let strings = input["ids"] as? [String] else { throw AIError.invalidResponse("get_cards requires an array of card references, such as [\"C12\"].") }
                     let ids = try context.cardIDs(strings)
                     content = [["type": "text", "text": try context.cards(ids)]]
                     for id in ids { let ref = ContextRef.card(id); if !read.contains(ref) { read.append(ref) }; onEvent(.read(ref)) }
@@ -231,7 +231,7 @@ public struct MessagesAPIProvider: AIProvider {
         return [
             ["name": "read_slides", "description": "Read frozen lecture slide PNGs and extracted text.", "input_schema": array("pages", ["type": "integer"])],
             ["name": "read_images", "description": "Read uploaded images from the frozen image index by UUID, including prior-turn uploads.", "input_schema": array("ids", ["type": "string"])],
-            ["name": "get_cards", "description": "Read current frozen cards and exact edit IDs by displayed reference (for example C12) or UUID.", "input_schema": array("ids", ["type": "string"])],
+            ["name": "get_cards", "description": "Read current frozen cards and exact edit IDs by displayed reference (for example C12) or UUID. Supports the entire deck, including more than 100 cards.", "input_schema": array("ids", ["type": "string"])],
             ["name": "edit_cards", "description": "Propose edits using each card's frozen base revision ID. Does not modify cards.", "input_schema": array("edits", edit)]
         ]
     }
