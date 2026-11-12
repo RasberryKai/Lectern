@@ -275,6 +275,29 @@ final class LectureWindowModel {
         selectCard(visibleCards.first?.id)
     }
 
+    // MARK: Test mode
+
+    /// Review as flashcards: the back, sources and AI notes stay hidden until the answer is shown.
+    private(set) var testMode = UserDefaults.standard.bool(forKey: "v2.review.testMode")
+    /// The card whose answer is showing. Keyed by card so moving to another card hides it again.
+    private(set) var revealedCardID: UUID?
+
+    var answerHidden: Bool { testMode && selectedCard != nil && revealedCardID != selectedCardID }
+
+    func setTestMode(_ on: Bool) {
+        guard on != testMode else { return }
+        flushCardInBackground()
+        testMode = on
+        revealedCardID = nil
+        UserDefaults.standard.set(on, forKey: "v2.review.testMode")
+        // Testing starts with what is left to test; Good cards stay one filter click away.
+        if on, reviewFilter == .all, count(for: .unreviewed) > 0 { setReviewFilter(.unreviewed) }
+    }
+
+    func revealAnswer() {
+        withAnimation(.easeOut(duration: 0.15)) { revealedCardID = selectedCardID }
+    }
+
     // MARK: Notes
 
     func noteText(for pageIndex: Int) -> String {

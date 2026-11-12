@@ -34,6 +34,8 @@ struct KeyboardShortcutsTab: View {
                 shortcut("Undo last verdict or edit", "U")
                 shortcut("Open source / cycle source slides", "S")
                 shortcut("Enlarge source slide", "Space")
+                shortcut("Switch Browse / Test", "T")
+                shortcut("Show answer (Test)", "Space")
                 shortcut("Open source in Prepare", "G")
                 shortcut("Edit card front", "E")
                 shortcut("Open AI chat", "A")

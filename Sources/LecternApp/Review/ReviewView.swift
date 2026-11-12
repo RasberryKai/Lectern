@@ -33,6 +33,16 @@ struct ReviewView: View {
                 if model.lecture.pageCount > 0 {
                     Button("Go to Prepare") { model.setMode(.prepare) }.buttonStyle(PrimaryButtonStyle())
                 }
+            } else if model.testMode && model.reviewFilter == .unreviewed {
+                Text("Every card is tested").font(Theme.serif(22))
+                Text("\(model.count(for: .good)) Good cards go to Anki. Needs work and Bad cards stay here.")
+                    .font(Theme.body).foregroundStyle(Theme.quiet)
+                HStack(spacing: 10) {
+                    Button("Export to Anki") {
+                        Task { await model.app.returnToLibrary(destination: .export(model.ref.moduleID)) }
+                    }.buttonStyle(PrimaryButtonStyle())
+                    Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
+                }
             } else {
                 Text("Nothing in this filter").font(Theme.serif(22))
                 Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
@@ -157,9 +167,11 @@ private struct CardDetail: View {
 
     var body: some View {
         let issues = model.lecture.issues(for: card)
+        // Test mode: everything that gives the answer away waits for Space.
+        let hidden = model.answerHidden
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 0) {
-                if let flag = card.flag {
+                if !hidden, let flag = card.flag {
                     VStack(alignment: .leading, spacing: 10) {
                         Label { Text("**AI flagged this card.** \(flag)") } icon: { Image(systemName: "sparkles") }
                             .font(Theme.body).foregroundStyle(Theme.ai)
@@ -173,32 +185,63 @@ private struct CardDetail: View {
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Theme.aiWash, in: RoundedRectangle(cornerRadius: 10)).padding(16)
                 }
-                if !issues.isEmpty { issueList(issues).padding(12) }
+                if !hidden, !issues.isEmpty { issueList(issues).padding(12) }
                 side("Front", text: $model.editorFront, field: .front, size: 24)
                 Rectangle().fill(Theme.border).frame(height: 1)
-                side("Back", text: $model.editorBack, field: .back, size: 19)
-                if model.runningJobs.contains(where: { $0.kind == .revise && $0.targetCardID == card.id }) {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Revising in the background…").font(Theme.small).foregroundStyle(Theme.ai)
-                    }.padding(16)
-                }
-                if let proposal = card.proposal { ProposalCard(model: model, card: card, proposal: proposal).padding(16) }
-                if (card.verdict == .needsAdjustment && card.proposal == nil) || focus.wrappedValue == .feedback { feedback }
-                if model.lecture.pageCount > 0 { sources }
+                if hidden { answerPrompt } else { answer }
                 VerdictBar(model: model, focus: focus)
             }
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.border))
             .clipShape(RoundedRectangle(cornerRadius: 14))
-            MathChoices(model: model, card: card)
-            HStack(spacing: 12) {
+            if !hidden { MathChoices(model: model, card: card) }
+            hints(hidden: hidden)
+            if !hidden { history }
+        }
+    }
+
+    /// Stands in for the back until Space. Clicking it reveals too; the button sits in the verdict bar.
+    private var answerPrompt: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Back").eyebrow()
+            Text("Answer it in your head first.")
+                .font(.system(size: 19)).foregroundStyle(Theme.faint)
+                .padding(.vertical, 4)
+        }
+        .padding(.horizontal, 26).padding(.vertical, 20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { model.revealAnswer() }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Show answer")
+        .accessibilityAction { model.revealAnswer() }
+    }
+
+    @ViewBuilder private var answer: some View {
+        side("Back", text: $model.editorBack, field: .back, size: 19)
+            .transition(.opacity)
+        if model.runningJobs.contains(where: { $0.kind == .revise && $0.targetCardID == card.id }) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Revising in the background…").font(Theme.small).foregroundStyle(Theme.ai)
+            }.padding(16)
+        }
+        if let proposal = card.proposal { ProposalCard(model: model, card: card, proposal: proposal).padding(16) }
+        if (card.verdict == .needsAdjustment && card.proposal == nil) || focus.wrappedValue == .feedback { feedback }
+        if model.lecture.pageCount > 0 { sources }
+    }
+
+    private func hints(hidden: Bool) -> some View {
+        HStack(spacing: 12) {
+            if hidden {
+                Text("Space show answer").font(Theme.caption)
+                Text("← → skip").font(Theme.caption)
+            } else {
                 Text("← → move").font(Theme.caption)
                 Button("U undo") { Task { await model.undo() } }.buttonStyle(.plain).disabled(!model.session.canUndo || model.readOnly)
-                Text("Click text to edit").font(Theme.caption)
-            }.font(Theme.small).foregroundStyle(Theme.faint).frame(maxWidth: .infinity)
-            history
-        }
+                Text(model.testMode ? "Rate the card, not your memory" : "Click text to edit").font(Theme.caption)
+            }
+        }.font(Theme.small).foregroundStyle(Theme.faint).frame(maxWidth: .infinity)
     }
 
     private func issueList(_ issues: [CardIssue]) -> some View {
@@ -490,7 +533,14 @@ struct ReviewSourcePane: View {
                     let index = min(model.sourceIndex, card.sourcePages.count - 1)
                     let page = card.sourcePages[index]
                     let url = model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID)
-                    if page > 0 && page <= model.lecture.pageCount {
+                    if model.answerHidden {
+                        // The slide is the answer; blur it until Space.
+                        SlideImage(sourceURL: url, pageIndex: page - 1, width: 900)
+                            .blur(radius: 22).opacity(0.5)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay { Text("Hidden until you show the answer").font(Theme.small).foregroundStyle(Theme.quiet) }
+                            .accessibilityLabel("Source slide hidden until you show the answer")
+                    } else if page > 0 && page <= model.lecture.pageCount {
                         SlideImage(sourceURL: url, pageIndex: page - 1, width: 900)
                             .onTapGesture { model.enlargedPage = page }
                         HStack {
@@ -521,8 +571,8 @@ private struct VerdictBar: View {
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 7) { pager; Spacer(minLength: 8); verdicts }
-            VStack(alignment: .leading, spacing: 10) { pager; verdicts }
+            HStack(spacing: 7) { pager; Spacer(minLength: 8); trailing }
+            VStack(alignment: .leading, spacing: 10) { pager; trailing }
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 12).padding(.vertical, 10)
@@ -537,6 +587,20 @@ private struct VerdictBar: View {
                 .font(Theme.small).monospacedDigit().foregroundStyle(Theme.quiet)
             Button { model.stepCard(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next card")
         }.fixedSize()
+    }
+
+    @ViewBuilder private var trailing: some View {
+        if model.answerHidden {
+            Button { model.revealAnswer() } label: {
+                HStack(spacing: 6) {
+                    Text("Show answer").font(.system(size: 12.5, weight: .semibold))
+                    ShortcutKey(text: "Space")
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.borderStrong))
+            }.fixedSize()
+        } else { verdicts }
     }
 
     private var verdicts: some View {

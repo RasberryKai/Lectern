@@ -244,7 +244,7 @@ struct LectureWorkspace: View {
 
     private func handleReviewKey(_ event: NSEvent, modifiers: NSEvent.ModifierFlags, letter: String) -> Bool {
         if Key.isReturn(event) {
-            guard model.selectedCard?.proposal?.state == .ready else { return false }
+            guard !model.answerHidden, model.selectedCard?.proposal?.state == .ready else { return false }
             Task { await model.acceptProposal(approve: modifiers == .shift) }
             return true
         }
@@ -253,13 +253,17 @@ struct LectureWorkspace: View {
         case Key.left, Key.up: model.stepCard(-1); return true
         case Key.right, Key.down: model.stepCard(1); return true
         case Key.space:
+            if model.answerHidden { model.revealAnswer(); return true }
             guard let card = model.selectedCard, !card.sourcePages.isEmpty else { return false }
             let pages = card.sourcePages
             model.enlargedPage = pages[min(model.sourceIndex, pages.count - 1)]
             return true
         default: break
         }
+        // In Test, a verdict only counts after the answer was shown.
+        if model.answerHidden, ["1", "2", "3", "x", "s", "g"].contains(letter) { return true }
         switch letter {
+        case "t": model.setTestMode(!model.testMode); return true
         case "1": Task { await model.setVerdict(.good) }; return true
         case "2": Task { await model.setVerdict(.bad) }; return true
         case "3":
@@ -348,6 +352,12 @@ struct LectureTopBar: View {
                              selection: Binding(get: { model.mode }, set: { model.setMode($0) }))
                 .help("⌘1 Prepare · ⌘2 Review")
                 .disabled(model.lecture.pageCount == 0)
+            if model.mode == .review {
+                SegmentedControl(options: [(false, "Browse"), (true, "Test")],
+                                 selection: Binding(get: { model.testMode }, set: { model.setTestMode($0) }),
+                                 activeFill: Theme.ink, activeText: Theme.canvas)
+                    .help("Browse shows every answer · Test hides it until you press Space · T switches")
+            }
             Spacer(minLength: 10)
             if model.mode == .prepare { prepareTrailing } else { reviewTrailing }
             Button {
