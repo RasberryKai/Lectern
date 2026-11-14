@@ -181,9 +181,11 @@ private struct CoverageCard: View {
                     .lineLimit(1).truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if !otherPages.isEmpty {
-                    Text("also slide\(otherPages.count == 1 ? "" : "s") \(otherPages.map(String.init).joined(separator: ", "))")
+                    // At most three numbers, so a card citing many slides can't push its front out.
+                    Text(alsoLabel(limit: 3))
                         .font(.system(size: 11)).foregroundStyle(Theme.faint)
                         .lineLimit(1).fixedSize()
+                        .help(alsoLabel(limit: nil))
                 }
             }
             if showsBack {
@@ -200,7 +202,20 @@ private struct CoverageCard: View {
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.borderStrong))
         .help(showsBack ? "" : card.back)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Card \(number), \(card.verdict.v2Title): \(card.front)")
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private func alsoLabel(limit: Int?) -> String {
+        let shown = limit.map { Array(otherPages.prefix($0)) } ?? otherPages
+        let more = otherPages.count - shown.count
+        return "also slide\(otherPages.count == 1 ? "" : "s") \(shown.map(String.init).joined(separator: ", "))\(more > 0 ? " +\(more)" : "")"
+    }
+
+    private var accessibilityText: String {
+        var parts = ["Card \(number), \(card.verdict.v2Title): \(card.front)"]
+        if !otherPages.isEmpty { parts.append(alsoLabel(limit: nil)) }
+        if showsBack { parts.append("Back: \(card.back)") }
+        return parts.joined(separator: ". ")
     }
 
     private func singleLine(_ text: String) -> String {
