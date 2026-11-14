@@ -27,6 +27,8 @@ final class LectureWindowModel {
     var thumbnailSize: ThumbnailSize
     var notesVisible: Bool
     var thumbnailsVisible: Bool
+    /// Coverage shows card backs under the fronts. Saved per lecture.
+    var coverageShowsBacks: Bool
     var askVisible = true
     var panes = LecturePaneState()
     var chatContext = ChatContext()
@@ -99,6 +101,7 @@ final class LectureWindowModel {
         thumbnailSize = prefs.thumbnailSize
         notesVisible = prefs.inspectorVisible
         thumbnailsVisible = prefs.sidebarVisible
+        coverageShowsBacks = prefs.coverageShowsBacks
         if selectedCardID == nil { selectedCardID = visibleCards.first?.id }
         chatDraft = lecture.currentChat.draft
         chatDraftAttachments = lecture.currentChat.draftAttachments
@@ -202,7 +205,7 @@ final class LectureWindowModel {
 
     func setMode(_ new: LectureMode) {
         guard new != mode else { return }
-        if new == .prepare && lecture.pageCount == 0 { errorMessage = "This lecture has no slides. It was imported from the reviewer."; return }
+        if new != .review && lecture.pageCount == 0 { errorMessage = "This lecture has no slides. It was imported from the reviewer."; return }
         Task { await flushAll() }
         mode = new
         if new == .review, selectedCardID == nil || selectedCard == nil { selectedCardID = visibleCards.first?.id; loadEditor() }
@@ -637,6 +640,7 @@ final class LectureWindowModel {
         prefs.thumbnailSize = thumbnailSize
         prefs.inspectorVisible = notesVisible
         prefs.sidebarVisible = thumbnailsVisible
+        prefs.coverageShowsBacks = coverageShowsBacks
         return prefs
     }
 

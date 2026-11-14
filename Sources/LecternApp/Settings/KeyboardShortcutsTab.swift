@@ -14,7 +14,7 @@ struct KeyboardShortcutsTab: View {
                 shortcut("Toggle Cards in Prepare / Source in Review", "⌘⇧S")
                 Text("These work while typing in a lecture. Press the shortcut again to hide the active pane. Switching tabs keeps the pane open. ⌘A keeps its usual Select All behavior.")
                     .font(Theme.small).foregroundStyle(Theme.quiet)
-                shortcut("Prepare / Review", "⌘1 / ⌘2")
+                shortcut("Prepare / Coverage / Review", "⌘1 / ⌘2 / ⌘3")
                 shortcut("Generate cards", "⌘G")
                 shortcut("Toggle right pane", "⌘⌥B")
             } header: { Text("Lecture workspace") }
