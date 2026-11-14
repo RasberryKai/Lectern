@@ -141,7 +141,7 @@ Editing is saved per typing pause, not per keystroke. Do not add another autosav
 - The ported `PDFExporter` takes zero-based `PDFExportPlan.selectedPageIndices`. It preserves source operators, labels original slide numbers, and puts searchable notes beneath/after slides. Reuse the legacy thumbnail provider for rendering, not AI input.
 - Render via `store.sourceURL(moduleID:lectureID:)`. PDF workers should run off the MainActor.
 
-Use ⌘1 / ⌘2 to set mode. Generation landing must never change mode or selection.
+Use ⌘1 / ⌘2 / ⌘3 to set mode (Prepare / Coverage / Review). Generation landing must never change mode or selection.
 
 ## Generate and job bar
 

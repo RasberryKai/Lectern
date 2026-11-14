@@ -72,7 +72,7 @@ public struct SlideState: Codable, Equatable, Identifiable, Sendable {
 public enum SlideFilter: String, Codable, CaseIterable, Sendable { case all, selected }
 public enum ThumbnailSize: String, Codable, CaseIterable, Sendable { case compact, regular, large }
 public enum ReviewFilter: String, Codable, CaseIterable, Sendable { case all, unreviewed, good, bad, needsAdjustment, aiFlagged, proposals }
-public enum LectureMode: String, Codable, Sendable { case prepare, review }
+public enum LectureMode: String, Codable, Sendable { case prepare, coverage, review }
 public struct ViewPreferences: Codable, Equatable, Sendable {
     public var focusedPageIndex: Int?
     public var inspectorVisible: Bool
@@ -82,8 +82,25 @@ public struct ViewPreferences: Codable, Equatable, Sendable {
     public var selectedCardID: UUID?
     public var reviewFilter: ReviewFilter
     public var mode: LectureMode
-    public init(focusedPageIndex: Int? = nil, inspectorVisible: Bool = true, sidebarVisible: Bool = true, thumbnailSize: ThumbnailSize = .regular, filter: SlideFilter = .all, selectedCardID: UUID? = nil, reviewFilter: ReviewFilter = .all, mode: LectureMode = .prepare) {
-        self.focusedPageIndex = focusedPageIndex; self.inspectorVisible = inspectorVisible; self.sidebarVisible = sidebarVisible; self.thumbnailSize = thumbnailSize; self.filter = filter; self.selectedCardID = selectedCardID; self.reviewFilter = reviewFilter; self.mode = mode
+    /// Coverage shows each card's back under its front.
+    public var coverageShowsBacks: Bool
+    public init(focusedPageIndex: Int? = nil, inspectorVisible: Bool = true, sidebarVisible: Bool = true, thumbnailSize: ThumbnailSize = .regular, filter: SlideFilter = .all, selectedCardID: UUID? = nil, reviewFilter: ReviewFilter = .all, mode: LectureMode = .prepare, coverageShowsBacks: Bool = false) {
+        self.focusedPageIndex = focusedPageIndex; self.inspectorVisible = inspectorVisible; self.sidebarVisible = sidebarVisible; self.thumbnailSize = thumbnailSize; self.filter = filter; self.selectedCardID = selectedCardID; self.reviewFilter = reviewFilter; self.mode = mode; self.coverageShowsBacks = coverageShowsBacks
+    }
+    private enum CodingKeys: String, CodingKey { case focusedPageIndex, inspectorVisible, sidebarVisible, thumbnailSize, filter, selectedCardID, reviewFilter, mode, coverageShowsBacks }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        focusedPageIndex = try c.decodeIfPresent(Int.self, forKey: .focusedPageIndex)
+        inspectorVisible = try c.decode(Bool.self, forKey: .inspectorVisible)
+        sidebarVisible = try c.decode(Bool.self, forKey: .sidebarVisible)
+        thumbnailSize = try c.decode(ThumbnailSize.self, forKey: .thumbnailSize)
+        filter = try c.decode(SlideFilter.self, forKey: .filter)
+        selectedCardID = try c.decodeIfPresent(UUID.self, forKey: .selectedCardID)
+        reviewFilter = try c.decode(ReviewFilter.self, forKey: .reviewFilter)
+        // A mode this build doesn't know (written by a newer one) must not make the lecture unreadable.
+        mode = (try? c.decode(LectureMode.self, forKey: .mode)) ?? .prepare
+        // Lectures saved before Coverage existed have no key.
+        coverageShowsBacks = try c.decodeIfPresent(Bool.self, forKey: .coverageShowsBacks) ?? false
     }
     public static let `default` = ViewPreferences()
 }

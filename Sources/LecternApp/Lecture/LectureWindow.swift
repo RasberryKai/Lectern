@@ -75,6 +75,7 @@ struct LectureWorkspace: View {
             Group {
                 switch model.mode {
                 case .prepare: PrepareView(model: model, focus: $focus)
+                case .coverage: CoverageView(model: model)
                 case .review:
                     ZStack {
                         ReviewView(model: model, focus: $focus)
@@ -131,17 +132,19 @@ struct LectureWorkspace: View {
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
         if modifiers == .command, letter == "n" {
-            guard !generationOverlayVisible else { return true }
+            // Coverage has no chat pane to show the new chat in.
+            guard !generationOverlayVisible, model.mode != .coverage else { return true }
             Task { await model.newChat() }
             return true
         }
         if modifiers == [.command, .shift], letter == "a" {
             // The chat sits behind the generation overlay; don't focus it there.
-            guard !generationOverlayVisible else { return true }
+            guard !generationOverlayVisible, model.mode != .coverage else { return true }
             toggleSidePanel(.chat)
             return true
         }
         if modifiers == [.command, .shift], letter == "s" {
+            guard model.mode != .coverage else { return true }
             toggleSidePanel(.content)
             return true
         }
@@ -153,6 +156,7 @@ struct LectureWorkspace: View {
         if model.titleDraft != nil && editing { return false }
         if model.panes.focusedDivider != nil && (event.keyCode == Key.left || event.keyCode == Key.right) { return false }
         if modifiers == [.command, .option], letter == "b" {
+            guard model.mode != .coverage else { return true }
             model.askVisible.toggle()
             if model.askVisible { model.panes.openChat(model.mode) }
             if !model.askVisible, focus == .ask { focus = nil }
@@ -163,7 +167,8 @@ struct LectureWorkspace: View {
         if modifiers == .command {
             switch letter {
             case "1": model.setMode(.prepare); return true
-            case "2": model.setMode(.review); return true
+            case "2": model.setMode(.coverage); return true
+            case "3": model.setMode(.review); return true
             case "g":
                 guard !model.readOnly, model.lecture.pageCount > 0 else { return false }
                 model.showGenerateSheet = true; return true
@@ -203,6 +208,8 @@ struct LectureWorkspace: View {
         // Card shortcuts would act on cards hidden behind the generation overlay.
         if generationOverlayVisible { return false }
         guard !editing else { return false }
+        // Coverage is view-only: no card or slide shortcuts, and arrows scroll the map.
+        if model.mode == .coverage { return false }
         if modifiers.isEmpty, letter == "a" {
             model.askVisible = true
             model.panes.openChat(model.mode)
@@ -348,9 +355,9 @@ struct LectureTopBar: View {
             .disabled(app.leavingLecture)
             presentationTitle
             Text(model.moduleName).font(Theme.small).foregroundStyle(Theme.faint).lineLimit(1)
-            SegmentedControl(options: [(LectureMode.prepare, "Prepare"), (LectureMode.review, "Review")],
+            SegmentedControl(options: [(LectureMode.prepare, "Prepare"), (LectureMode.coverage, "Coverage"), (LectureMode.review, "Review")],
                              selection: Binding(get: { model.mode }, set: { model.setMode($0) }))
-                .help("⌘1 Prepare · ⌘2 Review")
+                .help("⌘1 Prepare · ⌘2 Coverage · ⌘3 Review")
                 .disabled(model.lecture.pageCount == 0)
             if model.mode == .review {
                 SegmentedControl(options: [(false, "Browse"), (true, "Test")],
@@ -359,29 +366,37 @@ struct LectureTopBar: View {
                     .help("Browse shows every answer · Test hides it until you press Space · T switches")
             }
             Spacer(minLength: 10)
-            if model.mode == .prepare { prepareTrailing } else { reviewTrailing }
-            Button {
-                if model.mode == .prepare { model.thumbnailsVisible.toggle() }
-                else { model.panes.reviewLeftVisible.toggle() }
-            } label: { Image(systemName: "sidebar.left").frame(width: 28, height: 26) }
-                .buttonStyle(.plain).foregroundStyle(Theme.quiet)
-                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
-                .accessibilityLabel("Toggle left sidebar")
-            Button {
-                model.askVisible.toggle()
-            } label: {
-                Image(systemName: "sidebar.right").frame(width: 28, height: 26)
+            switch model.mode {
+            case .prepare: prepareTrailing
+            case .coverage: coverageTrailing
+            case .review: reviewTrailing
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.quiet)
-            .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
-            .accessibilityLabel("Toggle right sidebar")
-            .help("Toggle right sidebar · ⌘⌥B")
-            .keyboardShortcut("b", modifiers: [.command, .option])
+            if model.mode != .coverage { sidebarToggles }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .background(Theme.sidebar)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
+    }
+
+    @ViewBuilder private var sidebarToggles: some View {
+        Button {
+            if model.mode == .prepare { model.thumbnailsVisible.toggle() }
+            else { model.panes.reviewLeftVisible.toggle() }
+        } label: { Image(systemName: "sidebar.left").frame(width: 28, height: 26) }
+            .buttonStyle(.plain).foregroundStyle(Theme.quiet)
+            .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
+            .accessibilityLabel("Toggle left sidebar")
+        Button {
+            model.askVisible.toggle()
+        } label: {
+            Image(systemName: "sidebar.right").frame(width: 28, height: 26)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.quiet)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
+        .accessibilityLabel("Toggle right sidebar")
+        .help("Toggle right sidebar · ⌘⌥B")
+        .keyboardShortcut("b", modifiers: [.command, .option])
     }
 
     @ViewBuilder private var presentationTitle: some View {
@@ -457,6 +472,24 @@ struct LectureTopBar: View {
                 .disabled(model.readOnly)
                 .help("⌘G")
         }
+    }
+
+    @ViewBuilder private var coverageTrailing: some View {
+        SegmentedControl(options: [(false, "Front"), (true, "Front + back")],
+                         selection: $model.coverageShowsBacks, activeFill: Theme.inset, activeText: Theme.ink)
+            .help("Show each card's back under its front")
+        let selected = model.lecture.slides.filter(\.isSelected).count
+        let without = model.lecture.uncoveredSelectedPages.count
+        Group {
+            if selected == 0 {
+                Text("No slides selected")
+            } else if without == 0 {
+                Text("\(Text("All \(selected)").foregroundStyle(Theme.ink).fontWeight(.semibold)) selected slides have cards")
+            } else {
+                Text("\(Text("\(selected - without)").foregroundStyle(Theme.ink).fontWeight(.semibold)) of \(selected) selected slides have cards · \(Text("\(without)").foregroundStyle(Theme.bad).fontWeight(.semibold)) without")
+            }
+        }
+        .font(Theme.small).foregroundStyle(Theme.quiet).monospacedDigit()
     }
 
     @ViewBuilder private var reviewTrailing: some View {
