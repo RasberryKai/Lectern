@@ -164,7 +164,7 @@ public enum ThreadContext: Codable, Equatable, Hashable, Sendable { case none, s
 public enum FlashcardContext: String, Codable, CaseIterable, Sendable { case none, all, current }
 public enum MessageRole: String, Codable, Sendable { case user, assistant }
 public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
-    private enum CodingKeys: String, CodingKey { case id, role, text, citedPages, at, editJobID, attachments, context, read, quiz, stopped, searchedLecture, pendingEdits, conflictingCardIDs }
+    private enum CodingKeys: String, CodingKey { case id, role, text, citedPages, at, editJobID, attachments, context, read, quiz, stopped, searchedLecture, pendingEdits, conflictingCardIDs, createdCardIDs }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); role = try c.decode(MessageRole.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
@@ -172,6 +172,7 @@ public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
         attachments = try c.decodeIfPresent([ChatAttachment].self, forKey: .attachments) ?? []
         context = try c.decodeIfPresent([ContextRef].self, forKey: .context) ?? []; read = try c.decodeIfPresent([ContextRef].self, forKey: .read) ?? []; quiz = try c.decodeIfPresent([QuizItem].self, forKey: .quiz) ?? []; stopped = try c.decodeIfPresent(Bool.self, forKey: .stopped) ?? false
         searchedLecture = try c.decodeIfPresent(Bool.self, forKey: .searchedLecture) ?? false
+        createdCardIDs = try c.decodeIfPresent([UUID].self, forKey: .createdCardIDs)
         pendingEdits = try c.decodeIfPresent([ChatCardEdit].self, forKey: .pendingEdits) ?? []; conflictingCardIDs = try c.decodeIfPresent([UUID].self, forKey: .conflictingCardIDs) ?? []
     }
 
@@ -186,6 +187,7 @@ public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
     public var quiz: [QuizItem] = []
     public var stopped: Bool = false
     public var searchedLecture: Bool = false
+    public var createdCardIDs: [UUID]? = nil
     public var pendingEdits: [ChatCardEdit] = []
     public var conflictingCardIDs: [UUID] = []
     public var editJobID: UUID? = nil

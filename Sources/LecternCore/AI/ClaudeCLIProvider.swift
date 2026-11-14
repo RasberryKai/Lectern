@@ -222,7 +222,7 @@ public struct ClaudeCLIProvider: AIProvider {
                 guard !path.contains(where: { "*?[]()\n\r".contains($0) }) else { throw AIError.configuration("The chat job path contains CLI permission pattern characters.") }
                 arguments += ["--allowedTools", "Read(/" + path + ")"]
             }
-            arguments += ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--json-schema", AIOutputSchema.json(for: .chat)!]
+            arguments += ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--json-schema", request.outputSchema!]
             return arguments
         }
         if let pdfURL {
@@ -232,7 +232,7 @@ public struct ClaudeCLIProvider: AIProvider {
         if request.kind == .ask {
             arguments += ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
         } else {
-            guard let schema = AIOutputSchema.json(for: request.kind) else {
+            guard let schema = request.outputSchema else {
                 throw AIError.configuration("No output schema is available for this structured CLI job.")
             }
             arguments += ["--output-format", "json", "--json-schema", schema]

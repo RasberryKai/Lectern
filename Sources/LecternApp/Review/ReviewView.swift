@@ -271,17 +271,26 @@ private struct CardDetail: View {
     private func side(_ title: String, text: Binding<String>, field: EditorField, size: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).eyebrow()
-            TextField(title, text: text, axis: .vertical)
+            // Let the card grow with wrapped text and blank lines, up to a scrollable height.
+            Text(verbatim: text.wrappedValue + "\u{200B}")
+                .lineLimit(20)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 4)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .hidden()
+                .overlay {
+                    TextEditor(text: text)
+                        .scrollContentBackground(.hidden)
+                        .focused(focus, equals: field)
+                        .disabled(model.readOnly)
+                        .accessibilityLabel(title)
+                        .onChange(of: text.wrappedValue) { _, _ in
+                            if focus.wrappedValue == field { model.editorChanged() }
+                        }
+                }
                 .font(field == .front ? Theme.serif(size, weight: .medium) : .system(size: size))
                 .lineSpacing(5)
-                .textFieldStyle(.plain)
-                .lineLimit(1...20)
-                .padding(.vertical, 4)
-                .focused(focus, equals: field)
-                .disabled(model.readOnly)
-                .onChange(of: text.wrappedValue) { _, _ in
-                    if focus.wrappedValue == field { model.editorChanged() }
-                }
             MathPreviewView(text: text.wrappedValue)
         }
         .padding(.horizontal, 26).padding(.vertical, 20)

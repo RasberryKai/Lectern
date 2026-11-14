@@ -92,6 +92,73 @@ private actor V2Gate: AIProvider {
         #expect(session.lecture.currentChat.messages.map(\.id) == [messageID])
         await gate.release(); await runner.waitUntilIdle()
     }
+    @Test @MainActor func reviewFollowUpAddsAnUnreviewedCardAndLinksItWithoutRepeatingOnRetry() async throws {
+        let (store, module, lecture, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.currentChat.messages = [ChatMessage(role: .assistant, text: "The deck is missing a card about the median.")]
+        }
+        let reply = ChatReply(message: "Here is a card about the median.", newCards: [
+            .init(front: " What is the median? ", back: "The middle value of the ordered data.", sourceSlides: [])
+        ])
+        let response = AIResponse(content: String(decoding: try JSONEncoder().encode(reply), as: UTF8.self))
+        let provider = FakeAIProvider(responses: [response, AIResponse(content: #"{"learningPoints":[],"summary":""}"#)])
+        let runner = JobRunner(store: store, providers: [provider])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+
+        _ = try await session.chat(question: "yeah add one", contextRefs: [], allowsCardCreation: true)
+        await runner.waitUntilIdle()
+        try await session.refresh()
+
+        let card = try #require(session.lecture.cards.last)
+        let answer = try #require(session.lecture.currentChat.messages.last)
+        #expect(session.lecture.cards.dropLast().elementsEqual(lecture.cards))
+        #expect(card.front == "What is the median?")
+        #expect(card.back == "The middle value of the ordered data.")
+        #expect(card.verdict == .unreviewed)
+        #expect(card.history.first?.author == .ai)
+        #expect(answer.createdCardIDs == [card.id])
+        #expect(session.lecture.issues(for: card).isEmpty)
+        let requests = await provider.requests
+        let request = try #require(requests.first)
+        #expect(request.prompt.contains("missing a card about the median"))
+        #expect(request.systemPrompt.contains("yeah add one"))
+        let schema = try #require(request.outputSchema)
+        let object = try #require(JSONSerialization.jsonObject(with: Data(schema.utf8)) as? [String: Any])
+        #expect((object["required"] as? [String])?.contains("newCards") == true)
+        #expect((object["properties"] as? [String: Any])?["newCards"] != nil)
+
+        await #expect(throws: AIError.self) { try await session.retryChat(messageID: answer.id) }
+        try await session.refresh()
+        #expect(session.lecture.cards.count == lecture.cards.count + 1)
+        #expect(session.lecture.currentChat.messages.last == answer)
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func rejectsOutOfScopeOrInvalidCardCreationWithoutSavingAnyCards(allowsCreation: Bool) async throws {
+        let (store, _, lecture, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reply = ChatReply(message: "Two cards", newCards: [
+            .init(front: "Valid question", back: "Valid answer", sourceSlides: []),
+            .init(front: "Invalid source", back: "Another answer", sourceSlides: [999])
+        ])
+        let response = AIResponse(content: String(decoding: try JSONEncoder().encode(reply), as: UTF8.self))
+        let provider = FakeAIProvider(responses: [response])
+        let runner = JobRunner(store: store, providers: [provider])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+
+        let jobID = try await session.chat(question: "Add two cards", contextRefs: [], allowsCardCreation: allowsCreation)
+        await runner.waitUntilIdle()
+        try await session.refresh()
+
+        let job = try #require(session.lecture.jobs.first(where: { $0.id == jobID }))
+        #expect(job.state == .failed)
+        let reason = allowsCreation ? "invalid source slides" : "only be added from Review"
+        #expect(job.error?.contains(reason) == true)
+        #expect(session.lecture.cards == lecture.cards)
+        #expect(session.lecture.currentChat.messages.allSatisfy { $0.role == .user })
+    }
+
     @Test @MainActor func bulkWaitsForApprovalAndConflictKeepsAnswer() async throws {
         let (store, module, lecture, root) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let provider = FakeAIProvider(responses: [try response(lecture.cards, count: 4), AIResponse(content: "{\"learningPoints\":[]}")])
@@ -156,7 +223,7 @@ private actor V2Gate: AIProvider {
         #expect(session.lecture.cards[0].proposal?.state == .ready)
     }
 
-    @Test func snapshotRendersNativePNGAndNeverAttachesPDF() async throws {
+    @Test func reviewChatRendersNativePNGAndSavesOnlyValidSourceLinks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-v2-pdf-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source.pdf"); var box = CGRect(x: 0, y: 0, width: 400, height: 300)
@@ -164,10 +231,13 @@ private actor V2Gate: AIProvider {
         context.beginPDFPage(nil); context.setFillColor(CGColor(gray: 0.4, alpha: 1)); context.fill(CGRect(x: 20, y: 20, width: 50, height: 50)); context.endPDFPage(); context.closePDF()
         let store = LibraryStore(rootURL: root.appendingPathComponent("library")); let module = try await store.createModule(name: "PDF")
         let lecture = try await store.createLecture(Lecture(moduleID: module.id, name: "PDF", pageCount: 1, slides: [SlideState(pageIndex: 0, note: "Important note")]), sourceURL: source)
-        let provider = FakeAIProvider(responses: [AIResponse(content: "{\"message\":\"Explained [S1].\",\"edits\":[]}"), AIResponse(content: "{\"learningPoints\":[],\"summary\":\"\"}")])
-        let runner = JobRunner(store: store, providers: [provider]); let jobID = try await runner.chat(moduleID: module.id, lectureID: lecture.id, question: "Explain this", contextRefs: [.slide(1)])
+        let provider = FakeAIProvider(responses: [AIResponse(content: #"{"message":"New card","edits":[],"newCards":[{"front":"Question","back":"Answer","sourceSlides":[1,1]}]}"#), AIResponse(content: "{\"learningPoints\":[],\"summary\":\"\"}")])
+        let runner = JobRunner(store: store, providers: [provider]); let jobID = try await runner.chat(moduleID: module.id, lectureID: lecture.id, question: "Add a card for this slide", contextRefs: [.slide(1)], allowsCardCreation: true)
         await runner.waitUntilIdle(); let requests = await provider.requests
         #expect(requests[0].pdf == nil); #expect(requests[0].chatSnapshot?.slides.first?.note == "Important note")
+        let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(saved.cards.first?.sourcePages == [1])
+        #expect(saved.currentChat.messages.last?.createdCardIDs == saved.cards.map(\.id))
         let directory = store.jobDirectory(moduleID: module.id, lectureID: lecture.id, jobID: jobID)
         let bytes = try Data(contentsOf: directory.appendingPathComponent("slides/001.png"))
         #expect(Array(bytes.prefix(8)) == [137,80,78,71,13,10,26,10]); #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("input.pdf").path))

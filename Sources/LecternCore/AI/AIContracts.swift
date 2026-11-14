@@ -15,6 +15,7 @@ public struct AIRequest: Codable, Equatable, Sendable {
     public var chatSnapshot: ChatSnapshot? = nil
     public var pdf: Data?
     public var workingDirectory: URL
+    var outputSchema: String? { AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true) }
     public init(jobID: UUID, kind: JobKind, model: String, prompt: String, pdf: Data?, workingDirectory: URL, systemPrompt: String? = nil) {
         self.jobID = jobID; self.kind = kind; self.model = model; self.prompt = prompt; self.systemPrompt = systemPrompt ?? PromptBuilder.systemPrompt(for: kind)
         self.pdf = pdf; self.workingDirectory = workingDirectory
@@ -90,22 +91,38 @@ public struct ChatCardEdit: Codable, Equatable, Sendable {
 }
 
 public struct ChatReply: Codable, Equatable, Sendable {
+    public struct NewCard: Codable, Equatable, Sendable {
+        public var front: String
+        public var back: String
+        public var sourceSlides: [Int]
+
+        public init(front: String, back: String, sourceSlides: [Int]) {
+            self.front = front
+            self.back = back
+            self.sourceSlides = sourceSlides
+        }
+    }
+
     public var quiz: [QuizItem]? = nil
     public var message: String
     public var edits: [ChatCardEdit]
+    public var newCards: [NewCard]?
 
-    public init(message: String, edits: [ChatCardEdit] = []) {
+    public init(message: String, edits: [ChatCardEdit] = [], newCards: [NewCard]? = nil) {
         self.message = message
         self.edits = edits
+        self.newCards = newCards
     }
 }
 
 public enum AIOutputSchema {
-    public static func json(for kind: JobKind) -> String? {
+    public static func json(for kind: JobKind, allowsCardCreation: Bool = false) -> String? {
         switch kind {
         case .ask: return nil
         case .chat:
-            return #"{"type":"object","additionalProperties":false,"required":["message","edits","quiz"],"properties":{"quiz":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["question","answer"],"properties":{"question":{"type":"string"},"answer":{"type":"string"}}}},"message":{"type":"string"},"edits":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID","front","back"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"},"front":{"type":"string"},"back":{"type":"string"}}}}}}"#
+            let extraRequired = allowsCardCreation ? #","newCards""# : ""
+            let extraProperties = allowsCardCreation ? #""newCards":{"type":"array","items":\#(newChatCard)},"# : ""
+            return #"{"type":"object","additionalProperties":false,"required":["message","edits","quiz"\#(extraRequired)],"properties":{\#(extraProperties)"quiz":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["question","answer"],"properties":{"question":{"type":"string"},"answer":{"type":"string"}}}},"message":{"type":"string"},"edits":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID","front","back"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"},"front":{"type":"string"},"back":{"type":"string"}}}}}}"#
         case .generate:
             return #"{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":CARD},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}"#.replacingOccurrences(of: "CARD", with: card)
         case .revise:
@@ -114,6 +131,7 @@ public enum AIOutputSchema {
             return #"{"type":"object","additionalProperties":false,"required":["learningPoints","summary"],"properties":{"summary":{"type":"string"},"learningPoints":{"type":"array","maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["text","pages"],"properties":{"text":{"type":"string"},"pages":{"type":"array","items":{"type":"integer"}}}}}}}"#
         }
     }
+    private static let newChatCard = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}}}}"#
     private static let card = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]}}}"#
 }
 
@@ -150,6 +168,8 @@ public struct ChatSnapshot: Codable, Equatable, Sendable {
     public var slides: [ChatSlide]
     public var cards: [Card]
     public var initialRefs: [ContextRef]
+    /// Nil for older frozen snapshots and for chat outside Review.
+    public var allowsCardCreation: Bool? = nil
     public init(slides: [ChatSlide], cards: [Card], initialRefs: [ContextRef]) { self.slides = slides; self.cards = cards; self.initialRefs = initialRefs }
 }
 

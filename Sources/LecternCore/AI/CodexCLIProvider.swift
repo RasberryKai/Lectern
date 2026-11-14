@@ -72,7 +72,7 @@ public struct CodexCLIProvider: AIProvider {
                     forward(.stage("Starting Codex"))
                     var turn: [String: Any] = ["threadId": threadID, "input": context.input,
                                               "approvalPolicy": "never", "sandboxPolicy": ["type": "readOnly", "networkAccess": false]]
-                    if let schema = AIOutputSchema.json(for: request.kind) {
+                    if let schema = request.outputSchema {
                         turn["outputSchema"] = try JSONSerialization.jsonObject(with: Data(schema.utf8))
                     }
                     trace.phase("codex_execution")

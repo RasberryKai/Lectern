@@ -14,6 +14,7 @@ struct ChatPreparationFailure {
     let question: String
     let refs: [ContextRef]
     let attachments: [ChatAttachment]
+    let allowsCardCreation: Bool
     let message: String
 }
 
@@ -100,6 +101,7 @@ extension LectureWindowModel {
         let question = failure?.question ?? chatDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let refs = failure?.refs ?? resolvedChatContext
         let attachments = failure?.attachments ?? chatDraftAttachments
+        let allowsCardCreation = failure?.allowsCardCreation ?? (mode == .review)
         let chatID = lecture.currentChat.id
         guard failure == nil || failure?.chatID == chatID else { return }
         guard !question.isEmpty || !attachments.isEmpty else { return }
@@ -119,14 +121,14 @@ extension LectureWindowModel {
         chatDraftAttachments.removeAll { sentIDs.contains($0.id) }
         do {
             try await flushAllThrowing()
-            _ = try await session.chat(question: question, contextRefs: refs, attachments: attachments, messageID: messageID, backend: settings.backend, model: settings.selectedModel)
+            _ = try await session.chat(question: question, contextRefs: refs, attachments: attachments, messageID: messageID, backend: settings.backend, model: settings.selectedModel, allowsCardCreation: allowsCardCreation)
         } catch {
             // A refresh can fail after the job was committed; first check for the saved message.
             try? await session.refresh()
             if lecture.currentChat.messages.contains(where: { $0.id == messageID }) {
                 errorMessage = Self.describe(error)
             } else {
-                chatPreparationFailure = ChatPreparationFailure(chatID: chatID, messageID: messageID, question: question, refs: refs, attachments: attachments, message: Self.describe(error))
+                chatPreparationFailure = ChatPreparationFailure(chatID: chatID, messageID: messageID, question: question, refs: refs, attachments: attachments, allowsCardCreation: allowsCardCreation, message: Self.describe(error))
                 // Keep a newer draft intact; the failure retains the original request for retry.
                 if chatDraft.isEmpty && chatDraftAttachments.isEmpty {
                     chatDraft = failure == nil ? submittedDraft : question

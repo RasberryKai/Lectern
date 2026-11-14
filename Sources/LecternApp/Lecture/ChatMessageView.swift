@@ -35,13 +35,14 @@ struct ChatMessageView: View {
                     if message.stopped { Text("Stopped").font(Theme.caption).foregroundStyle(Theme.faint) }
                     if message.searchedLecture { Text("Searched the lecture").font(Theme.caption).foregroundStyle(Theme.faint) }
                     if !message.quiz.isEmpty { quiz }
+                    if let ids = message.createdCardIDs, !ids.isEmpty { createdCards(ids) }
                     if let id = message.editJobID, let job = model.lecture.jobs.first(where: { $0.id == id }), job.chatEdits?.isEmpty == false || job.chatEditUndo?.isEmpty == false { ChatEditBlock(model: model, job: job) }
                     HStack(spacing: 14) {
                         action("Copy", "doc.on.doc") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string) }
-                        if message.editJobID.flatMap({ id in model.lecture.jobs.first(where: { $0.id == id })?.kind }) != .revise {
+                        if message.createdCardIDs?.isEmpty != false, message.editJobID.flatMap({ id in model.lecture.jobs.first(where: { $0.id == id })?.kind }) != .revise {
                             action("Make a card", "rectangle.badge.plus") { Task { await model.makeCard(from: message) } }
                         }
-                        if let id = message.editJobID, model.lecture.jobs.contains(where: { $0.id == id && $0.kind == .chat && $0.isLectureChat == true }) {
+                        if message.createdCardIDs?.isEmpty != false, let id = message.editJobID, model.lecture.jobs.contains(where: { $0.id == id && $0.kind == .chat && $0.isLectureChat == true }) {
                             action("Retry", "arrow.clockwise") { Task { await model.retryChatAnswer(message) } }
                         }
                     }.opacity(hovering ? 1 : 0).disabled(model.readOnly || model.runningChat != nil).accessibilityHidden(!hovering)
@@ -51,6 +52,23 @@ struct ChatMessageView: View {
     }
     private func action(_ title: String, _ symbol: String, perform: @escaping () -> Void) -> some View {
         Button(action: perform) { Label(title, systemImage: symbol).font(.system(size: 10.5)) }.buttonStyle(.plain).foregroundStyle(Theme.faint)
+    }
+    private func createdCards(_ ids: [UUID]) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label("Added \(Format.count(ids.count, "flashcard"))", systemImage: "rectangle.badge.plus")
+                .font(.system(size: 12, weight: .semibold))
+            ForEach(ids, id: \.self) { id in
+                if let number = model.cardNumbers[id] {
+                    Button("Open Card \(number)") { model.openChatCard(id) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.ai)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(11)
+        .background(Theme.aiWash.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
     }
     private var quiz: some View {
         VStack(alignment: .leading, spacing: 7) {

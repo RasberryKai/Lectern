@@ -154,7 +154,7 @@ public struct MessagesAPIProvider: AIProvider {
             var urlRequest = try Self.makeURLRequest(prompt: request.prompt, kind: .chat, pdf: nil,
                 systemPrompt: request.systemPrompt, apiKey: apiKey,
                 model: request.model.hasPrefix("claude-") ? request.model : model,
-                apiVersion: apiVersion, endpoint: endpoint, maxOutputTokens: maxOutputTokens)
+                apiVersion: apiVersion, endpoint: endpoint, maxOutputTokens: maxOutputTokens, allowsCardCreation: snapshot.allowsCardCreation == true)
             var body = try JSONSerialization.jsonObject(with: urlRequest.httpBody!) as! [String: Any]
             body["messages"] = messages
             body["stream"] = true
@@ -322,7 +322,8 @@ public struct MessagesAPIProvider: AIProvider {
                                model: String,
                                apiVersion: String,
                                endpoint: URL,
-                               maxOutputTokens: Int) throws -> URLRequest {
+                               maxOutputTokens: Int,
+                               allowsCardCreation: Bool = false) throws -> URLRequest {
         var content: [[String: Any]] = []
         let segments = cachedPromptSegments(prompt)
         if let segments {
@@ -353,7 +354,7 @@ public struct MessagesAPIProvider: AIProvider {
             "messages": [["role": "user", "content": content]],
             "stream": kind == .ask
         ]
-        if let schemaText = AIOutputSchema.json(for: kind) {
+        if let schemaText = AIOutputSchema.json(for: kind, allowsCardCreation: allowsCardCreation) {
             let schemaData = Data(schemaText.utf8)
             let rawSchema = try JSONSerialization.jsonObject(with: schemaData)
             body["output_config"] = [
