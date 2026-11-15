@@ -18,6 +18,61 @@ private actor V2Gate: AIProvider {
     func release() { released = true }
 }
 @Suite struct LectureChatV2Tests {
+    @Test(arguments: 0..<8)
+    func learningPointsAreLimitedToSlideConversations(scenario: Int) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-point-scope-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.pdf")
+        var box = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let context = try #require(CGContext(source as CFURL, mediaBox: &box, nil))
+        context.beginPDFPage(nil); context.endPDFPage(); context.closePDF()
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Scope")
+        let card = Card(sourcePages: [1], front: "Question", back: "Answer")
+        var lecture = Lecture(moduleID: module.id, name: "Scope", pageCount: 1, cards: [card])
+        let needsSummary = scenario == 7
+        if needsSummary {
+            lecture.currentChat.messages = (0..<24).map {
+                ChatMessage(role: $0.isMultiple(of: 2) ? .user : .assistant, text: "Earlier message \($0)")
+            }
+        }
+        lecture = try await store.createLecture(lecture, sourceURL: source)
+        let refs: [ContextRef]
+        switch scenario {
+        case 0: refs = [.slide(1)]
+        case 1: refs = [.allSlides]
+        case 2: refs = [.card(card.id)]
+        case 3: refs = [.allCards]
+        case 4, 7: refs = [.card(card.id), .slide(1)]
+        case 5: refs = [.slide(1)] // Review with only a pinned slide.
+        default: refs = [] // Review with screen following disabled.
+        }
+        let allowsCardCreation = scenario == 5 || scenario == 6
+        let extractsPoints = scenario < 2
+        let runsDistillation = extractsPoints || needsSummary
+        var answer = AIResponse(content: #"{"message":"Explanation [S1]","edits":[]}"#)
+        answer.read = [.slide(1)]
+        // Even an unwanted point returned during summary maintenance must be discarded.
+        let distillation = AIResponse(content: #"{"learningPoints":[{"text":"A grounded insight","pages":[1]}],"summary":"Older discussion"}"#)
+        let provider = FakeAIProvider(responses: [answer, distillation])
+        let runner = JobRunner(store: store, providers: [provider])
+        let jobID = try await runner.chat(moduleID: module.id, lectureID: lecture.id, question: "Explain this",
+            contextRefs: refs, allowsCardCreation: allowsCardCreation)
+        await runner.waitUntilIdle()
+        let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(saved.jobs.first(where: { $0.id == jobID })?.state == .succeeded)
+        #expect(saved.learningPoints.map(\.text) == (extractsPoints ? ["A grounded insight"] : []))
+        let requests = await provider.requests
+        #expect(requests.map(\.kind) == (runsDistillation ? [.chat, .distil] : [.chat]))
+        #expect(saved.jobs.allSatisfy { $0.state == .succeeded })
+        if needsSummary {
+            #expect(saved.currentChat.summary == "Older discussion")
+            #expect(saved.currentChat.summarizedMessageCount == 6)
+            #expect(requests.last?.prompt.contains("extraction is disabled") == true)
+        }
+    }
+
     @Test func learningPointsSavedBeforeTheDrawerDecodeAsReviewed() throws {
         let fresh = LearningPoint(text: "New", pages: [1])
         #expect(!fresh.reviewed)

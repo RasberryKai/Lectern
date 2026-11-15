@@ -76,7 +76,7 @@ struct AskPanel: View {
         if let job = model.runningChat {
             VStack(alignment: .leading, spacing: 8) {
                 let progress = model.progress(job.id)
-                if let text = progress?.streamedText, !text.isEmpty { ChatMarkdownView(text: text, streaming: true, onCitation: model.openChatCitation) }
+                if let text = progress?.streamedText, !text.isEmpty { ChatCitedMarkdownView(model: model, text: text, streaming: true) }
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.mini)
                     Text(progress?.stage == "Queued" ? "Waiting for a free slot…" : (progress?.streamedText.isEmpty == false ? "\(job.backend.assistantName) is answering…" : (progress?.stage ?? "Reading your context…")))

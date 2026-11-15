@@ -6,7 +6,6 @@ struct ChatMessageView: View {
     let model: LectureWindowModel
     let message: ChatMessage
     @State private var hovering = false
-    @State private var previewPage: Int?
     var body: some View {
         Group {
             if message.role == .user {
@@ -23,15 +22,7 @@ struct ChatMessageView: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     if !message.read.isEmpty { Label("Read " + model.chatContextLabel(message.read), systemImage: "sparkle").font(.system(size: 10.5)).foregroundStyle(Theme.faint) }
-                    ChatMarkdownView(text: message.text, onCitation: model.openChatCitation, onHoverCitation: { previewPage = $0 })
-                        .popover(isPresented: Binding(get: { previewPage != nil }, set: { if !$0 { previewPage = nil } }), arrowEdge: .top) {
-                            if let page = previewPage {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    SlideImage(sourceURL: model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID), pageIndex: page - 1, width: 300)
-                                    Text("Slide \(page)").font(Theme.caption).foregroundStyle(Theme.quiet)
-                                }.padding(10).frame(width: 320).allowsHitTesting(false)
-                            }
-                        }
+                    ChatCitedMarkdownView(model: model, text: message.text)
                     if message.stopped { Text("Stopped").font(Theme.caption).foregroundStyle(Theme.faint) }
                     if message.searchedLecture { Text("Searched the lecture").font(Theme.caption).foregroundStyle(Theme.faint) }
                     if !message.quiz.isEmpty { quiz }
@@ -74,11 +65,61 @@ struct ChatMessageView: View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(message.quiz.enumerated()), id: \.offset) { index, item in
                 DisclosureGroup {
-                    ChatMarkdownView(text: item.answer, onCitation: model.openChatCitation).padding(.top, 6)
+                    ChatCitedMarkdownView(model: model, text: item.answer).padding(.top, 6)
                 } label: { Text("\(index + 1). \(item.question)").font(.system(size: 13, weight: .medium)) }
                     .padding(10).background(Theme.inset, in: RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+}
+
+/// Shared by saved answers, quizzes and streaming answers so citations behave alike.
+struct ChatCitedMarkdownView: View {
+    let model: LectureWindowModel
+    let text: String
+    var streaming = false
+    @State private var previewCitation: ChatCitation?
+
+    var body: some View {
+        ChatMarkdownView(text: text, streaming: streaming, onCitation: model.openChatCitation) { citation in
+            guard let citation else { previewCitation = nil; return }
+            if citation.kind == "S" {
+                previewCitation = citation.number <= model.lecture.pageCount ? citation : nil
+            } else {
+                previewCitation = card(number: citation.number) != nil ? citation : nil
+            }
+        }
+        .popover(isPresented: Binding(get: { previewCitation != nil }, set: { if !$0 { previewCitation = nil } }), arrowEdge: .top) {
+            if let citation = previewCitation {
+                preview(citation).allowsHitTesting(false)
+            }
+        }
+        .onHover { if !$0 { previewCitation = nil } }
+        .onDisappear { previewCitation = nil }
+    }
+
+    @ViewBuilder private func preview(_ citation: ChatCitation) -> some View {
+        if citation.kind == "S" {
+            VStack(alignment: .leading, spacing: 8) {
+                SlideImage(sourceURL: model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID), pageIndex: citation.number - 1, width: 300)
+                Text("Slide \(citation.number)").font(Theme.caption).foregroundStyle(Theme.quiet)
+            }.padding(10).frame(width: 320)
+        } else if let card = card(number: citation.number) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Card \(citation.number)").font(Theme.caption).foregroundStyle(Theme.quiet)
+                    Text("Front").font(Theme.caption).foregroundStyle(Theme.quiet)
+                    ChatMarkdownView(text: card.front)
+                    Divider()
+                    Text("Back").font(Theme.caption).foregroundStyle(Theme.quiet)
+                    ChatMarkdownView(text: card.back)
+                }.padding(12)
+            }.frame(width: 340, height: 360)
+        }
+    }
+
+    private func card(number: Int) -> Card? {
+        model.activeCards.first { model.cardNumbers[$0.id] == number }
     }
 }
 

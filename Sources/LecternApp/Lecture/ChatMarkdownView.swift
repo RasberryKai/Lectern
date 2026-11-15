@@ -2,12 +2,23 @@ import AppKit
 import SwiftUI
 import WebKit
 
+struct ChatCitation: Equatable {
+    let kind: String
+    let number: Int
+
+    init?(kind: String, number: Int) {
+        guard ["S", "C"].contains(kind), number > 0 else { return nil }
+        self.kind = kind
+        self.number = number
+    }
+}
+
 /// Block Markdown is rendered locally; HTML and image syntax are deliberately literal.
 struct ChatMarkdownView: View {
     let text: String
     var streaming = false
     var onCitation: (String, Int) -> Void = { _, _ in }
-    var onHoverCitation: (Int?) -> Void = { _ in }
+    var onHoverCitation: (ChatCitation?) -> Void = { _ in }
     @State private var height: CGFloat = 28
     var body: some View {
         ChatMarkdownWeb(html: ChatMarkdown.html(streaming ? ChatMarkdown.finishedBlocks(text) : text), height: $height,
@@ -22,7 +33,7 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
     let html: String
     @Binding var height: CGFloat
     let onCitation: (String, Int) -> Void
-    let onHoverCitation: (Int?) -> Void
+    let onHoverCitation: (ChatCitation?) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -47,6 +58,7 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
         view.loadHTMLString(document, baseURL: bundle.resourceURL?.appendingPathComponent("MathJax", isDirectory: true))
     }
     static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
+        coordinator.parent.onHoverCitation(nil)
         view.configuration.userContentController.removeScriptMessageHandler(forName: "chat")
     }
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -60,7 +72,13 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
                 if abs(parent.height - measured) > 0.5 { parent.height = measured }
             }
             if let type = body["type"] as? String, let n = body["number"] as? Int { parent.onCitation(type, n) }
-            if body["hover"] != nil { parent.onHoverCitation(body["hover"] as? Int) }
+            if body["hover"] != nil {
+                let hover = body["hover"] as? [String: Any]
+                let citation = (hover?["type"] as? String).flatMap { kind in
+                    (hover?["number"] as? Int).flatMap { ChatCitation(kind: kind, number: $0) }
+                }
+                parent.onHoverCitation(citation)
+            }
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
             guard let url = navigationAction.request.url else { return .cancel }
@@ -93,7 +111,14 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
         const content=document.getElementById('content');
         function resize(){post({height:Math.ceil(content.getBoundingClientRect().height)+1})}
         new ResizeObserver(resize).observe(content);requestAnimationFrame(resize);
-        document.querySelectorAll('.cite').forEach(e=>{e.onclick=()=>post({type:e.dataset.type,number:Number(e.dataset.n)});if(e.dataset.type==='S'){e.onmouseenter=()=>post({hover:Number(e.dataset.n)});e.onmouseleave=()=>post({hover:false})}});
+        function endHover(){post({hover:null})}
+        document.querySelectorAll('.cite').forEach(e=>{
+            e.onclick=()=>{endHover();post({type:e.dataset.type,number:Number(e.dataset.n)})};
+            e.onmouseenter=()=>post({hover:{type:e.dataset.type,number:Number(e.dataset.n)}});
+            e.onmouseleave=endHover;
+        });
+        document.documentElement.addEventListener('mouseleave',endHover);
+        window.addEventListener('pagehide',endHover);
         if(window.MathJax.startup)window.MathJax.startup.promise.then(()=>window.MathJax.typesetPromise()).then(resize).catch(()=>{document.getElementById('status').textContent='Math could not be rendered; source is shown.';resize()});
         </script></body></html>
         """
@@ -164,7 +189,16 @@ nonisolated enum ChatMarkdown {
         let lines = source.components(separatedBy: .newlines)
         var index = 0, blocks: [String] = []
         func cells(_ line: String) -> [String] {
-            var parts = line.trimmingCharacters(in:.whitespaces).components(separatedBy:"|")
+            var parts = [""]
+            var escaped = false
+            for character in line.trimmingCharacters(in: .whitespaces) {
+                if character == "|", !escaped { parts.append("") }
+                else {
+                    if character == "|", escaped { parts[parts.count - 1].removeLast() }
+                    parts[parts.count - 1].append(character)
+                }
+                escaped = character == "\\" && !escaped
+            }
             if parts.first?.isEmpty == true { parts.removeFirst() }; if parts.last?.isEmpty == true { parts.removeLast() }
             return parts.map { $0.trimmingCharacters(in:.whitespaces) }
         }
@@ -176,10 +210,21 @@ nonisolated enum ChatMarkdown {
                 while index < lines.count && !lines[index].trimmingCharacters(in:.whitespaces).hasPrefix("```") { code.append(lines[index]); index += 1 }
                 blocks.append("<pre><code>\(escape(code.joined(separator:"\n")))</code></pre>"); index += 1; continue
             }
-            if index + 1 < lines.count, line.contains("|"), cells(lines[index + 1]).allSatisfy({ $0.range(of:#"^:?-{3,}:?$"#,options:.regularExpression) != nil }), !cells(lines[index + 1]).isEmpty {
-                let head = cells(line).map { "<th>\(inline($0))</th>" }.joined(); index += 2
+            if index + 1 < lines.count, line.contains("|"), !cells(line).isEmpty, cells(lines[index + 1]).allSatisfy({ $0.range(of:#"^:?-{3,}:?$"#,options:.regularExpression) != nil }), !cells(lines[index + 1]).isEmpty {
+                let headers = cells(line)
+                let head = headers.map { "<th>\(inline($0))</th>" }.joined(); index += 2
                 var rows: [String] = []
-                while index < lines.count && lines[index].contains("|") && !lines[index].isEmpty { rows.append("<tr>" + cells(lines[index]).map { "<td>\(inline($0))</td>" }.joined() + "</tr>"); index += 1 }
+                while index < lines.count && lines[index].contains("|") && !lines[index].isEmpty {
+                    var row = cells(lines[index])
+                    // A citation after the final pipe still belongs to the last column.
+                    // Keep every row aligned to its headers without dropping that citation.
+                    if row.count > headers.count {
+                        row = Array(row.prefix(headers.count - 1)) + [row.dropFirst(headers.count - 1).joined(separator: " ")]
+                    }
+                    row += Array(repeating: "", count: max(0, headers.count - row.count))
+                    rows.append("<tr>" + row.map { "<td>\(inline($0))</td>" }.joined() + "</tr>")
+                    index += 1
+                }
                 blocks.append("<div class=\"table\"><table><thead><tr>\(head)</tr></thead><tbody>\(rows.joined())</tbody></table></div>"); continue
             }
             if trimmed.hasPrefix(">") {

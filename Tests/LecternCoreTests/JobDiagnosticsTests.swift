@@ -101,6 +101,10 @@ private actor DiagnosticsFixtureProvider: AIProvider {
         ])
         let runner = JobRunner(store: store, providers: [provider])
 
+        // An unfocused exchange only distils when older messages need summarizing.
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.currentChat.messages = (0..<20).map { ChatMessage(role: .user, text: "Earlier message \($0)") }
+        }
         let parentID = try await runner.chat(moduleID: module.id, lectureID: lecture.id, question: "Explain this", contextRefs: [])
         await runner.waitUntilIdle()
 
