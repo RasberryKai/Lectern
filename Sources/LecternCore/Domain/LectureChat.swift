@@ -15,13 +15,14 @@ public struct QuizItem: Codable, Equatable, Identifiable, Sendable {
     public init(question: String, answer: String) { self.question = question; self.answer = answer }
 }
 public struct LectureChat: Codable, Equatable, Identifiable, Sendable {
-    private enum CodingKeys: String, CodingKey { case id, title, messages, summary, summarizedMessageCount, pointCursor, draft, draftAttachments, createdAt, updatedAt }
+    private enum CodingKeys: String, CodingKey { case id, title, messages, summary, summarizedMessageCount, pointCursor, processedClickedAnswerIDs, draft, draftAttachments, createdAt, updatedAt }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); title = try c.decode(String.self, forKey: .title)
         messages = try c.decode([ChatMessage].self, forKey: .messages); summary = try c.decode(String.self, forKey: .summary)
         summarizedMessageCount = try c.decodeIfPresent(Int.self, forKey: .summarizedMessageCount)
         pointCursor = try c.decodeIfPresent(Int.self, forKey: .pointCursor)
+        processedClickedAnswerIDs = try c.decodeIfPresent([UUID].self, forKey: .processedClickedAnswerIDs) ?? []
         draft = try c.decode(String.self, forKey: .draft); draftAttachments = try c.decodeIfPresent([ChatAttachment].self, forKey: .draftAttachments) ?? []
         createdAt = try c.decode(Date.self, forKey: .createdAt); updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
@@ -34,6 +35,9 @@ public struct LectureChat: Codable, Equatable, Identifiable, Sendable {
     /// Messages before this index have been judged for learning points. Nil on chats from before
     /// per-concept extraction: their history is never re-extracted.
     public var pointCursor: Int? = nil
+    /// Clicked-answer requests already handled, including requests that correctly produced no point.
+    /// Missing from older files; decodes as empty for compatibility.
+    public var processedClickedAnswerIDs: [UUID] = []
     public var draft: String
     public var draftAttachments: [ChatAttachment]
     public var createdAt: Date

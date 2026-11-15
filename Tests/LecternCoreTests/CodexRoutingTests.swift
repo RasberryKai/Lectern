@@ -40,6 +40,7 @@ import Testing
             AIResponse(content: #"{"message":"The chat answer.","edits":[],"quiz":[]}"#),
             AIResponse(content: #"{"learningPoints":[]}"#),
             AIResponse(content: #"{"message":"The lecture chat answer.","edits":[],"quiz":[]}"#),
+            AIResponse(content: #"{"message":"Yes, that restatement is right.","edits":[],"quiz":[]}"#),
             AIResponse(content: #"{"learningPoints":[]}"#)
         ], backend: .codexCLI)
         let runner = JobRunner(store: library, providers: [provider])
@@ -62,8 +63,11 @@ import Testing
             contextRefs: [.slide(1)], backend: .codexCLI, model: "gpt-custom")
         await runner.waitUntilIdle()
 
+        _ = try await runner.chat(moduleID: module.id, lectureID: lecture.id, question: "So the explanation means this, right?",
+            contextRefs: [.slide(1)], backend: .codexCLI, model: "gpt-custom")
+        await runner.waitUntilIdle()
         let requests = await provider.requests
-        #expect(requests.map(\.model) == Array(repeating: "gpt-custom", count: 8))
-        #expect(requests.map(\.kind) == [.generate, .revise, .ask, .distil, .chat, .distil, .chat, .distil])
+        #expect(requests.map(\.model) == Array(repeating: "gpt-custom", count: 9))
+        #expect(requests.map(\.kind) == [.generate, .revise, .ask, .distil, .chat, .distil, .chat, .chat, .distil])
     }
 }

@@ -22,7 +22,7 @@ extension LectureSession {
             if !latest.currentChat.messages.isEmpty || !latest.currentChat.draft.isEmpty || !latest.currentChat.draftAttachments.isEmpty { latest.archivedChats.insert(latest.currentChat, at: 0) }
             latest.currentChat = LectureChat()
         }; try await refresh()
-        try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: leaving, backend: backend, model: model)
+        try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: leaving, reason: .newChat, backend: backend, model: model)
     }
     public func openChat(id: UUID, backend: AIBackend = .claudeCLI, model: String = "opus") async throws {
         let leaving = lecture.currentChat.id
@@ -34,12 +34,12 @@ extension LectureSession {
             latest.currentChat = chat
         }; try await refresh()
         if leaving != lecture.currentChat.id {
-            try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: leaving, backend: backend, model: model)
+            try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: leaving, reason: .switchChat, backend: backend, model: model)
         }
     }
     /// A chat left untouched for 15 minutes has ended its last discussion.
     public func endIdleChatDiscussions(backend: AIBackend = .claudeCLI, model: String = "opus") async {
-        try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: lecture.currentChat.id, idleFor: 15 * 60, backend: backend, model: model)
+        try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: lecture.currentChat.id, idleFor: 15 * 60, reason: .idle, backend: backend, model: model)
     }
     public func setAnswerClicked(messageID: UUID, clicked: Bool, backend: AIBackend = .claudeCLI, model: String = "opus") async throws {
         try await runner.setChatAnswerClicked(moduleID: lecture.moduleID, lectureID: lecture.id, messageID: messageID, clicked: clicked, backend: backend, model: model)

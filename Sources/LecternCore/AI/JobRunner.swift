@@ -19,8 +19,43 @@ public actor JobRunner {
         var job: Job
         var request: AIRequest
         var learningPointIDs: [UUID]
+        var generationDrafts: [GenerationDraftSnapshot] = []
+        var generationDraftsFrozen = false
     }
-    struct Snapshot: Codable { var request: AIRequest; var learningPointIDs: [UUID] }
+    struct GenerationDraftSnapshot: Codable, Equatable, Sendable {
+        var wirePointID: UUID
+        var learningPointID: UUID
+        var sourceCardID: UUID?
+        var sourceCardPages: [Int]?
+        var wasPendingDraft: Bool?
+        var draftReplacesCardID: UUID?
+        var front: String
+        var back: String
+        var pages: [Int]
+        var kind: String?
+
+        init(wirePointID: UUID, learningPointID: UUID, sourceCardID: UUID?, sourceCardPages: [Int]?, wasPendingDraft: Bool?,
+             draftReplacesCardID: UUID?, front: String, back: String, pages: [Int], kind: String?) {
+            self.wirePointID = wirePointID; self.learningPointID = learningPointID; self.sourceCardID = sourceCardID
+            self.sourceCardPages = sourceCardPages
+            self.wasPendingDraft = wasPendingDraft; self.draftReplacesCardID = draftReplacesCardID
+            self.front = front; self.back = back; self.pages = pages; self.kind = kind
+        }
+
+        init(_ draft: PromptBuilder.ChatCardDraft) {
+            self.init(wirePointID: draft.wirePointID, learningPointID: draft.originPointID,
+                      sourceCardID: draft.sourceCardID, sourceCardPages: draft.sourceCardPages,
+                      wasPendingDraft: draft.wasPendingDraft,
+                      draftReplacesCardID: draft.draftReplacesCardID, front: draft.front,
+                      back: draft.back, pages: draft.pages, kind: draft.kind)
+        }
+    }
+    struct Snapshot: Codable {
+        var request: AIRequest
+        var learningPointIDs: [UUID]
+        /// Missing in older snapshots; retry reconstructs these from the original prompt.
+        var generationDrafts: [GenerationDraftSnapshot]? = nil
+    }
     private let pdfExporter: any PDFSnapshotExporting
     let store: LibraryStore
     let providers: [AIBackend: any AIProvider]
@@ -205,6 +240,9 @@ public actor JobRunner {
                                              card: (kind == .ask || kind == .chat) && thread?.flashcardContext != .current ? nil : card, feedback: feedback,
                                              thread: thread, question: question, generationInstructions: additionalInstructions,
                                              contextCards: contextCards, replacesExistingCards: replaceExistingCards)
+        let generationDrafts = kind == .generate
+            ? PromptBuilder.chatCardDrafts(lecture: initial, pages: pages, replacesExistingCards: replaceExistingCards).map(GenerationDraftSnapshot.init)
+            : []
         var job = Job(kind: kind, pages: pages, rulesVersion: PromptBuilder.hash(rules), backend: backend,
                       targetCardID: cardID, threadID: thread?.id, baseRevisionID: card?.currentRevisionID, prompt: prompt, model: resolvedModel)
         job.replacesExistingCards = replaceExistingCards ? true : nil
@@ -229,10 +267,15 @@ public actor JobRunner {
         }
         try Task.checkCancellation()
         let pointIDs = (initial.learningPoints + initial.threads.flatMap(\.learningPoints)).filter { $0.included && $0.pages.contains(where: pages.contains) }.map(\.id)
-        let request = AIRequest(jobID: job.id, kind: kind, model: resolvedModel, prompt: prompt, pdf: pdf, workingDirectory: directory)
+        var request = AIRequest(jobID: job.id, kind: kind, model: resolvedModel, prompt: prompt, pdf: pdf, workingDirectory: directory)
+        request.diagnosticContext = [
+            "moduleID": moduleID.uuidString,
+            "lectureID": lectureID.uuidString,
+            "purpose": kind.rawValue
+        ]
         job.inputHash = try Self.inputHash(request)
         var persistedRequest = request; persistedRequest.pdf = nil
-        try JSONEncoder().encode(Snapshot(request: persistedRequest, learningPointIDs: pointIDs)).write(to: directory.appendingPathComponent("snapshot.json"), options: .atomic)
+        try JSONEncoder().encode(Snapshot(request: persistedRequest, learningPointIDs: pointIDs, generationDrafts: generationDrafts)).write(to: directory.appendingPathComponent("snapshot.json"), options: .atomic)
         let frozenJob = job
         let frozenThread = thread
         try Task.checkCancellation()
@@ -267,7 +310,8 @@ public actor JobRunner {
             try await cancel(moduleID: moduleID, lectureID: lectureID, jobID: job.id)
             throw CancellationError()
         }
-        pending.append(Work(moduleID: moduleID, lectureID: lectureID, job: job, request: request, learningPointIDs: pointIDs))
+        pending.append(Work(moduleID: moduleID, lectureID: lectureID, job: job, request: request,
+                            learningPointIDs: pointIDs, generationDrafts: generationDrafts, generationDraftsFrozen: true))
         emit(moduleID: moduleID, lectureID: lectureID, jobID: job.id, event: .stage("Queued"))
         schedule()
         return job.id
@@ -275,6 +319,67 @@ public actor JobRunner {
 
     private static func codexModel(_ model: String) -> String {
         model.isEmpty || model == "opus" ? AISettings.defaultCodexModel : model
+    }
+
+    private struct PromptDraftSnapshot: Decodable {
+        var point: UUID
+        var front: String
+        var back: String
+        var pages: [Int]
+        var kind: String?
+    }
+
+    /// Older immutable job snapshots did not persist draft expectations separately. Their
+    /// original prompt still contains the complete draft payload, keyed by the old root point ID.
+    private static func generationDraftsFromOriginalPrompt(_ prompt: String) -> [GenerationDraftSnapshot] {
+        guard let marker = prompt.range(of: "CHAT CARD DRAFTS"),
+              let separator = prompt[marker.upperBound...].range(of: ":\n") else { return [] }
+        let payload = prompt[separator.upperBound...]
+        let end = payload.range(of: "\n\n")?.lowerBound ?? payload.endIndex
+        guard let data = String(payload[..<end]).data(using: .utf8),
+              let drafts = try? JSONDecoder().decode([PromptDraftSnapshot].self, from: data) else { return [] }
+        return drafts.map { draft in
+            GenerationDraftSnapshot(wirePointID: draft.point, learningPointID: draft.point, sourceCardID: nil,
+                                    sourceCardPages: nil, wasPendingDraft: nil, draftReplacesCardID: nil,
+                                    front: draft.front, back: draft.back, pages: draft.pages, kind: draft.kind)
+        }
+    }
+
+    private static func generationDraftIsCurrent(_ draft: GenerationDraftSnapshot, in lecture: Lecture) -> Bool {
+        guard let point = lecture.learningPoints.first(where: { $0.id == draft.learningPointID }), point.included else { return false }
+        if let sourceCardID = draft.sourceCardID {
+            guard let card = lecture.cards.first(where: { $0.id == sourceCardID && !$0.isSuperseded }),
+                  (point.cardIDs ?? []).contains(sourceCardID) || card.learningPointID == point.id,
+                  card.front == draft.front, card.back == draft.back,
+                  draft.sourceCardPages == nil || card.sourcePages == draft.sourceCardPages else { return false }
+            return true
+        }
+
+        func matchesPendingDraft() -> Bool {
+            guard point.isPendingDraft, let current = point.draft,
+                  current.front == draft.front, current.back == draft.back else { return false }
+            return draft.wasPendingDraft != true || current.replacesCardID == draft.draftReplacesCardID
+        }
+        func matchesLinkedCard() -> Bool {
+            let linkedIDs = Set(point.cardIDs ?? [])
+            return lecture.cards.contains { card in
+                !card.isSuperseded && (linkedIDs.contains(card.id) || card.learningPointID == point.id) &&
+                    card.front == draft.front && card.back == draft.back
+            }
+        }
+
+        switch draft.wasPendingDraft {
+        case true: return matchesPendingDraft()
+        case false: return matchesLinkedCard()
+        case nil: return matchesPendingDraft() || matchesLinkedCard()
+        }
+    }
+
+    private static func normalizedCardKey(front: String, back: String) -> String {
+        func normalize(_ text: String) -> String {
+            text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+        return normalize(front) + "\u{0}" + normalize(back)
     }
 
     static func inputHash(_ request: AIRequest) throws -> String {
@@ -374,6 +479,7 @@ public actor JobRunner {
         emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: event)
     }
     func recordRunnerResponse(_ response: AIResponse, trace: AIInteractionTrace) {
+        trace.recordUsage(response.usage)
         if let data = try? JSONEncoder().encode(response), let object = try? JSONSerialization.jsonObject(with: data) {
             trace.writeJSON("runner-response.json", object)
         }
@@ -421,17 +527,74 @@ public actor JobRunner {
             case .generate:
                 guard let output = frozenGenerated else { throw AIError.invalidResponse("Missing generation payload.") }
                 guard output.skipped.allSatisfy({ work.job.pages.contains($0.slide) && !$0.reason.isEmpty }) else { throw AIError.invalidResponse("Invalid skipped-slide entry.") }
-                // Every chat draft in the prompt becomes exactly one card; the model may polish it, never drop it.
-                let expected = PromptBuilder.chatCardDrafts(lecture: lecture, pages: work.job.pages, replacesExistingCards: work.job.replacesExistingCards == true)
-                    .filter { work.learningPointIDs.contains($0.point) }
+                let snapshotDrafts = work.generationDraftsFrozen
+                    ? work.generationDrafts
+                    : Self.generationDraftsFromOriginalPrompt(work.request.prompt)
+                let expected = snapshotDrafts.filter { work.learningPointIDs.contains($0.learningPointID) }
+                let expectedByWireID = Dictionary(expected.map { ($0.wirePointID, $0) }, uniquingKeysWith: { first, _ in first })
+                let liveExpected = expected.filter { Self.generationDraftIsCurrent($0, in: lecture) }
+                let liveByWireID = Dictionary(liveExpected.map { ($0.wirePointID, $0) }, uniquingKeysWith: { first, _ in first })
+
+                // A repeated explicit point key is a duplicate model result, not another ordinary card.
+                var seenPointLabels = Set<String>()
                 var linked = Set<UUID>()
-                var cards = output.cards.map { wire -> CardDraft in
-                    var draft = wire.draft
-                    if let id = wire.point.flatMap(UUID.init(uuidString:)), expected.contains(where: { $0.point == id }), linked.insert(id).inserted { draft.learningPointID = id }
-                    return draft
+                var linkedCards: [CardDraft] = []
+                var unlinkedCards: [CardDraft] = []
+                for wire in output.cards {
+                    if let label = wire.point {
+                        let identity = UUID(uuidString: label)?.uuidString.lowercased() ?? label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        guard seenPointLabels.insert(identity).inserted else { continue }
+                        if let pointID = UUID(uuidString: label) {
+                            if let draft = expectedByWireID[pointID] {
+                                // The request's draft changed while the provider was running. Drop this stale
+                                // result instead of consuming the current point or restoring obsolete text.
+                                guard let current = liveByWireID[pointID] else { continue }
+                                var card = wire.draft
+                                card.learningPointID = current.learningPointID
+                                linkedCards.append(card)
+                                linked.insert(draft.wirePointID)
+                                continue
+                            }
+                        }
+                    }
+                    unlinkedCards.append(wire.draft)
                 }
-                for draft in expected where !linked.contains(draft.point) {
-                    cards.append(CardDraft(front: draft.front, back: draft.back, sourcePages: draft.pages, learningPointID: draft.point))
+
+                // A current linked card may have been edited or split after the request snapshot.
+                // Re-add those latest descendants after Replace so stale model output cannot erase them.
+                var preservedCards: [CardDraft] = []
+                var preservedCardIDs = Set<UUID>()
+                if work.job.replacesExistingCards == true {
+                    for pointID in Set(expected.map(\.learningPointID)) {
+                        guard let point = lecture.learningPoints.first(where: { $0.id == pointID }), point.included else { continue }
+                        let unchangedSourceIDs = Set(liveExpected.filter { $0.learningPointID == pointID }.compactMap(\.sourceCardID))
+                        let linkedIDs = Set(point.cardIDs ?? [])
+                        for card in lecture.cards where !card.isSuperseded &&
+                            (linkedIDs.contains(card.id) || card.learningPointID == pointID) &&
+                            !unchangedSourceIDs.contains(card.id) && preservedCardIDs.insert(card.id).inserted {
+                            let currentPages = card.sourcePages.filter(work.job.pages.contains)
+                            let sourcePages = currentPages.isEmpty ? point.pages.filter(work.job.pages.contains) : currentPages
+                            guard !sourcePages.isEmpty else { continue }
+                            var preserved = CardDraft(front: card.front, back: card.back, sourcePages: sourcePages, flag: card.flag)
+                            preserved.learningPointID = pointID
+                            preservedCards.append(preserved)
+                        }
+                    }
+                }
+
+                let expectedSignatures = Set(expected.map { Self.normalizedCardKey(front: $0.front, back: $0.back) })
+                let linkedSignatures = Set((linkedCards + preservedCards).map { Self.normalizedCardKey(front: $0.front, back: $0.back) })
+                var unlinkedSignatures = Set<String>()
+                let uniqueUnlinked = unlinkedCards.filter { draft in
+                    let key = Self.normalizedCardKey(front: draft.front, back: draft.back)
+                    guard !expectedSignatures.contains(key), !linkedSignatures.contains(key) else { return false }
+                    return unlinkedSignatures.insert(key).inserted
+                }
+
+                var cards = linkedCards + preservedCards + uniqueUnlinked
+                for draft in liveExpected where !linked.contains(draft.wirePointID) {
+                    cards.append(CardDraft(front: draft.front, back: draft.back, sourcePages: draft.pages,
+                                           learningPointID: draft.learningPointID))
                 }
                 let covered = Set(cards.flatMap(\.sourcePages) + output.skipped.map(\.slide))
                 let missing = work.job.pages.filter { !covered.contains($0) }.map { SkippedSlide(slide: $0, reason: "Model returned no card or skip reason; review this slide.") }
@@ -541,7 +704,10 @@ public actor JobRunner {
         }
         progress.removeValue(forKey: jobID)
         emit(moduleID: moduleID, lectureID: lectureID, jobID: jobID, event: .stage("Queued"))
-        pending.append(Work(moduleID: moduleID, lectureID: lectureID, job: job, request: request, learningPointIDs: snapshot.learningPointIDs)); schedule()
+        let generationDrafts = snapshot.generationDrafts ?? Self.generationDraftsFromOriginalPrompt(request.prompt)
+        pending.append(Work(moduleID: moduleID, lectureID: lectureID, job: job, request: request,
+                            learningPointIDs: snapshot.learningPointIDs, generationDrafts: generationDrafts,
+                            generationDraftsFrozen: true)); schedule()
     }
 
     /// Call once at app launch, before accepting commands. Never reruns an interrupted call automatically.

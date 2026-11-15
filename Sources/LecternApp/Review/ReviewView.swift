@@ -323,8 +323,12 @@ private struct CardDetail: View {
                 }
             Spacer()
             if let point = card.learningPointID.flatMap({ id in model.lecture.learningPoints.first { $0.id == id } }) {
-                Button { model.showChat(for: point) } label: { Label("From your chat", systemImage: "bubble.left.and.text.bubble.right") }
-                    .buttonStyle(.plain).foregroundStyle(Theme.ai).help("Show where this explanation clicked")
+                if model.canShowChat(for: point) {
+                    Button { model.showChat(for: point) } label: { Label("From your chat", systemImage: "bubble.left.and.text.bubble.right") }
+                        .buttonStyle(.plain).foregroundStyle(Theme.ai).help("Show where this explanation clicked")
+                } else {
+                    Text("From deleted chat").foregroundStyle(Theme.quiet).help("The source chat is no longer available.")
+                }
             } else {
                 Text(card.history.count > 1 ? "Edited" : "As generated").foregroundStyle(Theme.quiet)
             }

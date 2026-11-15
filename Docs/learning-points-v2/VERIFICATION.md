@@ -3,10 +3,11 @@
 ## Automated
 
 ```bash
-swift build && swift test
+swift build --disable-sandbox
+swift test --disable-sandbox --no-parallel
 ```
 
-The expected result is 190 tests in 27 suites, all passing.
+The original feature had 190 Swift Testing tests. Audit regressions now cover extraction lifecycle, generation integrity, schema transport, and durable usage accounting. See the audit repair verification below for the current run.
 
 | Test | Proves |
 |---|---|
@@ -30,9 +31,9 @@ The expected result is 190 tests in 27 suites, all passing.
 6. **Backwards compatibility.** Every new field decodes when missing. `LearningPoint.kind` uses `try?`, so an unknown future value doesn't break loading.
 7. **Undo.** The three new reducer actions are excluded from `LectureController`'s undo stack. Check that this is acceptable.
 
-## Manual QA (not done yet)
+## Original manual QA checklist
 
-The app was **not** run during development, because opening a lecture would start AI calls against the owner's real library. Use a scratch library, or accept that real calls will be made.
+The initial implementation had no native UI run. The audit repair run below uses an isolated scratch library and a local fake CLI; real model judgement remains unverified.
 
 1. **Prepare.** Ask a specific question about a slide, reply "I still don't get it", get a second answer, then reply "So it means X, right?".
    - Expect: no drawer after the first answer.
@@ -49,8 +50,61 @@ The app was **not** run during development, because opening a lecture would star
 - **Closing the window** doesn't end a discussion. It's only picked up when the lecture is reopened after 15 minutes, or on New chat or a chat switch.
 - **The per-slide cap counts every included point, including ones that already have cards.** A slide with 3 points that have cards blocks new points there, and merging only works into points without cards. One option is to count only points without cards.
 - **Effort.** The distil call keeps `low` reasoning effort and a 2,048-token cap on the Messages API. Judging reactions is subtle, so consider `medium`.
-- **Window.** At most the last 30 messages after the cursor are judged. Assistant text is cut at 2,400 characters in the prompt; evidence is still checked against the full text.
-- **Cost.** Each Prepare answer still causes one Sonnet call (as before), and Clicked, New chat and idle each add one.
+- **Window.** Every unjudged message through the captured boundary is included; no older unjudged prefix is silently dropped. A long unresolved discussion can therefore increase input tokens. Assistant text remains cut at 2,400 characters; evidence is checked against the full text.
+- **Cost.** The first Prepare answer without a student reaction skips extraction unless summary maintenance needs a call. Clicked, New chat, switching chats and idle can add checks, with no-op reasons logged separately. The durable V2 usage filter supports measured comparison on future sessions; offline tests cannot establish real provider token deltas or judgement quality.
 - **Review suggestion scope.** Only cards in the recent messages' context count as "discussed". There is one suggestion per answer; a newer pass replaces a pending one, never an applied one.
 - **Old data.** Points from before v2 have no `kind`, draft or evidence. They still feed Generate as plain learning points, and the drawer shows them with Keep / Drop.
 - **Legacy path.** The v1 per-slide-thread distil path (`JobRunner.land`, case `.distil`, and the `.distil` text in `PromptBuilder`) is unchanged and unused by the lecture chat.
+
+- **Semantic duplicates.** Repeated explicit draft IDs and exact text copies
+  (ignoring case/whitespace) are deduplicated. A model that paraphrases a draft
+  while incorrectly returning `point: null` can still create a semantic duplicate;
+  the app does not guess provenance using unsafe fuzzy matching. The prompt
+  requires the explicit draft ID and forbids another card testing its concept.
+
+
+## Audit repair verification — 2026-11-15
+
+The final serial offline run passed: **48 XCTest cases** and **212 Swift Testing
+checks across 30 suites**, with the three opt-in live checks disabled. Command:
+
+```bash
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lectern-review-module-cache \
+CLANG_MODULE_CACHE_PATH=/tmp/lectern-review-clang-cache \
+swift test --disable-sandbox --cache-path /tmp/lectern-review-spm-cache --no-parallel
+```
+
+New regression coverage:
+
+| Suite | Cases covered |
+|---|---|
+| `ChatDistillationRegressionTests` (7) | Cursor persisted before inference; exit queued behind a held first summary; abandoned question rejected; old nil-cursor history skipped; historical click idempotence; retracted queued click skipped; all 40 unjudged messages retained through a captured boundary; later messages excluded; latest-state caps, merge page unions and normalized deduplication; unsuccessful jobs excluded |
+| `LearningPointGenerationRegressionTests` (7) | Repeated explicit IDs; normalized null-label duplicates; split descendants/provenance; obsolete Review suggestions; pending draft changed during inference; linked card text changed during inference; current and in-flight source mappings |
+| `AIUsageLogTests` (8) | Failed validation usage; skips versus unknown calls; per-round totals; incomplete multi-call accounting; explicit zero; credential redaction; damaged JSONL line recovery; retries counted once; nonzero CLI exit usage; actual Prepare/Review HTTP schema bodies and truncated-response usage |
+
+Existing scope and Codex routing fixtures now wait for a reaction/click rather
+than requiring an unnecessary initial extraction call. The app builds in Debug;
+the final Release build and ad-hoc bundle signature verification also passed.
+
+Native UI QA ran against `/tmp/lectern-v2-ui-qa` in an isolated app bundle using
+`/tmp/lectern-v2-qa-claude`, a local fake provider. No live AI inference or real
+library mutation was used. Verified:
+
+- Settings All AI/V2 filters, backend and trigger breakdowns, Refresh, scrolling,
+  and seeded totals (3 V2 calls, 3,500 input / 270 output tokens).
+- Deleted source chat renders a noninteractive label; obsolete/missing-target
+  suggestions disable Apply without a Card 0 label; valid Apply updates the card.
+- Mixed drawer says Add drafts + keep; adding the draft creates one card and
+  changes the legacy-only bulk label to Keep all.
+- Generate preview counts one mirrored legacy point once and lists both current
+  linked drafts. Fake generation dismisses the sheet and preserves exactly two
+  linked cards, including the edited text.
+- Source-chat navigation scrolls to its discussion; New chat archives it and
+  Earlier chats restores it. Replacement makes old suggestions unavailable.
+
+Independent static review identified accounting and source-preservation edge
+cases; each concrete finding was fixed and covered. Unbounded unresolved-window
+input growth and semantic duplicates from incorrectly null-labeled paraphrases
+remain the explicit limitations above. These offline checks establish contracts
+and persistence, not real model extraction quality or a measured provider token
+comparison.

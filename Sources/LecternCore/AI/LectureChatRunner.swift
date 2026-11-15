@@ -65,6 +65,9 @@ extension JobRunner {
         let frozenUserMessage = userMessage
         _ = try await store.updateLecture(moduleID: moduleID, lectureID: lectureID) { latest in
             guard latest.currentChat.id == frozen.threadID, !latest.jobs.contains(where: { ($0.kind == .chat || $0.kind == .ask) && $0.state == .running }) else { throw AIError.configuration("The chat changed while preparing this answer.") }
+            if latest.currentChat.pointCursor == nil, !allowsCardCreation, !ChatDistillationRules.isCardContext(contextRefs) {
+                latest.currentChat.pointCursor = latest.currentChat.messages.count
+            }
             var message = frozenUserMessage; message.context = contextRefs; message.editJobID = frozen.id
             if latest.currentChat.messages.isEmpty { latest.currentChat.title = question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Image question" : LectureChat.title(for: question) }
             latest.currentChat.messages.append(message); latest.currentChat.draft = ""; latest.currentChat.draftAttachments = []; latest.currentChat.updatedAt = Date(); latest.jobs.append(frozen)

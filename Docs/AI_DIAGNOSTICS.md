@@ -36,6 +36,31 @@ Default location:
       http-01-body.json (or .sse / .error.txt)
 ```
 
+Each lecture also has `ai-usage.jsonl`, a compact accounting ledger outside the
+job directories. Settings → **AI usage** shows totals for all three backends,
+with a **Learning points v2** filter for background extraction, Review suggestion
+and summary checks, plus a trigger breakdown. Full card generation remains in
+**All AI** because its total includes ordinary slide cards as well as chat drafts. The CLI equivalent
+is `lectern usage MODULE_ID LECTURE_ID [--v2]` (with `--root` before the command
+for another library). These commands read local files and make no AI calls.
+
+The ledger records each execution attempt separately, including retries and
+failures: backend/model, job and attempt IDs, start/finish time, status, provider
+calls attempted, reported input/output/cache tokens, and small outcome counters.
+V2 records also identify the purpose, trigger, module, lecture, chat and parent
+job. Skipped checks are separate zero-call records with a reason. Incremental
+snapshots of one attempt are coalesced by attempt ID when reading; they are not
+additional calls. A damaged or incomplete JSONL line does not hide later records.
+
+Reported usage is captured before response validation, so a truncated or invalid
+answer can still contribute tokens. Missing provider usage stays **unknown** and
+is excluded from token totals. An HTTP request or CLI invocation counts as one
+provider call attempted; CLI providers may perform multiple internal model steps
+that Lectern cannot count independently. Input totals already include reported
+cache reads/writes. Subscription cost/quota percentages are unavailable, and API
+prices remain estimates for supported models. Historical jobs have no complete
+attempt or V2 trigger history and cannot be backfilled reliably.
+
 Only files relevant to the execution are present. API chat tool rounds get their
 own numbered HTTP files. `--root` uses the same structure in the selected library.
 If the requested working directory is missing, preflight diagnostics fall back to
@@ -108,6 +133,10 @@ library cleanup. Snapshots referenced by saved lecture chats are retained for
 chat retry, along with their traces. Fallback preflight traces outside the library
 are not part of that cleanup. Copy a trace elsewhere if it needs to be retained.
 Portable lecture/module backups do not include job-directory diagnostics.
+The compact usage ledger survives job cleanup and contains no prompts or replies.
+It remains with its lecture until the lecture is deleted; portable backups do not
+currently include it. Ledger writes are best effort, use owner-only file access,
+and never cause an otherwise successful AI operation to fail.
 
 ## Verification (2026-11-08)
 
@@ -120,3 +149,14 @@ No live AI inference was used for these checks.
 An unrestricted full parallel run stalled in this environment and was stopped;
 its cause remains unverified. Serial execution completed successfully, including
 the explicit job concurrency, cancellation, and retry tests.
+
+
+## Usage accounting verification (2026-11-15)
+
+Eight ledger/provider tests pass, including failed validation and nonzero CLI
+usage, missing versus explicit-zero usage, partial multi-call usage, redaction,
+retry aggregation, damaged-line recovery and actual V2 HTTP schemas. The full
+serial offline suite passes (48 XCTest cases, 212 Swift Testing checks; live
+checks disabled). The read-only `usage --v2` command and native Settings view
+both reproduced the scratch fixture's 3 calls and 3,500 input / 270 output tokens.
+See `learning-points-v2/VERIFICATION.md` for the repair test matrix and UI checks.

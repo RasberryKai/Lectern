@@ -187,10 +187,14 @@ struct CardSuggestionBlock: View {
             }
             if suggestion.state == .pending {
                 Text(suggestion.reason).font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-                if let card = target {
+                if isEditOutOfDate {
+                    Label(obsoleteMessage, systemImage: "clock.arrow.circlepath")
+                        .font(Theme.small).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                }
+                if suggestion.isEdit, let card = target {
                     if card.front != suggestion.front { ChatWordDiff(before: card.front, after: suggestion.front) }
                     if card.back != suggestion.back { ChatWordDiff(before: card.back, after: suggestion.back) }
-                } else {
+                } else if !suggestion.isEdit {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(suggestion.front).font(.system(size: 12, weight: .medium))
                         Divider()
@@ -200,24 +204,51 @@ struct CardSuggestionBlock: View {
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
                 }
                 HStack {
-                    Button(suggestion.isEdit ? "Apply" : "Add card") { Task { await model.resolveSuggestion(message, apply: true) } }.buttonStyle(SecondaryButtonStyle())
-                    Button("Dismiss") { Task { await model.resolveSuggestion(message, apply: false) } }.buttonStyle(.plain)
-                }.disabled(model.readOnly)
-            } else if suggestion.state == .applied, let id = suggestion.cardID ?? suggestion.createdCardID, let number = model.cardNumbers[id] {
-                Button("Open Card \(number)") { model.openChatCard(id) }.buttonStyle(.plain).font(Theme.caption).foregroundStyle(Theme.ai)
+                    Button(suggestion.isEdit ? "Apply" : "Add card") { Task { await model.resolveSuggestion(message, apply: true) } }
+                        .buttonStyle(SecondaryButtonStyle())
+                        .disabled(model.readOnly || isEditOutOfDate)
+                        .help(isEditOutOfDate ? obsoleteMessage : (suggestion.isEdit ? "Apply this card change" : "Add this card"))
+                    Button("Dismiss") { Task { await model.resolveSuggestion(message, apply: false) } }
+                        .buttonStyle(.plain).disabled(model.readOnly)
+                }
+            } else if suggestion.state == .applied {
+                if let id = suggestion.cardID ?? suggestion.createdCardID, let number = model.cardNumbers[id] {
+                    Button("Open Card \(number)") { model.openChatCard(id) }.buttonStyle(.plain).font(Theme.caption).foregroundStyle(Theme.ai)
+                } else {
+                    Text(suggestion.isEdit ? "The edited card is no longer available." : "The added card is no longer available.")
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
+                }
             }
         }
         .padding(11).background(Theme.aiWash.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.ai.opacity(0.2)))
         .opacity(suggestion.state == .dismissed ? 0.6 : 1)
     }
-    private var target: Card? { suggestion.cardID.flatMap { id in model.lecture.cards.first { $0.id == id } } }
+    private var target: Card? { suggestion.cardID.flatMap { id in model.activeCards.first { $0.id == id } } }
+    private var isEditOutOfDate: Bool {
+        guard suggestion.state == .pending, suggestion.isEdit else { return false }
+        guard let target else { return true }
+        return target.currentRevisionID != suggestion.baseRevisionID
+    }
+    private var obsoleteMessage: String {
+        target == nil ? "The card this suggestion targets was removed or replaced. Dismiss this obsolete suggestion." :
+            "This card changed after the suggestion was made. Dismiss it or ask again."
+    }
     private var title: String {
         let number = suggestion.cardID.flatMap { model.cardNumbers[$0] }
         switch suggestion.state {
-        case .pending: return suggestion.isEdit ? "Suggested change to Card \(number ?? 0)" : "Suggested new card"
-        case .applied: return suggestion.isEdit ? "Card \(number ?? 0) updated · To review" : "Card added · To review"
-        case .dismissed: return "Suggestion dismissed"
+        case .pending:
+            if suggestion.isEdit {
+                if isEditOutOfDate { return number.map { "Out of date · Card \($0)" } ?? "Suggestion is out of date" }
+                return number.map { "Suggested change to Card \($0)" } ?? "Suggestion is out of date"
+            }
+            return "Suggested new card"
+        case .applied:
+            if suggestion.isEdit { return number.map { "Card \($0) updated · To review" } ?? "Card edit applied · Target removed" }
+            if let id = suggestion.createdCardID, model.cardNumbers[id] == nil { return "Card added · No longer available" }
+            return "Card added · To review"
+        case .dismissed:
+            return suggestion.isEdit && target == nil ? "Target card no longer available" : "Suggestion dismissed"
         }
     }
 }

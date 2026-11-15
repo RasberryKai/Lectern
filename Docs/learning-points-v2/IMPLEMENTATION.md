@@ -1,6 +1,6 @@
 # Implementation
 
-All changes are in one commit on `claude/project-thread-cdyohp` (on top of `main` at `6bb44b2`), plus these docs.
+The feature and its audit repairs are on `claude/project-thread-cdyohp` (on top of `main` at `6bb44b2`).
 
 ## Data model (`Sources/LecternCore/Domain/Models.swift`, `LectureChat.swift`)
 
@@ -23,6 +23,7 @@ All new fields are optional, or have defaults, and decode with `decodeIfPresent`
 | `CardDraft` | `learningPointID: UUID?` | Carries that link through `landGeneration` |
 | `Job` | `allowsCardCreation: Bool?` | True for Review chat jobs; used to tell Review from Prepare |
 | `LectureChat` | `pointCursor: Int?` | Messages before this index have been judged. Nil on old chats, so their history is never re-extracted |
+| | `processedClickedAnswerIDs: [UUID]` | Successful click passes, including zero-point results; missing on old data decodes as empty |
 
 ## Background distillation (`Sources/LecternCore/AI/ChatDistillation.swift`)
 
@@ -36,7 +37,7 @@ This replaces the old `distilLectureChat` in `LectureChatRunner.swift`, which ha
   - `LectureSession.newChat` and `openChat`, for the chat being left;
   - `LectureSession.endIdleChatDiscussions` (with `idleFor: 15 min`), which runs when a lecture window loads (`LectureWindow.load`).
 
-  It does nothing when `pointCursor` is nil, or when no Prepare student message follows the cursor.
+  New Prepare sends persist the starting cursor before inference. Legacy chats remain untracked until a new Prepare exchange starts. End triggers capture a message-ID boundary so queued work cannot close later turns.
 
 Passes for one chat are **serialised** through `JobRunner.distilChains`, so two triggers can't save the same point twice. Each pass is registered in `active`, so `waitUntilIdle` waits for it.
 
@@ -49,10 +50,10 @@ The **anchor** is the clicked message, or the last assistant message of the exch
   - the anchor already has an applied suggestion;
   - the last 8 Review messages contain fewer than 2 student messages and nothing was clicked, because a first question can't show a reaction yet.
 - **Prepare anchor** (`isPrepare`: a chat job, not Review, and no `.card` or `.allCards` in the message context), or `.chatEnded` → points plan:
-  - the window is the messages from the cursor to the end (at most the last 30), filtered to Prepare messages;
+  - the window contains every contiguous unjudged message through the captured boundary, filtered to successful Prepare exchanges;
   - it needs at least one student message, and slides that were read.
 
-  When `pointCursor` is nil, it starts at the first message of the current exchange (or the student message before a clicked answer), and that start is saved.
+  New Prepare exchanges initialize `pointCursor` before the answer runs. The first unanswered reaction check is skipped unless summary maintenance is needed. A historical click uses a target-bounded window independently of the forward cursor and records the handled answer ID; repeated clicks do not repeat successful extraction.
 - Card-context chats in Prepare ("Fix this flag…") get neither points nor suggestions, as before.
 - If there's no plan but older messages need summarising, it makes a summary-only call. That prompt still says "Learning-point extraction is disabled for this exchange."
 
@@ -84,9 +85,7 @@ The model sees:
   Matching ignores case, whitespace, `**`/`__` and curly quotes. "…" may skip text, but the parts must appear in order. The quote must be at least 4 characters.
 - `replacesCardID` is kept only if it names an active card.
 - `mergesPointID` is honoured only for an included point that has no cards yet, or for a point added in the same pass. A merge rewrites that point and makes it pending again.
-- A non-merge point is dropped when:
-  - its normalised text duplicates an existing point; or
-  - any of its pages already has 3 included points.
+- Both new points and merges are checked again against the latest lecture inside the atomic store update. Normalized duplicates and resulting page unions that exceed 3 included points on any slide are rejected. This also covers passes from different chats landing concurrently.
 - At most 4 points per pass.
 - **Cursor:**
   - with `closeAll` (chat ended), it moves to the end;
@@ -126,12 +125,12 @@ These three new actions are kept out of `LectureController`'s undo stack, becaus
   - every included point on these slides that is still a pending draft;
   - when replacing, also pending drafts that improve an existing card, and points that already have a card, sent with that card's current text so they survive the replacement.
 
-  The app always generates with `replaceExistingCards: true` (`LectureWindowModel.generate`).
+  The app always generates with `replaceExistingCards: true` (`LectureWindowModel.generate`). Linked split descendants are sent separately using each active card ID as its wire key; the root learning-point ID remains their provenance.
 - The prompt gains a `CHAT CARD DRAFTS` section, plus this instruction: return each draft as one card with `point` set to its id, tighten the wording if needed, write no other card on the same concept, and set `point` to null on every other card.
 - The generated-card schema gains a required `point: string|null` field (`AIOutputSchema.generatedCard`). Revise keeps the old card schema.
 - `INCLUDED LEARNING POINTS` now contains only points that are not drafts, each with its `kind`. Its label tells the model to write from the explanation rather than the slide's wording: a contrast card for misconceptions, and the student's phrasing for `ownWords`.
 - The system prompt's precedence becomes `global rules < module instructions < slide text < chat card drafts and included learning points < explicit slide notes`.
-- When generated cards land, valid `point` ids are linked, at most one card per draft. **Any expected draft the model dropped is appended as a card anyway.**
+- When generated cards land, valid `point` ids are linked, at most one card per draft. **Any unchanged expected draft the model dropped is appended as a card anyway.** Repeated explicit draft IDs and normalized exact copies with a null label are deduplicated. Expectations are frozen with the request and retained on retry. If a pending draft changes during inference, stale output cannot consume it; if a linked card changes or splits, its current descendants survive replacement. Replacement invalidates pending edit suggestions targeting removed cards.
 
 ## App (`Sources/LecternApp`)
 
@@ -143,7 +142,7 @@ These three new actions are kept out of `LectureController`'s undo stack, becaus
 - `AskPanel`: `ConceptEndLine` after a message that ends one or more points' discussions. It reads "Misconception cleared up", "In your words", "Clicked", or "Clicked after N tries", followed by "· N card draft(s)".
 - `LearningPointDrawer`: rewritten for drafts.
   - Each draft shows chips (Misconception, Your words, "Took N tries"), slide chips, "improves Card N" when it replaces a card, and front and back.
-  - Buttons: Skip, Edit (inline front/back fields) and Add (or "Update Card N"). The header has "Add all".
+  - Buttons: Skip, Edit (inline front/back fields) and Add (or "Update Card N"). The header distinguishes "Add all", "Keep all" for legacy points, and "Add drafts + keep" for mixed content.
   - Points without a draft from before v2 keep the Keep / Drop row.
 - `LectureChatModel`:
   - new `addChatCardDraft`, `addAllChatCardDrafts`, `toggleClicked`, `resolveSuggestion`, `showChat(for:)` and `pointsEnding(at:)`;
@@ -152,4 +151,24 @@ These three new actions are kept out of `LectureController`'s undo stack, becaus
 - `GenerateSheet` (`JobBar.swift`):
   - a new "From your chats · N cards" list (up to 5 rows, each with a kind chip) and a short note;
   - the old bullet that counted points from v1 slide threads now counts the remaining v2 points.
-- `ReviewView`: the sources bar shows "From your chat" for a card with `learningPointID`; clicking it opens the chat at that discussion. Other cards still show "Edited" / "As generated".
+- `ReviewView`: the sources bar shows "From your chat" for a card with `learningPointID`; clicking it opens the chat at that discussion. A missing source displays "From deleted chat" without a dead link. Other cards still show "Edited" / "As generated".
+
+
+## Usage accounting and diagnostics
+
+Messages API structured calls send `AIRequest.outputSchema`, including the V2
+Prepare and Review overrides. `diagnosticContext` is local metadata and is never
+added to the model prompt.
+
+Every execution attempt has a durable lecture-level `ai-usage.jsonl` record in
+addition to transport traces. It records provider calls attempted, reported
+input/output/cache tokens, status/timing, model/backend, V2 purpose/trigger and
+parent identifiers, prompt/schema character counts, and accepted/merged/rejected
+point counts. Skips record their reason without creating a job or calling AI.
+Retries remain separate attempts. Partial usage survives validation failures;
+missing usage, including missing later tool rounds, stays explicitly unknown.
+
+Settings → AI usage compares all backends and isolates Learning points v2, with a
+trigger breakdown. `lectern usage MODULE_ID LECTURE_ID --v2` exposes the same local
+records. See [AI_DIAGNOSTICS.md](../AI_DIAGNOSTICS.md) for retention, privacy,
+price-estimate limits and historical-data limitations.

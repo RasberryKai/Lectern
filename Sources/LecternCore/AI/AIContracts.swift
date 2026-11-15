@@ -17,6 +17,8 @@ public struct AIRequest: Codable, Equatable, Sendable {
     public var workingDirectory: URL
     /// Background chat distillation uses its own contract: concept-level points in Prepare, card suggestions in Review.
     public var outputSchemaOverride: String? = nil
+    /// Diagnostic attribution only; never sent as study content to a provider.
+    public var diagnosticContext: [String: String]? = nil
     var outputSchema: String? { outputSchemaOverride ?? AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true) }
     public init(jobID: UUID, kind: JobKind, model: String, prompt: String, pdf: Data?, workingDirectory: URL, systemPrompt: String? = nil) {
         self.jobID = jobID; self.kind = kind; self.model = model; self.prompt = prompt; self.systemPrompt = systemPrompt ?? PromptBuilder.systemPrompt(for: kind)

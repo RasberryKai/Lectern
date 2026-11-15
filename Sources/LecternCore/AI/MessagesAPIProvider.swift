@@ -74,6 +74,7 @@ public struct MessagesAPIProvider: AIProvider {
                 }
 
                 let effectiveModel = request.model.hasPrefix("claude-") ? request.model : model
+                trace?.setMetadata(["effectiveModel": effectiveModel])
                 let urlRequest = try Self.makeURLRequest(
                     prompt: request.prompt,
                     kind: request.kind,
@@ -83,7 +84,8 @@ public struct MessagesAPIProvider: AIProvider {
                     model: effectiveModel,
                     apiVersion: apiVersion,
                     endpoint: endpoint,
-                    maxOutputTokens: maxOutputTokens
+                    maxOutputTokens: maxOutputTokens,
+                    outputSchema: request.outputSchema
                 )
                 guard let bodySize = urlRequest.httpBody?.count, bodySize <= maximumRequestBytes else {
                     throw AIError.limit("The Messages API request exceeds Anthropic's 128 MB request limit.")
@@ -111,6 +113,8 @@ public struct MessagesAPIProvider: AIProvider {
         do {
             try Task.checkCancellation()
             let (data, response) = try await session.data(for: request)
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let reported = object["usage"] as? [String: Any] { trace?.recordUsage(Self.usage(from: reported), round: prefix, reported: true) }
             trace?.httpResponse(response, prefix: prefix ?? "http-unknown")
             let status = (response as? HTTPURLResponse)?.statusCode
             let bodySuffix = status.map { (200..<300).contains($0) } == true ? "json" : "error.txt"
@@ -268,6 +272,8 @@ public struct MessagesAPIProvider: AIProvider {
             }
             var blocks: [Int: [String: Any]] = [:], partialInputs: [Int: String] = [:]
             var usage = AIUsage(), stop: String?, stopped = false, size = 0
+            var usageReported = false
+            defer { if usageReported { trace?.recordUsage(usage, round: prefix, reported: true) } }
             var preview = ChatMessageStream()
             trace?.phase("parsing")
             for try await line in bytes.lines {
@@ -277,7 +283,10 @@ public struct MessagesAPIProvider: AIProvider {
                 guard line.hasPrefix("data:"), let event = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(5).utf8)) as? [String: Any], let type = event["type"] as? String else { continue }
                 let index = event["index"] as? Int ?? 0
                 switch type {
-                case "message_start": usage = Self.usage(from: (event["message"] as? [String: Any])?["usage"] as? [String: Any] ?? [:])
+                case "message_start":
+                    if let value = (event["message"] as? [String: Any])?["usage"] as? [String: Any] {
+                        usageReported = true; usage = Self.usage(from: value)
+                    }
                 case "content_block_start": blocks[index] = event["content_block"] as? [String: Any]
                 case "content_block_delta":
                     let delta = event["delta"] as? [String: Any] ?? [:]
@@ -289,7 +298,9 @@ public struct MessagesAPIProvider: AIProvider {
                 case "content_block_stop":
                     if let input = partialInputs[index] { blocks[index]?["input"] = try JSONSerialization.jsonObject(with: Data(input.utf8)) }
                 case "message_delta":
-                    usage = Self.usage(from: event["usage"] as? [String: Any] ?? [:], previous: usage)
+                    if let value = event["usage"] as? [String: Any] {
+                        usageReported = true; usage = Self.usage(from: value, previous: usage)
+                    }
                     stop = (event["delta"] as? [String: Any])?["stop_reason"] as? String
                 case "message_stop": stopped = true
                 case "error":
@@ -323,7 +334,8 @@ public struct MessagesAPIProvider: AIProvider {
                                apiVersion: String,
                                endpoint: URL,
                                maxOutputTokens: Int,
-                               allowsCardCreation: Bool = false) throws -> URLRequest {
+                               allowsCardCreation: Bool = false,
+                               outputSchema: String? = nil) throws -> URLRequest {
         var content: [[String: Any]] = []
         let segments = cachedPromptSegments(prompt)
         if let segments {
@@ -354,7 +366,7 @@ public struct MessagesAPIProvider: AIProvider {
             "messages": [["role": "user", "content": content]],
             "stream": kind == .ask
         ]
-        if let schemaText = AIOutputSchema.json(for: kind, allowsCardCreation: allowsCardCreation) {
+        if let schemaText = outputSchema ?? AIOutputSchema.json(for: kind, allowsCardCreation: allowsCardCreation) {
             let schemaData = Data(schemaText.utf8)
             let rawSchema = try JSONSerialization.jsonObject(with: schemaData)
             body["output_config"] = [
@@ -476,6 +488,8 @@ public struct MessagesAPIProvider: AIProvider {
         var dataLines: [String] = []
         var responseText = ""
         var usage = AIUsage()
+        var usageReported = false
+        defer { if usageReported { trace?.recordUsage(usage, round: prefix, reported: true) } }
         var sawMessageStop = false
         var stopReason: String?
         var totalBytes = 0
@@ -497,8 +511,10 @@ public struct MessagesAPIProvider: AIProvider {
             }
             if type == "message_start", let message = event["message"] as? [String: Any],
                let usageObject = message["usage"] as? [String: Any] {
+                usageReported = true
                 usage = Self.usage(from: usageObject, previous: usage)
             } else if type == "message_delta", let usageObject = event["usage"] as? [String: Any] {
+                usageReported = true
                 usage = Self.usage(from: usageObject, previous: usage)
                 let delta = event["delta"] as? [String: Any]
                 if let reason = delta?["stop_reason"] as? String { stopReason = reason }

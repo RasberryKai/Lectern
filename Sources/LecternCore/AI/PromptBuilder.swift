@@ -30,7 +30,7 @@ public enum PromptBuilder {
             Note(slide: $0.pageIndex + 1, text: $0.note)
         }
         let drafts = kind == .generate ? chatCardDrafts(lecture: lecture, pages: pages, replacesExistingCards: replacesExistingCards) : []
-        let draftIDs = Set(drafts.map(\.point))
+        let draftIDs = Set(drafts.map(\.originPointID))
         let points = (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints).filter { old in !lecture.learningPoints.contains(where: { $0.id == old.id }) }).filter {
             $0.included && !draftIDs.contains($0.id) && !$0.pages.allSatisfy { !pageSet.contains($0) }
         }.map { Point(text: $0.text, pages: $0.pages.filter(pageSet.contains), kind: $0.kind?.rawValue) }
@@ -74,7 +74,7 @@ public enum PromptBuilder {
         switch kind {
         case .generate:
             parts.append("Generate atomic, transferable study cards. Every supplied source slide must be accounted for by a card or a skipped entry with a reason. Set flag when unsure or an unavoidable rule exception exists. Never invent source slide numbers.")
-            parts.append(drafts.isEmpty ? "Set point to null on every card." : "Return every CHAT CARD DRAFT as one card with point set to its point id. You may tighten its wording to meet the card rules, but keep its concept and the student's phrasing. Write no other card that tests the same concept: the draft covers it. Set point to null on every other card.")
+            parts.append(drafts.isEmpty ? "Set point to null on every card." : "Return every CHAT CARD DRAFT as one card with point set to the UUID shown in that draft's point field. You may tighten its wording to meet the card rules, but keep its concept and the student's phrasing. Write no other card that tests the same concept: the draft covers it. Set point to null on every other card.")
             if !generationInstructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 parts.append("ADDITIONAL GENERATION INSTRUCTIONS (explicit student instructions for this generation; take precedence over other card-content guidance, including global rules, learning points, and slide notes; the output contract remains mandatory):\n\(try json(generationInstructions))")
             }
@@ -97,22 +97,58 @@ public enum PromptBuilder {
     }
     private struct Note: Encodable { var slide: Int; var text: String }
     private struct Point: Encodable { var text: String; var pages: [Int]; var kind: String? = nil }
-    public struct ChatCardDraft: Encodable, Equatable, Sendable { public var point: UUID; public var front: String; public var back: String; public var pages: [Int]; public var kind: String? }
+    public struct ChatCardDraft: Encodable, Equatable, Sendable {
+        /// Root learning point, retained as `point` for existing callers. The prompt's wire key is
+        /// `wirePointID`, which is unique for each existing descendant card.
+        public var point: UUID { originPointID }
+        var originPointID: UUID
+        public var wirePointID: UUID
+        var sourceCardID: UUID?
+        var sourceCardPages: [Int]?
+        var wasPendingDraft: Bool
+        var draftReplacesCardID: UUID?
+        public var front: String
+        public var back: String
+        public var pages: [Int]
+        public var kind: String?
+
+        private enum CodingKeys: String, CodingKey { case point, front, back, pages, kind }
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(wirePointID, forKey: .point)
+            try container.encode(front, forKey: .front)
+            try container.encode(back, forKey: .back)
+            try container.encode(pages, forKey: .pages)
+            try container.encodeIfPresent(kind, forKey: .kind)
+        }
+    }
     /// Chat card drafts on these slides that Generate must turn into cards. When the lecture's cards are
     /// being replaced, cards already made from chat points come back as drafts so they survive the replacement.
     public static func chatCardDrafts(lecture: Lecture, pages: [Int], replacesExistingCards: Bool) -> [ChatCardDraft] {
         let pageSet = Set(pages)
-        return lecture.learningPoints.compactMap { point in
-            guard point.included, let draft = point.draft else { return nil }
+        return lecture.learningPoints.flatMap { point -> [ChatCardDraft] in
+            guard point.included, let draft = point.draft else { return [] }
             let scoped = point.pages.filter(pageSet.contains)
-            guard !scoped.isEmpty else { return nil }
-            let linked = (point.cardIDs ?? []).compactMap { id in lecture.cards.first { $0.id == id && !$0.isSuperseded } }
-            if let card = linked.first {
-                guard replacesExistingCards else { return nil }
-                return ChatCardDraft(point: point.id, front: card.front, back: card.back, pages: scoped, kind: point.kind?.rawValue)
+            guard !scoped.isEmpty else { return [] }
+            let linkedIDs = Set(point.cardIDs ?? [])
+            let linked = lecture.cards.filter { card in
+                !card.isSuperseded && (linkedIDs.contains(card.id) || card.learningPointID == point.id)
             }
-            guard point.isPendingDraft, draft.replacesCardID == nil || replacesExistingCards else { return nil }
-            return ChatCardDraft(point: point.id, front: draft.front, back: draft.back, pages: scoped, kind: point.kind?.rawValue)
+            if !linked.isEmpty {
+                guard replacesExistingCards else { return [] }
+                return linked.map { card in
+                    let currentPages = card.sourcePages.filter(pageSet.contains)
+                    return ChatCardDraft(originPointID: point.id, wirePointID: card.id, sourceCardID: card.id,
+                                  sourceCardPages: card.sourcePages, wasPendingDraft: false,
+                                  draftReplacesCardID: draft.replacesCardID,
+                                  front: card.front, back: card.back, pages: currentPages.isEmpty ? scoped : currentPages, kind: point.kind?.rawValue)
+                }
+            }
+            guard point.isPendingDraft, draft.replacesCardID == nil || replacesExistingCards else { return [] }
+            return [ChatCardDraft(originPointID: point.id, wirePointID: point.id, sourceCardID: nil,
+                                  sourceCardPages: nil, wasPendingDraft: true,
+                                  draftReplacesCardID: draft.replacesCardID,
+                                  front: draft.front, back: draft.back, pages: scoped, kind: point.kind?.rawValue)]
         }
     }
     private struct CardContext: Encodable { var id: UUID; var baseRevisionID: UUID?; var front: String; var back: String; var sourceSlides: [Int] }

@@ -188,14 +188,17 @@ struct GenerateSheet: View {
 
     private var chatDrafts: [PromptBuilder.ChatCardDraft] { PromptBuilder.chatCardDrafts(lecture: lecture, pages: scope, replacesExistingCards: true) }
     private var chatPoints: [LearningPoint] {
-        (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints)).filter { $0.included && $0.pages.contains(where: { scope.contains($0) }) }
+        var seen = Set<UUID>()
+        return (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints)).filter {
+            seen.insert($0.id).inserted && $0.included && $0.pages.contains(where: { scope.contains($0) })
+        }
     }
-    /// Cards that come from explanations that clicked. Generate keeps each one and writes no competing card from the slide.
+    /// Cards that come from explanations that clicked; Generate preserves each draft.
     private var fromYourChats: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("From your chats · \(Format.count(chatDrafts.count, "card"))").font(.system(size: 13, weight: .semibold))
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(chatDrafts.prefix(5).enumerated()), id: \.element.point) { index, draft in
+                ForEach(Array(chatDrafts.prefix(5).enumerated()), id: \.element.wirePointID) { index, draft in
                     if index > 0 { Divider().overlay(Theme.border) }
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -216,7 +219,7 @@ struct GenerateSheet: View {
             }
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border))
-            Text("Each becomes a card, and Generate writes no competing card on the same concept from the slide. On these slides, the explanation that clicked takes precedence over the slide’s wording.")
+            Text("Each becomes a card. These explanations guide Generate’s wording and coverage, taking precedence over the slide’s wording.")
                 .font(Theme.caption).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -248,9 +251,11 @@ struct GenerateSheet: View {
     }
 
     private func run() async {
+        let previousJobIDs = Set(model.lecture.jobs.map(\.id))
         starting = true
         await model.generate(additionalInstructions: additionalInstructions)
         starting = false
-        if model.errorMessage == nil { dismiss() }
+        let generationStarted = model.lecture.jobs.contains { $0.kind == .generate && !previousJobIDs.contains($0.id) }
+        if generationStarted || model.errorMessage == nil { dismiss() }
     }
 }

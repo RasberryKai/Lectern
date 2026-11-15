@@ -102,13 +102,19 @@ public struct ClaudeCLIProvider: AIProvider {
                                        errorLimit: maximumErrorBytes,
                                        timeout: timeout,
                                        onText: { text in if request.chatSnapshot == nil { onEvent(.text(text)) } else { preview.append(text) } },
-                                       onLine: { tracker?.receive($0) })
+                                       onLine: { line in
+                                           tracker?.receive(line)
+                                           Self.captureReportedUsage(line, trace: trace)
+                                       })
         trace.phase("cli_execution")
+        trace.providerCallStarted()
         let result = try await withTaskCancellationHandler {
             try await invocation.run()
         } onCancel: {
             invocation.cancel()
         }
+        // Usage can exist even when the CLI exits nonzero or response validation fails.
+        Self.captureReportedUsage(result.stdout, trace: trace)
         try Task.checkCancellation()
         if result.wasCancelled { throw CancellationError() }
         if result.timedOut { throw AIError.limit("Claude Code exceeded the \(Int(timeout)) second time limit.") }
@@ -131,6 +137,16 @@ public struct ClaudeCLIProvider: AIProvider {
             return response
         }
         return try Self.parseStructuredResult(result.stdout)
+    }
+
+    private static func captureReportedUsage(_ data: Data, trace: AIInteractionTrace) {
+        if let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           envelope["usage"] != nil || envelope["modelUsage"] != nil { trace.recordUsage(usage(from: envelope), reported: true); return }
+        for line in data.split(separator: 10).reversed() {
+            guard let envelope = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  envelope["usage"] != nil || envelope["modelUsage"] != nil else { continue }
+            trace.recordUsage(usage(from: envelope), reported: true); break
+        }
     }
 
     /// Read-only status check used to ensure the CLI is authenticated through a

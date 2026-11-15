@@ -127,6 +127,16 @@ import LecternCore
             _ = try await runner.recoverInterruptedJobs()
             try await runner.retry(moduleID: id(1), lectureID: id(2), jobID: id(3)); await runner.waitUntilIdle()
             try await printJob(store: store, moduleID: id(1), lectureID: id(2), jobID: id(3))
+        case "usage":
+            let moduleID = try id(1), lectureID = try id(2)
+            let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
+            let records = try await store.usageRecords(moduleID: moduleID, lectureID: lectureID)
+            let onlyV2 = arguments.contains("--v2")
+            let summary = AIUsageSummary.summarize(records: records, legacyJobs: lecture.jobs, learningPointsOnly: onlyV2)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+            print("Attempts: \(summary.attempts); provider calls attempted: \(summary.providerCalls); skipped: \(summary.skipped); failed: \(summary.failed)")
+            print("Input: \(summary.inputTokens); output: \(summary.outputTokens); cache read: \(summary.cacheReadTokens); cache write: \(summary.cacheWriteTokens); unknown usage: \(summary.missingUsage)")
+            print(String(decoding: try encoder.encode(records.filter { !onlyV2 || $0.context["feature"] == "learningPointsV2" }), as: UTF8.self))
         case "job-logs":
             let directory = store.jobDirectory(moduleID: try id(1), lectureID: try id(2), jobID: try id(3)).appendingPathComponent("ai-logs")
             try printLogs(in: directory)
@@ -205,6 +215,7 @@ import LecternCore
     --model MODEL overrides the backend's model.
 
     demo                                     Offline end-to-end run in a new temporary library
+    usage MODULE_ID LECTURE_ID [--v2]         Usage totals and execution records across all backends
     job-logs MODULE_ID LECTURE_ID JOB_ID       Trace paths and summaries for every execution attempt
     list                                     Modules and lectures
     overview                                 Active module progress and totals

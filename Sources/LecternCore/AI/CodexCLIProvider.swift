@@ -76,6 +76,7 @@ public struct CodexCLIProvider: AIProvider {
                         turn["outputSchema"] = try JSONSerialization.jsonObject(with: Data(schema.utf8))
                     }
                     trace.phase("codex_execution")
+                    trace.providerCallStarted()
                     let turnRequestID = try connection.sendRequest("turn/start", turn)
                     let response = try await Self.receiveTurn(connection: connection, request: request, context: context,
                                                               threadID: threadID, requestID: turnRequestID, trace: trace, onEvent: forward)
@@ -200,6 +201,7 @@ public struct CodexCLIProvider: AIProvider {
                     usage = AIUsage(inputTokens: total["inputTokens"] as? Int ?? 0, outputTokens: total["outputTokens"] as? Int ?? 0,
                                     cacheCreationInputTokens: total["cacheWriteInputTokens"] as? Int,
                                     cacheReadInputTokens: total["cachedInputTokens"] as? Int)
+                    trace.recordUsage(usage, reported: true)
                 }
             case "item/tool/call":
                 guard let id = message["id"] else { throw AIError.invalidResponse("Codex sent a tool request without an ID.") }

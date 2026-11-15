@@ -146,8 +146,22 @@ public enum LectureReducer {
             let i = try index(id, in: lecture)
             guard let proposal = lecture.cards[i].proposal, proposal.state == .ready, (1...3).contains(proposal.cards.count) else { throw LectureError.invalidProposal(id) }
             if proposal.cards.count > 1 {
-                let children = proposal.cards.map { draft in Card(sourcePages: draft.sourcePages, front: draft.front, back: draft.back, flag: draft.flag, history: [CardRevision(front: draft.front, back: draft.back, author: .ai, reason: proposal.rationale, at: now)], origin: .splitFrom(cardID: id), allowedSourcePages: proposal.allowedSourcePages ?? lecture.cards[i].allowedSourcePages) }
+                let rootPointID = lecture.cards[i].learningPointID ?? lecture.learningPoints.first(where: { ($0.cardIDs ?? []).contains(id) })?.id
+                let children = proposal.cards.map { draft -> Card in
+                    var child = Card(sourcePages: draft.sourcePages, front: draft.front, back: draft.back, flag: draft.flag,
+                                     history: [CardRevision(front: draft.front, back: draft.back, author: .ai, reason: proposal.rationale, at: now)],
+                                     origin: .splitFrom(cardID: id), allowedSourcePages: proposal.allowedSourcePages ?? lecture.cards[i].allowedSourcePages)
+                    child.learningPointID = rootPointID
+                    return child
+                }
                 lecture.cards[i].supersededBy = children.map(\.id); lecture.cards[i].proposal = nil; lecture.cards.append(contentsOf: children)
+                if let rootPointID, let p = lecture.learningPoints.firstIndex(where: { $0.id == rootPointID }) {
+                    var seen = Set<UUID>()
+                    let activeLinks = (lecture.learningPoints[p].cardIDs ?? []).filter { linkedID in
+                        linkedID != id && lecture.cards.contains { $0.id == linkedID && !$0.isSuperseded }
+                    }
+                    lecture.learningPoints[p].cardIDs = (activeLinks + children.map(\.id)).filter { seen.insert($0).inserted }
+                }
             } else {
                 let draft = proposal.cards[0]
                 if lecture.cards[i].front != draft.front || lecture.cards[i].back != draft.back { lecture.cards[i].mathInterpretations = [:] }
@@ -167,6 +181,19 @@ public enum LectureReducer {
             guard lecture.jobs[j].kind == .generate else { throw LectureError.invalidMetadata("Wrong job kind") }
             let pages = lecture.jobs[j].pages
             if lecture.jobs[j].replacesExistingCards == true {
+                let removedCardIDs = Set(lecture.cards.map(\.id))
+                func invalidateSuggestions(in chat: inout LectureChat) {
+                    for messageIndex in chat.messages.indices {
+                        guard var suggestion = chat.messages[messageIndex].suggestion,
+                              suggestion.state == .pending,
+                              let target = suggestion.cardID,
+                              removedCardIDs.contains(target) else { continue }
+                        suggestion.state = .dismissed
+                        chat.messages[messageIndex].suggestion = suggestion
+                    }
+                }
+                invalidateSuggestions(in: &lecture.currentChat)
+                for chatIndex in lecture.archivedChats.indices { invalidateSuggestions(in: &lecture.archivedChats[chatIndex]) }
                 lecture.cards.removeAll()
                 lecture.skippedSlides.removeAll()
                 lecture.viewPreferences.selectedCardID = nil
@@ -182,9 +209,17 @@ public enum LectureReducer {
                 return card
             }
             lecture.cards.append(contentsOf: generated)
+            var generatedByPoint: [UUID: [UUID]] = [:]
             for card in generated {
-                guard let pointID = card.learningPointID, let p = lecture.learningPoints.firstIndex(where: { $0.id == pointID }) else { continue }
-                lecture.learningPoints[p].cardIDs = [card.id]; lecture.learningPoints[p].reviewed = true
+                if let pointID = card.learningPointID { generatedByPoint[pointID, default: []].append(card.id) }
+            }
+            let activeCardIDs = Set(lecture.cards.filter { !$0.isSuperseded }.map(\.id))
+            for (pointID, cardIDs) in generatedByPoint {
+                guard let p = lecture.learningPoints.firstIndex(where: { $0.id == pointID }) else { continue }
+                var seen = Set<UUID>()
+                lecture.learningPoints[p].cardIDs = ((lecture.learningPoints[p].cardIDs ?? []).filter(activeCardIDs.contains) + cardIDs)
+                    .filter { seen.insert($0).inserted }
+                lecture.learningPoints[p].reviewed = true
             }
             lecture.skippedSlides.append(contentsOf: skipped); lecture.jobs[j].state = .succeeded; lecture.jobs[j].finishedAt = now; lecture.jobs[j].usage = usage
         case .landProposal(let id, let cards, let rationale, let usage):

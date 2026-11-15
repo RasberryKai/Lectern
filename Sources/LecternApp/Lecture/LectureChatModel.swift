@@ -232,13 +232,26 @@ extension LectureWindowModel {
     /// Opens the chat at the discussion a learning point came from.
     func showChat(for point: LearningPoint) {
         askVisible = true; panes.openChat(mode)
-        guard let messageID = point.episodeEndMessageID ?? point.evidence?.last?.messageID,
-              let chat = ([lecture.currentChat] + lecture.archivedChats).first(where: { $0.messages.contains { $0.id == messageID } }) else { return }
-        Task {
-            if chat.id != displayedChat.id { await resumeChat(chat.id) }
-            chatScrollTarget = nil
-            chatScrollTarget = messageID
+        guard let target = chatLocation(for: point) else {
+            errorMessage = "The source chat for this card is no longer available."
+            return
         }
+        Task {
+            if target.chatID != displayedChat.id { await resumeChat(target.chatID) }
+            guard displayedChat.id == target.chatID,
+                  displayedChat.messages.contains(where: { $0.id == target.messageID }) else {
+                errorMessage = "The source chat for this card is no longer available."
+                return
+            }
+            chatScrollTarget = nil
+            chatScrollTarget = target.messageID
+        }
+    }
+    func canShowChat(for point: LearningPoint) -> Bool { chatLocation(for: point) != nil }
+    private func chatLocation(for point: LearningPoint) -> (chatID: UUID, messageID: UUID)? {
+        guard let messageID = point.episodeEndMessageID ?? point.evidence?.last?.messageID,
+              let chat = ([lecture.currentChat] + lecture.archivedChats).first(where: { $0.messages.contains { $0.id == messageID } }) else { return nil }
+        return (chat.id, messageID)
     }
     func fixFlagWithClaude(cardID: UUID) {
         guard !readOnly, runningChat == nil, !isStartingChat, let card = activeCards.first(where: { $0.id == cardID }) else { return }

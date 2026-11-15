@@ -59,15 +59,24 @@ private actor V2Gate: AIProvider {
             if request.kind == .chat { return reply }
             let saved = try await store.loadLecture(moduleID: module.id, lectureID: lectureID)
             let messages = saved.currentChat.messages
-            let user = messages.last(where: { $0.role == .user })!, last = messages.last!
+            let last = messages.last!
             let point = ChatDistillation.Point(text: "A grounded insight", pages: [1], kind: "understood",
-                evidence: [.init(messageID: user.id.uuidString, quote: "Explain this")], front: "Q?", back: "A.", endMessageID: last.id.uuidString)
+                evidence: [.init(messageID: last.id.uuidString, quote: "Explanation")], front: "Q?", back: "A.", endMessageID: last.id.uuidString)
             return AIResponse(content: String(decoding: try JSONEncoder().encode(ChatDistillation(summary: "Older discussion", closedThroughMessageID: last.id.uuidString, learningPoints: [point])), as: UTF8.self))
         }
         let runner = JobRunner(store: store, providers: [provider])
         let jobID = try await runner.chat(moduleID: module.id, lectureID: lecture.id, question: "Explain this",
             contextRefs: refs, allowsCardCreation: allowsCardCreation)
         await runner.waitUntilIdle()
+        if extractsPoints {
+            // An initial question is not evidence. A click provides the positive reaction.
+            let initial = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+            #expect(initial.learningPoints.isEmpty)
+            #expect(await provider.requests.map(\.kind) == [.chat])
+            let answerID = try #require(initial.currentChat.messages.last(where: { $0.role == .assistant })?.id)
+            try await runner.setChatAnswerClicked(moduleID: module.id, lectureID: lecture.id, messageID: answerID, clicked: true)
+            await runner.waitUntilIdle()
+        }
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(saved.jobs.first(where: { $0.id == jobID })?.state == .succeeded)
         #expect(saved.learningPoints.map(\.text) == (extractsPoints ? ["A grounded insight"] : []))

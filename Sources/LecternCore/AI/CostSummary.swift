@@ -18,9 +18,21 @@ public enum APIPricing {
         let regular = max(0, usage.inputTokens - creation - read)
         return (Double(regular) * 4 + Double(creation) * 5 + Double(read) * 0.20 + Double(max(0, usage.outputTokens)) * 20) / 1_000_000
     }
-    public static func summarize(_ jobs: [Job]) -> APICostSummary {
+    public static func summarize(_ jobs: [Job], records: [AIUsageAttempt] = []) -> APICostSummary {
         var result = APICostSummary()
-        for job in jobs where job.backend == .messagesAPI {
+        let recorded = Set(records.map(\.jobID))
+        for record in Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last }).values where record.backend == .messagesAPI && record.status != "skipped" {
+            guard let usage = record.usage else {
+                if record.providerCalls > 0 || record.status == "running" { result.unpricedJobs += 1 }
+                continue
+            }
+            result.inputTokens += usage.inputTokens; result.outputTokens += usage.outputTokens
+            if record.hasIncompleteUsage { result.unpricedJobs += 1; continue }
+            if let cost = usage.costUSD, cost.isFinite, cost >= 0 { result.reportedUSD += cost }
+            else if let cost = estimatedUSD(usage: usage, model: record.model) { result.estimatedUSD += cost }
+            else { result.unpricedJobs += 1 }
+        }
+        for job in jobs where job.backend == .messagesAPI && !recorded.contains(job.id) {
             guard let usage = job.usage else {
                 if job.state != .running { result.unpricedJobs += 1 }; continue
             }

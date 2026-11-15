@@ -6,6 +6,17 @@ import CryptoKit
 enum AIDiagnostics {
     @TaskLocal static var current: AIInteractionTrace?
 
+    static func recordSkipped(jobID: UUID, backend: AIBackend, kind: JobKind, model: String,
+                              workingDirectory: URL, context: [String: String], reason: String) {
+        let now = Date()
+        var record = AIUsageAttempt(jobID: jobID, backend: backend, model: model, kind: kind,
+                                    status: "skipped", startedAt: now, finishedAt: now,
+                                    context: context, details: ["reason": reason])
+        record = AIInteractionTrace.sanitizedAccounting(record)
+        do { try AIUsageLedger.append(record, workingDirectory: workingDirectory) }
+        catch { FileHandle.standardError.write(Data("Lectern: could not record skipped AI trigger: \(error.localizedDescription)\n".utf8)) }
+    }
+
     static func withTrace<T>(request: AIRequest, backend: AIBackend,
                              isolation: isolated (any Actor)? = #isolation,
                              operation: (AIInteractionTrace) async throws -> T) async throws -> T {
@@ -42,10 +53,19 @@ final class AIInteractionTrace: @unchecked Sendable {
     private var warned = false
     private let fileLimit: Int
     private let totalLimit: Int
+    private var accounting: AIUsageAttempt
+    private let workingDirectory: URL
+    private var usageByRound: [String: AIUsage] = [:]
+    private var reportedUsageRounds = Set<String>()
+    private var finished = false
 
     init(request: AIRequest, backend: AIBackend, fileLimit: Int = 16 * 1_024 * 1_024,
          totalLimit: Int = 64 * 1_024 * 1_024) {
         jobID = request.jobID
+        workingDirectory = request.workingDirectory
+        accounting = AIUsageAttempt(jobID: request.jobID, backend: backend, model: request.model, kind: request.kind,
+                                    context: request.diagnosticContext ?? [:])
+        accounting.usageReportedCalls = 0
         self.fileLimit = fileLimit
         self.totalLimit = totalLimit
         secrets = ProcessInfo.processInfo.environment.compactMap { key, value in
@@ -59,6 +79,9 @@ final class AIInteractionTrace: @unchecked Sendable {
         }
         let stamp = ISO8601DateFormatter().string(from: startedAt).replacingOccurrences(of: ":", with: "-")
         directory = root.appendingPathComponent("\(stamp)-\(UUID().uuidString)", isDirectory: true)
+        accounting.id = directory.lastPathComponent
+        accounting.details = ["promptCharacters": String(request.prompt.count), "systemCharacters": String(request.systemPrompt.count),
+                              "schemaCharacters": String(request.outputSchema?.count ?? 0)]
         summary = ["schemaVersion": 1, "jobID": request.jobID.uuidString, "attemptID": directory.lastPathComponent,
                    "backend": backend.rawValue, "kind": request.kind.rawValue, "requestedModel": request.model,
                    "workingDirectory": request.workingDirectory.path, "startedAt": Self.timestamp(startedAt),
@@ -73,15 +96,85 @@ final class AIInteractionTrace: @unchecked Sendable {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             available = true
         } catch { warn(error) }
+        summary["context"] = accounting.context
+        summary["details"] = accounting.details
+        summary["providerCalls"] = 0
+        summary["promptCharacters"] = request.prompt.count
+        summary["schemaCharacters"] = request.outputSchema?.count ?? 0
         persistSummary()
+        persistAccounting()
         writeJSON("request.json", ["jobID": request.jobID.uuidString, "kind": request.kind.rawValue,
                                   "model": request.model, "systemPrompt": request.systemPrompt, "prompt": request.prompt,
                                   "workingDirectory": request.workingDirectory.path,
                                   "pdfBytes": request.pdf?.count ?? 0,
                                   "pdfSHA256": request.pdf.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() } ?? "",
+                                  "outputSchema": request.outputSchema ?? "",
+                                  "diagnosticContext": request.diagnosticContext ?? [:],
                                   "chatSnapshot": request.chatSnapshot.flatMap { try? JSONEncoder().encode($0) }
                                     .flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? NSNull()])
         record("interaction_started")
+    }
+
+    /// Metadata must be small scalar counters/IDs, never another copy of study content.
+    func setMetadata(_ fields: [String: Any]) {
+        lock.lock(); defer { lock.unlock() }
+        for (key, value) in fields {
+            let clean = String(describing: sanitize(value)).prefix(512)
+            accounting.details[key] = String(clean)
+        }
+        summary["details"] = accounting.details
+        persistSummary()
+    }
+
+    func providerCallStarted() {
+        lock.lock(); defer { lock.unlock() }
+        accounting.providerCalls += 1
+        summary["providerCalls"] = accounting.providerCalls
+        persistSummary(); persistAccounting()
+        record("provider_call_started", ["number": accounting.providerCalls])
+    }
+
+    /// A round replaces its earlier partial count; different API rounds add together.
+    func recordUsage(_ usage: AIUsage, round: String? = nil, reported: Bool = false) {
+        lock.lock(); defer { lock.unlock() }
+        if reported {
+            reportedUsageRounds.insert(round ?? "invocation")
+            accounting.usageReportedCalls = reportedUsageRounds.count
+            summary["usageReportedCalls"] = reportedUsageRounds.count
+        }
+        guard reported || usage.inputTokens > 0 || usage.outputTokens > 0 || usage.costUSD != nil ||
+                usage.cacheReadInputTokens != nil || usage.cacheCreationInputTokens != nil else { return }
+        if let round {
+            usageByRound[round] = usage
+            var total = AIUsage()
+            for value in usageByRound.values {
+                total.inputTokens += value.inputTokens; total.outputTokens += value.outputTokens
+                total.cacheReadInputTokens = (total.cacheReadInputTokens ?? 0) + (value.cacheReadInputTokens ?? 0)
+                total.cacheCreationInputTokens = (total.cacheCreationInputTokens ?? 0) + (value.cacheCreationInputTokens ?? 0)
+            }
+            let costs = usageByRound.values.compactMap(\.costUSD)
+            if costs.count == usageByRound.count { total.costUSD = costs.reduce(0, +) }
+            accounting.usage = total
+        } else { accounting.usage = usage }
+        if let value = accounting.usage, let bytes = try? JSONEncoder().encode(value), let json = try? JSONSerialization.jsonObject(with: bytes) { summary["usage"] = json }
+        persistSummary(); persistAccounting()
+    }
+
+    static func sanitizedAccounting(_ record: AIUsageAttempt, secrets: [String]? = nil) -> AIUsageAttempt {
+        let credentials = secrets ?? ProcessInfo.processInfo.environment.compactMap { key, value in
+            Self.isSecretKey(key) && value.count >= 4 ? value : nil
+        }
+        var safe = record
+        safe.model = Self.redact(safe.model, secrets: credentials)
+        safe.context = Self.sanitize(safe.context, secrets: credentials) as? [String: String] ?? [:]
+        safe.details = Self.sanitize(safe.details, secrets: credentials) as? [String: String] ?? [:]
+        return safe
+    }
+
+    private func persistAccounting() {
+        let safe = Self.sanitizedAccounting(accounting, secrets: secrets)
+        do { try AIUsageLedger.append(safe, workingDirectory: workingDirectory) }
+        catch { warn(error) }
     }
 
     func registerSecret(_ secret: String) {
@@ -115,6 +208,7 @@ final class AIInteractionTrace: @unchecked Sendable {
     }
 
     func response(_ response: AIResponse) {
+        recordUsage(response.usage)
         if let data = try? JSONEncoder().encode(response), let json = try? JSONSerialization.jsonObject(with: data) {
             writeJSON("response.json", json)
         }
@@ -175,6 +269,7 @@ final class AIInteractionTrace: @unchecked Sendable {
     func httpRequest(_ request: URLRequest) -> String {
         lock.lock(); defer { lock.unlock() }
         httpCount += 1
+        providerCallStarted()
         let prefix = String(format: "http-%02d", httpCount)
         // Never serialize all headers: URLRequest contains the API key.
         let headers = ["anthropic-version", "anthropic-beta", "content-type", "accept"].reduce(into: [String: String]()) {
@@ -200,7 +295,11 @@ final class AIInteractionTrace: @unchecked Sendable {
 
     func finish(status: String, error: Error? = nil) {
         lock.lock(); defer { lock.unlock() }
+        guard !finished else { return }; finished = true
         for filename in Array(pending.keys) { flush(filename) }
+        accounting.status = status; accounting.finishedAt = Date()
+        accounting.details["durationMilliseconds"] = String(Int(Date().timeIntervalSince(startedAt) * 1_000))
+        summary["details"] = accounting.details
         summary["status"] = status
         summary["finishedAt"] = Self.timestamp(Date())
         summary["durationMilliseconds"] = Int(Date().timeIntervalSince(startedAt) * 1_000)
@@ -209,7 +308,7 @@ final class AIInteractionTrace: @unchecked Sendable {
             summary["error"] = sanitize(errorDetails(error))
         }
         record("interaction_finished", ["status": status, "phase": summary["phase"] ?? "unknown"])
-        persistSummary()
+        persistSummary(); persistAccounting()
     }
 
     private func errorDetails(_ error: Error, depth: Int = 0) -> [String: Any] {
@@ -280,20 +379,22 @@ final class AIInteractionTrace: @unchecked Sendable {
         persistSummary()
     }
 
-    private func sanitize(_ value: Any) -> Any {
+    private func sanitize(_ value: Any) -> Any { Self.sanitize(value, secrets: secrets) }
+
+    private static func sanitize(_ value: Any, secrets: [String]) -> Any {
         if let object = value as? [String: Any] {
             return object.mapValuesWithKeys { key, value in
                 if Self.isSecretKey(key) { return "[REDACTED]" }
                 if key == "data", let base64 = value as? String, object["type"] as? String == "base64" {
                     return "[binary omitted; \(base64.utf8.count) base64 bytes]"
                 }
-                return sanitize(value)
+                return sanitize(value, secrets: secrets)
             }
         }
-        if let array = value as? [Any] { return array.map(sanitize) }
+        if let array = value as? [Any] { return array.map { sanitize($0, secrets: secrets) } }
         if let string = value as? String {
             if string.hasPrefix("data:image/") { return "[image data omitted; \(string.utf8.count) encoded bytes]" }
-            return redact(string)
+            return redact(string, secrets: secrets)
         }
         return value
     }
@@ -305,7 +406,9 @@ final class AIInteractionTrace: @unchecked Sendable {
 
     private static let credentialKeyPattern = #"(?:[A-Za-z0-9_-]*(?:api[_-]?key|authorization|password|secret|credential|private[_-]?key|cookie)[A-Za-z0-9_-]*|[A-Za-z0-9_-]*token)"#
 
-    private func redact(_ text: String) -> String {
+    private func redact(_ text: String) -> String { Self.redact(text, secrets: secrets) }
+
+    private static func redact(_ text: String, secrets: [String]) -> String {
         var result = text
         for secret in secrets.sorted(by: { $0.count > $1.count }) { result = result.replacingOccurrences(of: secret, with: "[REDACTED]") }
         // Raw stdout/SSE can itself contain credential-shaped JSON fields.

@@ -15,6 +15,17 @@ struct LearningPointDrawer: View {
 
     private var points: [LearningPoint] { model.newChatLearningPoints }
     private var draftCount: Int { points.filter { $0.draft != nil }.count }
+    private var legacyCount: Int { points.count - draftCount }
+    private var bulkActionTitle: String {
+        if draftCount == 0 { return "Keep all" }
+        if legacyCount == 0 { return "Add all" }
+        return "Add drafts + keep"
+    }
+    private var bulkActionHelp: String {
+        if draftCount == 0 { return "Keep older learning points for Generate; this doesn't create cards" }
+        if legacyCount == 0 { return "Add every card draft to your cards" }
+        return "Add every card draft and keep older learning points for Generate"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -65,11 +76,11 @@ struct LearningPointDrawer: View {
             }
             .buttonStyle(.plain)
             .help(expanded ? "Collapse" : "Show the cards drafted from explanations that worked for you")
-            .accessibilityLabel("\(points.count) card drafts, \(expanded ? "expanded" : "collapsed")")
+            .accessibilityLabel("\(points.count) learning points for your cards, \(expanded ? "expanded" : "collapsed")")
             if expanded {
-                Button("Add all") { Task { await model.addAllChatCardDrafts() } }
+                Button(bulkActionTitle) { Task { await model.addAllChatCardDrafts() } }
                     .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.ai)
-                    .help("Add every draft to your cards").disabled(model.readOnly)
+                    .help(bulkActionHelp).disabled(model.readOnly)
             }
             Button { withAnimation(.snappy(duration: 0.22)) { expanded.toggle() } } label: {
                 Image(systemName: "chevron.down").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.quiet)

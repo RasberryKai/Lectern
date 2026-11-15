@@ -7,7 +7,7 @@ struct SettingsView: View {
         TabView {
             AISettingsTab().tabItem { Label("AI", systemImage: "sparkles") }
             RulesTab().tabItem { Label("Card rules", systemImage: "text.book.closed") }
-            UsageTab().tabItem { Label("API usage", systemImage: "dollarsign.circle") }
+            UsageTab().tabItem { Label("AI usage", systemImage: "chart.bar") }
             LibraryTab().tabItem { Label("Library", systemImage: "books.vertical") }
             KeyboardShortcutsTab().tabItem { Label("Shortcuts", systemImage: "keyboard") }
         }
@@ -246,42 +246,115 @@ private struct RulesTab: View {
 
 private struct UsageTab: View {
     @Environment(AppModel.self) private var model
-    @State private var summary: APICostSummary?
+    @State private var jobs: [Job] = []
+    @State private var records: [AIUsageAttempt] = []
+    @State private var loading = true
+    @State private var learningPointsOnly = false
     @State private var error: String?
 
+    private var summary: AIUsageSummary {
+        AIUsageSummary.summarize(records: records, legacyJobs: jobs, learningPointsOnly: learningPointsOnly)
+    }
+    private var apiCost: APICostSummary { APIPricing.summarize(jobs, records: records) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Anthropic API spend").font(.system(size: 14, weight: .semibold))
-            if let summary {
-                Text(Format.usd(summary.totalUSD)).font(Theme.serif(34))
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
-                    GridRow { Text("Reported by the API"); Text(Format.usd(summary.reportedUSD)).monospacedDigit() }
-                    GridRow { Text("Estimated from tokens"); Text(Format.usd(summary.estimatedUSD)).monospacedDigit() }
-                    GridRow { Text("Jobs without a price"); Text("\(summary.unpricedJobs)").monospacedDigit() }
-                    GridRow { Text("Input tokens"); Text(summary.inputTokens.formatted()).monospacedDigit() }
-                    GridRow { Text("Output tokens"); Text(summary.outputTokens.formatted()).monospacedDigit() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("AI usage").font(.system(size: 14, weight: .semibold))
+                    Spacer()
+                    Button("Refresh") { Task { await load() } }.disabled(loading)
                 }
-                .font(Theme.body)
-                Text("Covers API-key jobs only. Claude and Codex CLI jobs use their respective accounts and aren't counted. Estimates use published prices current on 2 Nov 2026 and are not an invoice; failed or cancelled requests can still be charged without usage data.")
+                Picker("Scope", selection: $learningPointsOnly) {
+                    Text("All AI").tag(false)
+                    Text("Learning points v2").tag(true)
+                }.pickerStyle(.segmented)
+                if learningPointsOnly {
+                    Text("Background learning-point and Review suggestion checks. Full card generation is included under All AI.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                }
+                if loading { ProgressView() }
+                if let error { Text(error).foregroundStyle(Theme.bad) }
+                Grid(alignment: .leading, horizontalSpacing: 22, verticalSpacing: 7) {
+                    row("Execution attempts", summary.attempts)
+                    row("Provider calls attempted", summary.providerCalls)
+                    row("Skipped checks", summary.skipped)
+                    row("Failed or cancelled attempts", summary.failed)
+                    row("Input tokens", summary.inputTokens)
+                    row("Output tokens", summary.outputTokens)
+                    row("Cache read tokens", summary.cacheReadTokens)
+                    row("Cache write tokens", summary.cacheWriteTokens)
+                    row("Attempts with unknown usage", summary.missingUsage)
+                    if learningPointsOnly {
+                        row("Learning points added", summary.pointsAdded)
+                        row("Learning points merged", summary.pointsMerged)
+                        row("Learning points rejected", summary.pointsRejected)
+                    }
+                }.font(Theme.body)
+                Divider()
+                Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 7) {
+                    GridRow {
+                        Text("Backend"); Text("Calls"); Text("Input"); Text("Output")
+                    }.font(.system(size: 11, weight: .semibold))
+                    ForEach(AIBackend.allCases, id: \.self) { backend in
+                        let value = AIUsageSummary.summarize(records: records, legacyJobs: jobs, learningPointsOnly: learningPointsOnly, backend: backend)
+                        GridRow {
+                            Text(backendLabel(backend))
+                            Text(value.providerCalls.formatted())
+                            Text(value.inputTokens.formatted())
+                            Text(value.outputTokens.formatted())
+                        }
+                    }
+                }.font(Theme.small).monospacedDigit()
+                if learningPointsOnly {
+                    DisclosureGroup("What triggered the checks") {
+                        Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 6) {
+                            GridRow { Text("Trigger"); Text("Calls"); Text("Skipped") }
+                            ForEach(["answer", "clicked", "newChat", "switchChat", "idle", "chatEnded"], id: \.self) { trigger in
+                                let matching = records.filter { $0.context["feature"] == "learningPointsV2" && $0.context["trigger"] == trigger }
+                                GridRow {
+                                    Text(triggerLabel(trigger))
+                                    Text(matching.reduce(0) { $0 + $1.providerCalls }.formatted())
+                                    Text(matching.filter { $0.status == "skipped" }.count.formatted())
+                                }
+                            }
+                        }.padding(.top, 6).font(Theme.small)
+                    }
+                } else {
+                    Text("Anthropic API spend · \(Format.usd(apiCost.totalUSD))").font(.system(size: 13, weight: .semibold))
+                    Text("\(apiCost.unpricedJobs) API attempts have no price. CLI tokens are included above; subscription cost and quota percentages are not available.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                }
+                Text("Totals include reported usage from failed attempts and retries. Unknown usage is excluded from token totals. Input includes cache reads and writes; the cache rows are a breakdown, not extra tokens. One CLI invocation may contain several internal model steps. Historical jobs have less complete call counts; V2 breakdowns start with the new logs.")
                     .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-            } else if let error {
-                Text(error).foregroundStyle(Theme.bad)
-            } else {
-                ProgressView()
-            }
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .task { await load() }
+            }.padding(.trailing, 8)
+        }.frame(maxWidth: .infinity, alignment: .leading).task { await load() }
     }
 
+    private func row(_ label: String, _ value: Int) -> some View {
+        GridRow { Text(label); Text(value.formatted()).monospacedDigit() }
+    }
+    private func backendLabel(_ backend: AIBackend) -> String {
+        switch backend { case .claudeCLI: "Claude CLI"; case .codexCLI: "Codex CLI"; case .messagesAPI: "Messages API" }
+    }
+    private func triggerLabel(_ trigger: String) -> String {
+        switch trigger {
+        case "answer": "Answer"; case "clicked": "Clicked"; case "newChat": "New chat"
+        case "switchChat": "Switch chat"; case "idle": "Idle reopen"; default: "Chat ended"
+        }
+    }
     private func load() async {
+        loading = true; error = nil
+        defer { loading = false }
         do {
-            var jobs: [Job] = []
+            var allJobs: [Job] = [], allRecords: [AIUsageAttempt] = []
             for module in try await model.store.modules() {
-                for lecture in try await model.store.lectures(in: module.id) { jobs += lecture.jobs }
+                for lecture in try await model.store.lectures(in: module.id) {
+                    allJobs += lecture.jobs
+                    allRecords += try await model.store.usageRecords(moduleID: module.id, lectureID: lecture.id)
+                }
             }
-            summary = APIPricing.summarize(jobs)
+            jobs = allJobs; records = allRecords
         } catch { self.error = error.localizedDescription }
     }
 }
