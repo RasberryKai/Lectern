@@ -6,7 +6,7 @@ One idea per card.
 MODULE INSTRUCTIONS:
 "Interpretation over formulas."
 
-INCLUDED LEARNING POINTS (the student found this hard; test it without duplicating covered cards):
+INCLUDED LEARNING POINTS (explanations from the student's chat that worked where the slide didn't; write cards for these from the explanation, not the slide's wording, without duplicating covered cards. misconception: a contrast card that tests the trap. ownWords: keep the student's phrasing.):
 [{"pages":[1],"text":"Parameter vs statistic."}]
 
 SLIDE NOTES (highest content precedence):
@@ -19,5 +19,7 @@ SOURCE CONTEXT: lecture "Inference"; original source slides [1]. Read input.pdf,
 
 Generate atomic, transferable study cards. Every supplied source slide must be accounted for by a card or a skipped entry with a reason. Set flag when unsure or an unavoidable rule exception exists. Never invent source slide numbers.
 
+Set point to null on every card.
+
 OUTPUT CONTRACT: return only JSON conforming to:
-{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]}}}},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}
+{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag","point"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]},"point":{"type":["string","null"]}}}},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}

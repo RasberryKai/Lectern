@@ -322,7 +322,12 @@ private struct CardDetail: View {
                     }.padding(16).frame(width: 220)
                 }
             Spacer()
-            Text(card.history.count > 1 ? "Edited" : "As generated").foregroundStyle(Theme.quiet)
+            if let point = card.learningPointID.flatMap({ id in model.lecture.learningPoints.first { $0.id == id } }) {
+                Button { model.showChat(for: point) } label: { Label("From your chat", systemImage: "bubble.left.and.text.bubble.right") }
+                    .buttonStyle(.plain).foregroundStyle(Theme.ai).help("Show where this explanation clicked")
+            } else {
+                Text(card.history.count > 1 ? "Edited" : "As generated").foregroundStyle(Theme.quiet)
+            }
         }
         .font(Theme.small).padding(.horizontal, 26).padding(.vertical, 10)
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }

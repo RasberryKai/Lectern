@@ -45,6 +45,7 @@ struct LectureWindow: View {
             if let mode = app.requestedModes.removeValue(forKey: ref.lectureID) { windowModel.setMode(mode) }
             app.register(windowModel)
             model = windowModel
+            if !windowModel.readOnly { Task { await session.endIdleChatDiscussions(backend: app.settings.backend, model: app.settings.selectedModel) } }
         } catch {
             loadError = error.localizedDescription
         }

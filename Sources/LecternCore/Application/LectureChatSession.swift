@@ -15,14 +15,17 @@ extension LectureSession {
             if let attachments { latest.currentChat.draftAttachments = attachments }
         }; try await refresh()
     }
-    public func newChat() async throws {
+    public func newChat(backend: AIBackend = .claudeCLI, model: String = "opus") async throws {
+        let leaving = lecture.currentChat.id
         _ = try await store.updateLecture(moduleID: lecture.moduleID, lectureID: lecture.id) { latest in
             guard !latest.jobs.contains(where: { ($0.kind == .chat || $0.kind == .ask) && $0.state == .running }) else { throw AIError.configuration("Stop the answer before starting another chat.") }
             if !latest.currentChat.messages.isEmpty || !latest.currentChat.draft.isEmpty || !latest.currentChat.draftAttachments.isEmpty { latest.archivedChats.insert(latest.currentChat, at: 0) }
             latest.currentChat = LectureChat()
         }; try await refresh()
+        try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: leaving, backend: backend, model: model)
     }
-    public func openChat(id: UUID) async throws {
+    public func openChat(id: UUID, backend: AIBackend = .claudeCLI, model: String = "opus") async throws {
+        let leaving = lecture.currentChat.id
         _ = try await store.updateLecture(moduleID: lecture.moduleID, lectureID: lecture.id) { latest in
             guard !latest.jobs.contains(where: { ($0.kind == .chat || $0.kind == .ask) && $0.state == .running }) else { throw AIError.configuration("Stop the answer before switching chats.") }
             guard let index = latest.archivedChats.firstIndex(where: { $0.id == id }) else { return }
@@ -30,6 +33,17 @@ extension LectureSession {
             if !latest.currentChat.messages.isEmpty || !latest.currentChat.draft.isEmpty || !latest.currentChat.draftAttachments.isEmpty { latest.archivedChats.insert(latest.currentChat, at: 0) }
             latest.currentChat = chat
         }; try await refresh()
+        if leaving != lecture.currentChat.id {
+            try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: leaving, backend: backend, model: model)
+        }
+    }
+    /// A chat left untouched for 15 minutes has ended its last discussion.
+    public func endIdleChatDiscussions(backend: AIBackend = .claudeCLI, model: String = "opus") async {
+        try? await runner.endChatDiscussions(moduleID: lecture.moduleID, lectureID: lecture.id, chatID: lecture.currentChat.id, idleFor: 15 * 60, backend: backend, model: model)
+    }
+    public func setAnswerClicked(messageID: UUID, clicked: Bool, backend: AIBackend = .claudeCLI, model: String = "opus") async throws {
+        try await runner.setChatAnswerClicked(moduleID: lecture.moduleID, lectureID: lecture.id, messageID: messageID, clicked: clicked, backend: backend, model: model)
+        try await refresh()
     }
     public func deleteArchivedChat(id: UUID) async throws {
         _ = try await store.updateLecture(moduleID: lecture.moduleID, lectureID: lecture.id) { $0.archivedChats.removeAll { $0.id == id } }; try await refresh()

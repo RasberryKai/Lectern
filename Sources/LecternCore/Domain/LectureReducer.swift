@@ -95,6 +95,11 @@ public enum LectureAction: Equatable, Sendable {
     case setViewPreferences(ViewPreferences)
     case markExported(cardIDs: [UUID])
     case markExportEntries([ExportEntry])
+    /// Turns a chat learning point's draft into a card, or applies it to the card it improves.
+    case acceptLearningPointDraft(pointID: UUID, front: String, back: String)
+    /// The student doesn't want a card for this point; it no longer feeds Generate either.
+    case skipLearningPoint(pointID: UUID)
+    case resolveCardSuggestion(chatID: UUID, messageID: UUID, apply: Bool)
 }
 public enum LectureReducer {
     /// Reduces a copy first: failed validation never leaves partial mutations behind.
@@ -165,8 +170,22 @@ public enum LectureReducer {
                 lecture.cards.removeAll()
                 lecture.skippedSlides.removeAll()
                 lecture.viewPreferences.selectedCardID = nil
+                // Chat points whose cards are gone wait in the drawer again unless this generation re-creates them.
+                for p in lecture.learningPoints.indices where !(lecture.learningPoints[p].cardIDs ?? []).isEmpty {
+                    lecture.learningPoints[p].cardIDs = nil
+                    if lecture.learningPoints[p].draft != nil && lecture.learningPoints[p].included { lecture.learningPoints[p].reviewed = false }
+                }
             }
-            lecture.cards.append(contentsOf: drafts.map { Card(sourcePages: $0.sourcePages, front: $0.front, back: $0.back, flag: $0.flag, history: [CardRevision(front: $0.front, back: $0.back, author: .ai, at: now)], origin: .generated(jobID: id), allowedSourcePages: pages) })
+            let generated = drafts.map { draft in
+                var card = Card(sourcePages: draft.sourcePages, front: draft.front, back: draft.back, flag: draft.flag, history: [CardRevision(front: draft.front, back: draft.back, author: .ai, reason: draft.learningPointID == nil ? nil : "From your chat", at: now)], origin: .generated(jobID: id), allowedSourcePages: pages)
+                card.learningPointID = draft.learningPointID
+                return card
+            }
+            lecture.cards.append(contentsOf: generated)
+            for card in generated {
+                guard let pointID = card.learningPointID, let p = lecture.learningPoints.firstIndex(where: { $0.id == pointID }) else { continue }
+                lecture.learningPoints[p].cardIDs = [card.id]; lecture.learningPoints[p].reviewed = true
+            }
             lecture.skippedSlides.append(contentsOf: skipped); lecture.jobs[j].state = .succeeded; lecture.jobs[j].finishedAt = now; lecture.jobs[j].usage = usage
         case .landProposal(let id, let cards, let rationale, let usage):
             let j = try jobIndex(id, in: lecture)
@@ -241,6 +260,59 @@ public enum LectureReducer {
                 guard lecture.cards[i].history.contains(where: { $0.id == entry.revisionID }) else { throw LectureError.invalidMetadata("Export revision is missing") }
                 lecture.cards[i].exported = ExportMark(revisionID: entry.revisionID, date: now)
             }
+        case .acceptLearningPointDraft(let id, let front, let back):
+            guard let p = lecture.learningPoints.firstIndex(where: { $0.id == id }), let draft = lecture.learningPoints[p].draft,
+                  (lecture.learningPoints[p].cardIDs ?? []).isEmpty else { throw LectureError.invalidMetadata("This card draft is no longer available.") }
+            let front = front.trimmingCharacters(in: .whitespacesAndNewlines), back = back.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !front.isEmpty, !back.isEmpty else { throw LectureError.invalidMetadata("Both sides need text.") }
+            let point = lecture.learningPoints[p]
+            let cardID: UUID
+            if let target = draft.replacesCardID, let i = lecture.cards.firstIndex(where: { $0.id == target && !$0.isSuperseded }) {
+                if lecture.cards[i].front != front || lecture.cards[i].back != back { lecture.cards[i].mathInterpretations = [:] }
+                lecture.cards[i].front = front; lecture.cards[i].back = back
+                lecture.cards[i].sourcePages = Array(Set(lecture.cards[i].sourcePages + point.pages)).sorted()
+                if let allowed = lecture.cards[i].allowedSourcePages { lecture.cards[i].allowedSourcePages = Array(Set(allowed + point.pages)).sorted() }
+                lecture.cards[i].verdict = .unreviewed; lecture.cards[i].learningPointID = id
+                appendRevision(&lecture.cards[i], author: .ai, reason: "From your chat", now: now)
+                cardID = target
+            } else {
+                var card = Card(sourcePages: point.pages, front: front, back: back,
+                                history: [CardRevision(front: front, back: back, author: .ai, reason: "From your chat", at: now)])
+                card.learningPointID = id
+                lecture.cards.append(card); cardID = card.id
+            }
+            lecture.learningPoints[p].cardIDs = [cardID]; lecture.learningPoints[p].reviewed = true
+        case .skipLearningPoint(let id):
+            guard let p = lecture.learningPoints.firstIndex(where: { $0.id == id }) else { return }
+            lecture.learningPoints[p].included = false; lecture.learningPoints[p].reviewed = true
+        case .resolveCardSuggestion(let chatID, let messageID, let apply):
+            func resolve(_ chat: inout LectureChat) throws {
+                guard let m = chat.messages.firstIndex(where: { $0.id == messageID }), var suggestion = chat.messages[m].suggestion, suggestion.state == .pending else {
+                    throw LectureError.invalidMetadata("This suggestion is no longer available.")
+                }
+                defer { chat.messages[m].suggestion = suggestion }
+                guard apply else { suggestion.state = .dismissed; return }
+                if let target = suggestion.cardID {
+                    let i = try index(target, in: lecture)
+                    guard !lecture.cards[i].isSuperseded, lecture.cards[i].currentRevisionID == suggestion.baseRevisionID else {
+                        throw LectureError.invalidMetadata("This card changed after the suggestion was made. Dismiss it, or ask again.")
+                    }
+                    if lecture.cards[i].front != suggestion.front || lecture.cards[i].back != suggestion.back { lecture.cards[i].mathInterpretations = [:] }
+                    lecture.cards[i].front = suggestion.front; lecture.cards[i].back = suggestion.back
+                    lecture.cards[i].sourcePages = suggestion.sourcePages.isEmpty ? lecture.cards[i].sourcePages : suggestion.sourcePages
+                    if let allowed = lecture.cards[i].allowedSourcePages { lecture.cards[i].allowedSourcePages = Array(Set(allowed + lecture.cards[i].sourcePages)).sorted() }
+                    lecture.cards[i].verdict = .unreviewed
+                    appendRevision(&lecture.cards[i], author: .ai, reason: "Suggested in Review chat", now: now)
+                } else {
+                    let card = Card(sourcePages: suggestion.sourcePages, front: suggestion.front, back: suggestion.back,
+                                    history: [CardRevision(front: suggestion.front, back: suggestion.back, author: .ai, reason: "Suggested in Review chat", at: now)])
+                    lecture.cards.append(card); suggestion.createdCardID = card.id
+                }
+                suggestion.state = .applied
+            }
+            if lecture.currentChat.id == chatID { var chat = lecture.currentChat; try resolve(&chat); lecture.currentChat = chat }
+            else if let c = lecture.archivedChats.firstIndex(where: { $0.id == chatID }) { var chat = lecture.archivedChats[c]; try resolve(&chat); lecture.archivedChats[c] = chat }
+            else { throw LectureError.invalidMetadata("This chat no longer exists.") }
         case .markExported(let ids):
             for id in ids {
                 let i = try index(id, in: lecture)
@@ -280,7 +352,8 @@ public struct LectureController: Sendable {
         let before = lecture
         try LectureReducer.reduce(&lecture, action: action, now: now)
         switch action {
-        case .startJob, .updateJob, .landGeneration, .landProposal, .applyChatEdits, .undoChatEdits, .upsertThread, .markExported, .markExportEntries: return
+        case .startJob, .updateJob, .landGeneration, .landProposal, .applyChatEdits, .undoChatEdits, .upsertThread, .markExported, .markExportEntries,
+             .acceptLearningPointDraft, .skipLearningPoint, .resolveCardSuggestion: return
         default: break
         }
         if before != lecture { undoStack.append(UndoEntry(before: before, after: lecture)); if undoStack.count > 50 { undoStack.removeFirst() } }

@@ -131,7 +131,8 @@ public struct CardDraft: Codable, Equatable, Sendable {
     public var back: String
     public var sourcePages: [Int]
     public var flag: String?
-    public init(front: String, back: String, sourcePages: [Int] = [], flag: String? = nil) { self.front = front; self.back = back; self.sourcePages = sourcePages; self.flag = flag }
+    public var learningPointID: UUID? = nil
+    public init(front: String, back: String, sourcePages: [Int] = [], flag: String? = nil, learningPointID: UUID? = nil) { self.front = front; self.back = back; self.sourcePages = sourcePages; self.flag = flag; self.learningPointID = learningPointID }
 }
 public enum ProposalState: String, Codable, Sendable { case pending, ready, failed }
 public struct Proposal: Codable, Equatable, Identifiable, Sendable {
@@ -161,6 +162,8 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
     public var exported: ExportMark?
     /// Explicit job scope is retained so invalid model citations are never silently discarded.
     public var allowedSourcePages: [Int]?
+    /// The chat learning point this card was written from.
+    public var learningPointID: UUID? = nil
     public init(id: UUID = UUID(), sourcePages: [Int] = [], front: String, back: String, verdict: CardVerdict = .unreviewed, feedback: String = "", flag: String? = nil, issue: CardIssue? = nil, mathInterpretations: [String: MathInterpretation] = [:], history: [CardRevision]? = nil, proposal: Proposal? = nil, origin: CardOrigin = .manual, supersededBy: [UUID]? = nil, exported: ExportMark? = nil, allowedSourcePages: [Int]? = nil) {
         self.id = id; self.sourcePages = sourcePages; self.front = front; self.back = back; self.verdict = verdict; self.feedback = feedback; self.flag = flag; self.issue = issue; self.mathInterpretations = mathInterpretations; self.history = history ?? [CardRevision(front: front, back: back, author: origin == .manual ? .user : .ai)]; self.proposal = proposal; self.origin = origin; self.supersededBy = supersededBy; self.exported = exported; self.allowedSourcePages = allowedSourcePages
     }
@@ -181,7 +184,7 @@ public enum ThreadContext: Codable, Equatable, Hashable, Sendable { case none, s
 public enum FlashcardContext: String, Codable, CaseIterable, Sendable { case none, all, current }
 public enum MessageRole: String, Codable, Sendable { case user, assistant }
 public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
-    private enum CodingKeys: String, CodingKey { case id, role, text, citedPages, at, editJobID, attachments, context, read, quiz, stopped, searchedLecture, pendingEdits, conflictingCardIDs, createdCardIDs }
+    private enum CodingKeys: String, CodingKey { case id, role, text, citedPages, at, editJobID, attachments, context, read, quiz, stopped, searchedLecture, pendingEdits, conflictingCardIDs, createdCardIDs, clicked, suggestion }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); role = try c.decode(MessageRole.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
@@ -191,6 +194,8 @@ public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
         searchedLecture = try c.decodeIfPresent(Bool.self, forKey: .searchedLecture) ?? false
         createdCardIDs = try c.decodeIfPresent([UUID].self, forKey: .createdCardIDs)
         pendingEdits = try c.decodeIfPresent([ChatCardEdit].self, forKey: .pendingEdits) ?? []; conflictingCardIDs = try c.decodeIfPresent([UUID].self, forKey: .conflictingCardIDs) ?? []
+        clicked = try c.decodeIfPresent(Bool.self, forKey: .clicked) ?? false
+        suggestion = try c.decodeIfPresent(CardSuggestion.self, forKey: .suggestion)
     }
 
     public var id: UUID
@@ -208,9 +213,36 @@ public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
     public var pendingEdits: [ChatCardEdit] = []
     public var conflictingCardIDs: [UUID] = []
     public var editJobID: UUID? = nil
+    /// The student marked this answer as the explanation that worked.
+    public var clicked: Bool = false
+    /// A Review-chat recommendation to change or add a card, judged after the student reacted.
+    public var suggestion: CardSuggestion? = nil
     public init(id: UUID = UUID(), role: MessageRole, text: String, citedPages: [Int] = [], at: Date = Date()) { self.id = id; self.role = role; self.text = text; self.citedPages = citedPages; self.at = at }
 }
+public enum LearningPointKind: String, Codable, CaseIterable, Sendable {
+    /// The student restated it and the AI confirmed it, or the student corrected the AI and was right.
+    case ownWords
+    /// The student believed something wrong and the chat corrected it.
+    case misconception
+    /// An explanation that landed: clicked, or followed by a move to something new.
+    case understood
+}
+public struct LearningPointEvidence: Codable, Equatable, Sendable {
+    public var messageID: UUID
+    public var quote: String
+    public init(messageID: UUID, quote: String) { self.messageID = messageID; self.quote = quote }
+}
+/// The card a learning point proposes. Sources are the point's pages.
+public struct LearningPointDraft: Codable, Equatable, Sendable {
+    public var front: String
+    public var back: String
+    /// Set when the point improves an existing card instead of adding a new one.
+    public var replacesCardID: UUID? = nil
+    public init(front: String, back: String, replacesCardID: UUID? = nil) { self.front = front; self.back = back; self.replacesCardID = replacesCardID }
+}
 public struct LearningPoint: Codable, Equatable, Identifiable, Sendable {
+    public static let maximumWords = 30
+    public static let maximumActivePerSlide = 3
     public var id: UUID
     public var text: String
     public var pages: [Int]
@@ -219,14 +251,51 @@ public struct LearningPoint: Codable, Equatable, Identifiable, Sendable {
     /// False while the point waits in the chat drawer for the student to keep or drop it.
     /// Points saved before the drawer existed decode as reviewed, so they don't all resurface at once.
     public var reviewed: Bool
+    /// Nil on points extracted before per-concept extraction.
+    public var kind: LearningPointKind? = nil
+    /// Confused follow-ups before the explanation landed.
+    public var difficulty: Int? = nil
+    public var evidence: [LearningPointEvidence]? = nil
+    public var draft: LearningPointDraft? = nil
+    /// Cards that test this point, added from the drawer or written by Generate.
+    public var cardIDs: [UUID]? = nil
+    /// The last message of the discussion this point closed; the chat marks the end of the concept there.
+    public var episodeEndMessageID: UUID? = nil
     public init(id: UUID = UUID(), text: String, pages: [Int] = [], included: Bool = true, usedBy: [UUID] = [], reviewed: Bool = false) { self.id = id; self.text = text; self.pages = pages; self.included = included; self.usedBy = usedBy; self.reviewed = reviewed }
-    private enum CodingKeys: String, CodingKey { case id, text, pages, included, usedBy, reviewed }
+    private enum CodingKeys: String, CodingKey { case id, text, pages, included, usedBy, reviewed, kind, difficulty, evidence, draft, cardIDs, episodeEndMessageID }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); text = try c.decode(String.self, forKey: .text); pages = try c.decode([Int].self, forKey: .pages)
         included = try c.decode(Bool.self, forKey: .included); usedBy = try c.decode([UUID].self, forKey: .usedBy)
         reviewed = try c.decodeIfPresent(Bool.self, forKey: .reviewed) ?? true
+        kind = try? c.decodeIfPresent(LearningPointKind.self, forKey: .kind)
+        difficulty = try c.decodeIfPresent(Int.self, forKey: .difficulty)
+        evidence = try c.decodeIfPresent([LearningPointEvidence].self, forKey: .evidence)
+        draft = try c.decodeIfPresent(LearningPointDraft.self, forKey: .draft)
+        cardIDs = try c.decodeIfPresent([UUID].self, forKey: .cardIDs)
+        episodeEndMessageID = try c.decodeIfPresent(UUID.self, forKey: .episodeEndMessageID)
     }
+    /// Waiting in the drawer as a card draft the student hasn't added or skipped.
+    public var isPendingDraft: Bool { included && !reviewed && draft != nil && (cardIDs ?? []).isEmpty }
+    public static func wordCount(_ text: String) -> Int { text.split(whereSeparator: { $0.isWhitespace }).count }
+}
+public enum CardSuggestionState: String, Codable, Sendable { case pending, applied, dismissed }
+/// A Review-chat recommendation: change the discussed card, or add one, because an explanation landed.
+public struct CardSuggestion: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var reason: String
+    /// Set for an edit; nil for a new card.
+    public var cardID: UUID?
+    public var baseRevisionID: UUID?
+    public var front: String
+    public var back: String
+    public var sourcePages: [Int]
+    public var state: CardSuggestionState
+    public var createdCardID: UUID? = nil
+    public init(id: UUID = UUID(), reason: String, cardID: UUID? = nil, baseRevisionID: UUID? = nil, front: String, back: String, sourcePages: [Int] = [], state: CardSuggestionState = .pending) {
+        self.id = id; self.reason = reason; self.cardID = cardID; self.baseRevisionID = baseRevisionID; self.front = front; self.back = back; self.sourcePages = sourcePages; self.state = state
+    }
+    public var isEdit: Bool { cardID != nil }
 }
 public struct SlideThread: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
@@ -299,6 +368,8 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     /// Absent on older jobs, which keep their original additive behavior.
     public var replacesExistingCards: Bool? = nil
     public var isLectureChat: Bool? = nil
+    /// True for Review chat. Nil on older jobs.
+    public var allowsCardCreation: Bool? = nil
     public var chatEdits: [ChatCardEdit]? = nil
     public var chatEditDisposition: ChatEditDisposition? = nil
     public var chatCardVersions: [ChatCardVersion]? = nil

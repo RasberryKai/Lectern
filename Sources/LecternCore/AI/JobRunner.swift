@@ -30,6 +30,8 @@ public actor JobRunner {
     var progress: [UUID: JobProgress] = [:]
     private var subscribers: [UUID: AsyncStream<JobProgress>.Continuation] = [:]
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Background chat distillations run one at a time per chat, so two triggers never save the same point twice.
+    var distilChains: [UUID: (id: UUID, task: Task<Void, Never>)] = [:]
 
     public init(store: LibraryStore, providers: [any AIProvider], pdfExporter: any PDFSnapshotExporting = PDFExporter()) {
         self.store = store; self.pdfExporter = pdfExporter
@@ -202,7 +204,7 @@ public actor JobRunner {
                                              pages: pages, existingFronts: fronts,
                                              card: (kind == .ask || kind == .chat) && thread?.flashcardContext != .current ? nil : card, feedback: feedback,
                                              thread: thread, question: question, generationInstructions: additionalInstructions,
-                                             contextCards: contextCards)
+                                             contextCards: contextCards, replacesExistingCards: replaceExistingCards)
         var job = Job(kind: kind, pages: pages, rulesVersion: PromptBuilder.hash(rules), backend: backend,
                       targetCardID: cardID, threadID: thread?.id, baseRevisionID: card?.currentRevisionID, prompt: prompt, model: resolvedModel)
         job.replacesExistingCards = replaceExistingCards ? true : nil
@@ -351,9 +353,9 @@ public actor JobRunner {
             // The trace records this outcome; keep the runner alive for queued work.
         }
         active.removeValue(forKey: work.job.id)
-        if chatSucceeded, !Task.isCancelled {
-            let distilID = UUID()
-            active[distilID] = Task { await self.distilLectureChat(work, distilID: distilID); self.finishDistil(distilID) }
+        if chatSucceeded, !Task.isCancelled, let chatID = work.job.threadID {
+            enqueueChatDistillation(ChatDistillationRequest(moduleID: work.moduleID, lectureID: work.lectureID, chatID: chatID,
+                backend: work.job.backend, model: work.job.model, trigger: .answer(jobID: work.job.id)))
         }
         if let anchor = autoDistilAnchor {
             do { _ = try await distil(moduleID: work.moduleID, lectureID: work.lectureID, anchorPage: anchor, backend: work.job.backend, model: work.job.model) }
@@ -419,9 +421,21 @@ public actor JobRunner {
             case .generate:
                 guard let output = frozenGenerated else { throw AIError.invalidResponse("Missing generation payload.") }
                 guard output.skipped.allSatisfy({ work.job.pages.contains($0.slide) && !$0.reason.isEmpty }) else { throw AIError.invalidResponse("Invalid skipped-slide entry.") }
-                let covered = Set(output.cards.flatMap(\.sourceSlides) + output.skipped.map(\.slide))
+                // Every chat draft in the prompt becomes exactly one card; the model may polish it, never drop it.
+                let expected = PromptBuilder.chatCardDrafts(lecture: lecture, pages: work.job.pages, replacesExistingCards: work.job.replacesExistingCards == true)
+                    .filter { work.learningPointIDs.contains($0.point) }
+                var linked = Set<UUID>()
+                var cards = output.cards.map { wire -> CardDraft in
+                    var draft = wire.draft
+                    if let id = wire.point.flatMap(UUID.init(uuidString:)), expected.contains(where: { $0.point == id }), linked.insert(id).inserted { draft.learningPointID = id }
+                    return draft
+                }
+                for draft in expected where !linked.contains(draft.point) {
+                    cards.append(CardDraft(front: draft.front, back: draft.back, sourcePages: draft.pages, learningPointID: draft.point))
+                }
+                let covered = Set(cards.flatMap(\.sourcePages) + output.skipped.map(\.slide))
                 let missing = work.job.pages.filter { !covered.contains($0) }.map { SkippedSlide(slide: $0, reason: "Model returned no card or skip reason; review this slide.") }
-                try LectureReducer.reduce(&lecture, action: .landGeneration(jobID: work.job.id, cards: output.cards.map(\.draft), skipped: output.skipped + missing, usage: response.usage))
+                try LectureReducer.reduce(&lecture, action: .landGeneration(jobID: work.job.id, cards: cards, skipped: output.skipped + missing, usage: response.usage))
             case .revise:
                 guard let output = frozenRevised else { throw AIError.invalidResponse("Missing revision payload.") }
                 try LectureReducer.reduce(&lecture, action: .landProposal(jobID: work.job.id, cards: output.cards.map(\.draft), rationale: output.rationale, usage: response.usage))

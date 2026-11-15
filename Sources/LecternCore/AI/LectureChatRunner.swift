@@ -23,6 +23,7 @@ extension JobRunner {
         }
         var job = Job(kind: .chat, pages: lecture.slides.map { $0.pageIndex + 1 }, backend: backend, threadID: lecture.currentChat.id, model: resolvedModel)
         job.isLectureChat = true
+        job.allowsCardCreation = allowsCardCreation ? true : nil
         let directory = store.jobDirectory(moduleID: moduleID, lectureID: lectureID, jobID: job.id)
         var committed = false
         defer { if !committed { try? FileManager.default.removeItem(at: directory) } }
@@ -215,120 +216,6 @@ extension JobRunner {
             lecture.jobs[j].state = .succeeded; lecture.jobs[j].usage = response.usage; lecture.jobs[j].finishedAt = Date()
         }
         trace.record("lecture_chat_persisted", ["jobID": work.job.id.uuidString])
-    }
-    func distilLectureChat(_ work: Work, distilID: UUID) async {
-        var failureHandled = false
-        do {
-            let lecture = try await store.loadLecture(moduleID: work.moduleID, lectureID: work.lectureID)
-            guard let chat = ([lecture.currentChat] + lecture.archivedChats).first(where: { $0.id == work.job.threadID }) else { return }
-            let exchange = chat.messages.filter { $0.editJobID == work.job.id }
-            let refs = (work.request.chatSnapshot?.initialRefs ?? []) + exchange.flatMap(\.read)
-            var readPages = Set<Int>()
-            for ref in refs {
-                switch ref {
-                case .slide(let page): readPages.insert(page)
-                case .allSlides: readPages.formUnion(work.job.pages)
-                case .card, .allCards: break
-                }
-            }
-            let olderCount = max(0, chat.messages.count - 20)
-            let summarizedCount = min(olderCount, chat.summarizedMessageCount ?? 0)
-            let newlyOlderMessages = Array(chat.messages.dropFirst(summarizedCount).prefix(olderCount - summarizedCount))
-            // Review context includes the card's source slide. That slide is evidence,
-            // not permission to extract learning points from a flashcard conversation.
-            let initialRefs = work.request.chatSnapshot?.initialRefs ?? []
-            let hasCardContext = initialRefs.contains { ref in
-                switch ref {
-                case .card, .allCards: true
-                case .slide, .allSlides: false
-                }
-            }
-            let extractsLearningPoints = work.request.chatSnapshot?.allowsCardCreation != true && !hasCardContext && !readPages.isEmpty
-            guard extractsLearningPoints || !newlyOlderMessages.isEmpty else { return }
-            let directory = store.jobDirectory(moduleID: work.moduleID, lectureID: work.lectureID, jobID: distilID)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let extractionInstructions = extractsLearningPoints
-                ? "Extract at most 3 NEW grounded learning points from LATEST EXCHANGE only, no duplicate or excluded points. pages must belong to READ SOURCE TEXT. If no grounded source text is available, return no learning points."
-                : "Summarize older messages only. Learning-point extraction is disabled for this exchange. Return an empty learningPoints array."
-            let sourceText = work.request.chatSnapshot?.slides.filter { readPages.contains($0.page) }.map { "S\($0.page): \($0.text)\nNote: \($0.note)" }.joined(separator: "\n") ?? ""
-            let distilModel: String
-            switch work.job.backend {
-            case .claudeCLI: distilModel = AISettings.learningPointCLIModel
-            case .messagesAPI: distilModel = AISettings.learningPointAPIModel
-            case .codexCLI: distilModel = work.job.model
-            }
-            var request = AIRequest(jobID: distilID, kind: .distil, model: distilModel,
-                prompt: extractionInstructions + " Also return summary: at most THREE LINES, update PREVIOUS SUMMARY only with NEWLY OLDER MESSAGES. If NEWLY OLDER MESSAGES is empty retain previous summary exactly. Never summarize the latest exchange into the older summary.\nLATEST EXCHANGE:\n" + String(decoding: try JSONEncoder().encode(exchange), as: UTF8.self)
-                + "\nEXISTING POINTS:\n" + String(decoding: try JSONEncoder().encode(lecture.learningPoints), as: UTF8.self)
-                + "\nPREVIOUS SUMMARY:\n" + chat.summary
-                + "\nNEWLY OLDER MESSAGES:\n" + String(decoding: try JSONEncoder().encode(newlyOlderMessages), as: UTF8.self)
-                + "\nREAD SOURCE TEXT:\n" + sourceText,
-                pdf: nil, workingDirectory: directory)
-            request.systemPrompt = PromptBuilder.systemPrompt(for: .distil)
-            var distilJob = Job(id: distilID, kind: .distil, pages: work.job.pages, backend: work.job.backend, threadID: work.job.threadID, prompt: request.prompt, model: request.model)
-            distilJob.inputHash = try Self.inputHash(request)
-            let frozenDistilJob = distilJob
-            try await AIDiagnostics.withTrace(request: request, backend: work.job.backend) { trace in
-                trace.record("background_distillation_started", ["parentJobID": work.job.id.uuidString])
-                do {
-                    trace.phase("snapshot_persistence")
-                    try JSONEncoder().encode(Snapshot(request: request, learningPointIDs: [])).write(to: directory.appendingPathComponent("snapshot.json"), options: .atomic)
-                    _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { $0.jobs.append(frozenDistilJob) }
-                    trace.record("distil_job_persisted", ["parentJobID": work.job.id.uuidString])
-
-                    trace.phase("provider_execution")
-                    guard let provider = providers[work.job.backend] else { throw AIError.configuration("Provider unavailable.") }
-                    let response = try await provider.execute(request) { event in trace.event(event) }
-                    recordRunnerResponse(response, trace: trace)
-
-                    trace.phase("response_validation")
-                    let points = try JSONDecoder().decode(DistilledPoints.self, from: Data(response.content.utf8))
-                    let learningPoints = extractsLearningPoints ? points.learningPoints : []
-                    guard learningPoints.count <= 3, learningPoints.allSatisfy({ !$0.text.isEmpty && !$0.pages.isEmpty && $0.pages.allSatisfy(readPages.contains) }) else { throw AIError.invalidResponse("Invalid learning-point sources.") }
-
-                    trace.phase("lecture_persistence")
-                    _ = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { latest in
-                        if let j = latest.jobs.firstIndex(where: { $0.id == distilID }) { latest.jobs[j].state = .succeeded; latest.jobs[j].usage = response.usage; latest.jobs[j].finishedAt = Date() }
-                        for point in learningPoints where !latest.learningPoints.contains(where: { $0.text == point.text }) { latest.learningPoints.append(LearningPoint(text: point.text, pages: point.pages)) }
-                        let summary = (points.summary ?? chat.summary).split(separator: "\n").prefix(3).joined(separator: "\n")
-                        if latest.currentChat.id == chat.id, latest.currentChat.messages.count == chat.messages.count { latest.currentChat.summary = summary; latest.currentChat.summarizedMessageCount = olderCount }
-                        else if let c = latest.archivedChats.firstIndex(where: { $0.id == chat.id && $0.messages.count == chat.messages.count }) { latest.archivedChats[c].summary = summary; latest.archivedChats[c].summarizedMessageCount = olderCount }
-                    }
-                    trace.record("background_distillation_landed", ["parentJobID": work.job.id.uuidString, "jobID": distilID.uuidString])
-                    emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"))
-                } catch let operationError {
-                    failureHandled = true
-                    let logPath = diagnosticLogPath(trace)
-                    var message = operationError.localizedDescription
-                    if let logPath { message += "\nAI diagnostics: \(logPath)" }
-                    trace.failure(operationError, event: "background_distillation_failed", fields: ["parentJobID": work.job.id.uuidString])
-                    trace.phase("failure_state_persistence")
-                    let persistedMessage = message
-                    do {
-                        let updated = try await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { latest in
-                            if let j = latest.jobs.firstIndex(where: { $0.id == distilID }) {
-                                latest.jobs[j].state = .failed; latest.jobs[j].error = persistedMessage; latest.jobs[j].finishedAt = Date()
-                            }
-                        }
-                        trace.record("background_distil_failure_state_persisted", ["parentJobID": work.job.id.uuidString,
-                                                                                     "jobFound": updated.jobs.contains(where: { $0.id == distilID })])
-                    } catch let persistenceError {
-                        trace.failure(persistenceError, event: "background_distil_failure_state_persistence_failed", fields: ["parentJobID": work.job.id.uuidString])
-                        message += "\nJob-state persistence failed: \(persistenceError.localizedDescription)"
-                    }
-                    emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"),
-                         warning: "Answer saved; learning points could not be extracted: \(message)")
-                    throw operationError
-                }
-            }
-        } catch {
-            guard !failureHandled else { return }
-            let message = error.localizedDescription
-            _ = try? await store.updateLecture(moduleID: work.moduleID, lectureID: work.lectureID) { latest in
-                if let j = latest.jobs.firstIndex(where: { $0.id == distilID }) { latest.jobs[j].state = .failed; latest.jobs[j].error = message; latest.jobs[j].finishedAt = Date() }
-            }
-            emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Succeeded"), warning: "Answer saved; learning points could not be extracted: \(message)")
-        }
     }
 }
 

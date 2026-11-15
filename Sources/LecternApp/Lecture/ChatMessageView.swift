@@ -28,18 +28,32 @@ struct ChatMessageView: View {
                     if !message.quiz.isEmpty { quiz }
                     if let ids = message.createdCardIDs, !ids.isEmpty { createdCards(ids) }
                     if let id = message.editJobID, let job = model.lecture.jobs.first(where: { $0.id == id }), job.chatEdits?.isEmpty == false || job.chatEditUndo?.isEmpty == false { ChatEditBlock(model: model, job: job) }
+                    if let suggestion = message.suggestion { CardSuggestionBlock(model: model, message: message, suggestion: suggestion) }
                     HStack(spacing: 14) {
                         action("Copy", "doc.on.doc") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string) }
-                        if message.createdCardIDs?.isEmpty != false, message.editJobID.flatMap({ id in model.lecture.jobs.first(where: { $0.id == id })?.kind }) != .revise {
-                            action("Make a card", "rectangle.badge.plus") { Task { await model.makeCard(from: message) } }
+                            .opacity(hovering ? 1 : 0).accessibilityHidden(!hovering)
+                        if isLectureChatAnswer {
+                            Button { Task { await model.toggleClicked(message) } } label: {
+                                Label("Clicked", systemImage: message.clicked ? "checkmark.circle.fill" : "checkmark.circle").font(.system(size: 10.5, weight: message.clicked ? .semibold : .regular))
+                            }
+                            .buttonStyle(.plain).foregroundStyle(message.clicked ? Theme.good : Theme.faint)
+                            .help(message.clicked ? "Unmark this explanation" : "This explanation worked: use it for your cards")
+                            .opacity(hovering || message.clicked ? 1 : 0).accessibilityHidden(!hovering && !message.clicked)
+                            .disabled(model.readOnly)
                         }
-                        if message.createdCardIDs?.isEmpty != false, let id = message.editJobID, model.lecture.jobs.contains(where: { $0.id == id && $0.kind == .chat && $0.isLectureChat == true }) {
+                        if message.createdCardIDs?.isEmpty != false, isLectureChatAnswer {
                             action("Retry", "arrow.clockwise") { Task { await model.retryChatAnswer(message) } }
+                                .opacity(hovering ? 1 : 0).accessibilityHidden(!hovering)
+                                .disabled(model.readOnly || model.runningChat != nil)
                         }
-                    }.opacity(hovering ? 1 : 0).disabled(model.readOnly || model.runningChat != nil).accessibilityHidden(!hovering)
+                    }
                 }.frame(maxWidth: .infinity, alignment: .leading).onHover { hovering = $0 }
             }
         }
+    }
+    private var isLectureChatAnswer: Bool {
+        guard let id = message.editJobID else { return false }
+        return model.lecture.jobs.contains { $0.id == id && $0.kind == .chat && $0.isLectureChat == true }
     }
     private func action(_ title: String, _ symbol: String, perform: @escaping () -> Void) -> some View {
         Button(action: perform) { Label(title, systemImage: symbol).font(.system(size: 10.5)) }.buttonStyle(.plain).foregroundStyle(Theme.faint)
@@ -156,6 +170,55 @@ struct ChatEditBlock: View {
             }
         }.padding(11).background(Theme.aiWash.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.ai.opacity(0.2)))
+    }
+}
+
+/// A Review-chat recommendation, made after the student reacted to an explanation. Nothing changes until Apply.
+struct CardSuggestionBlock: View {
+    let model: LectureWindowModel
+    let message: ChatMessage
+    let suggestion: CardSuggestion
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 7) {
+                Image(systemName: suggestion.isEdit ? "rectangle.and.pencil.and.ellipsis" : "rectangle.badge.plus").foregroundStyle(Theme.ai)
+                Text(title).font(.system(size: 12, weight: .semibold))
+                Spacer()
+            }
+            if suggestion.state == .pending {
+                Text(suggestion.reason).font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
+                if let card = target {
+                    if card.front != suggestion.front { ChatWordDiff(before: card.front, after: suggestion.front) }
+                    if card.back != suggestion.back { ChatWordDiff(before: card.back, after: suggestion.back) }
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(suggestion.front).font(.system(size: 12, weight: .medium))
+                        Divider()
+                        Text(suggestion.back).font(.system(size: 12)).foregroundStyle(Theme.quiet)
+                    }.textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    .padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
+                }
+                HStack {
+                    Button(suggestion.isEdit ? "Apply" : "Add card") { Task { await model.resolveSuggestion(message, apply: true) } }.buttonStyle(SecondaryButtonStyle())
+                    Button("Dismiss") { Task { await model.resolveSuggestion(message, apply: false) } }.buttonStyle(.plain)
+                }.disabled(model.readOnly)
+            } else if suggestion.state == .applied, let id = suggestion.cardID ?? suggestion.createdCardID, let number = model.cardNumbers[id] {
+                Button("Open Card \(number)") { model.openChatCard(id) }.buttonStyle(.plain).font(Theme.caption).foregroundStyle(Theme.ai)
+            }
+        }
+        .padding(11).background(Theme.aiWash.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.ai.opacity(0.2)))
+        .opacity(suggestion.state == .dismissed ? 0.6 : 1)
+    }
+    private var target: Card? { suggestion.cardID.flatMap { id in model.lecture.cards.first { $0.id == id } } }
+    private var title: String {
+        let number = suggestion.cardID.flatMap { model.cardNumbers[$0] }
+        switch suggestion.state {
+        case .pending: return suggestion.isEdit ? "Suggested change to Card \(number ?? 0)" : "Suggested new card"
+        case .applied: return suggestion.isEdit ? "Card \(number ?? 0) updated · To review" : "Card added · To review"
+        case .dismissed: return "Suggestion dismissed"
+        }
     }
 }
 

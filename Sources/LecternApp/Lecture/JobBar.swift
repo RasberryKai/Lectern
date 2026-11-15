@@ -139,6 +139,8 @@ struct GenerateSheet: View {
                     .accessibilityIdentifier("generationInstructions")
             }
 
+            if !chatDrafts.isEmpty { fromYourChats }
+
             VStack(alignment: .leading, spacing: 7) {
                 Text("Sent with the slides").font(.system(size: 13, weight: .semibold))
                 bullet(rulesTitle)
@@ -146,9 +148,8 @@ struct GenerateSheet: View {
                 bullet(instructions.isEmpty ? "No module instructions" : "Module instructions · \(model.moduleName)")
                 let notes = scope.filter { !(model.slide($0 - 1)?.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }.count
                 bullet("\(Format.count(notes, "slide note"))")
-                let points = lecture.threads.flatMap(\.learningPoints).filter { $0.included && $0.pages.contains(where: { scope.contains($0) }) }
-                let pointSlides = Set(points.flatMap(\.pages)).intersection(scope).count
-                bullet("\(Format.count(points.count, "learning point")) from your questions on \(Format.count(pointSlides, "slide"))")
+                let otherPoints = chatPoints.filter { point in !chatDrafts.contains { $0.point == point.id } }
+                if !otherPoints.isEmpty { bullet("\(Format.count(otherPoints.count, "learning point")) from your chats") }
                 bullet("\(Format.count(moduleCardCount, "existing module card")), marked as already covered")
             }
             .padding(14)
@@ -183,6 +184,49 @@ struct GenerateSheet: View {
         .frame(width: 540)
         .background(Theme.surface)
         .task { await loadContext() }
+    }
+
+    private var chatDrafts: [PromptBuilder.ChatCardDraft] { PromptBuilder.chatCardDrafts(lecture: lecture, pages: scope, replacesExistingCards: true) }
+    private var chatPoints: [LearningPoint] {
+        (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints)).filter { $0.included && $0.pages.contains(where: { scope.contains($0) }) }
+    }
+    /// Cards that come from explanations that clicked. Generate keeps each one and writes no competing card from the slide.
+    private var fromYourChats: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("From your chats · \(Format.count(chatDrafts.count, "card"))").font(.system(size: 13, weight: .semibold))
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(chatDrafts.prefix(5).enumerated()), id: \.element.point) { index, draft in
+                    if index > 0 { Divider().overlay(Theme.border) }
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(draft.front).font(Theme.small).lineLimit(2)
+                            Text(Format.slides(draft.pages)).font(Theme.caption).foregroundStyle(Theme.faint)
+                        }
+                        Spacer(minLength: 6)
+                        if let label = kindLabel(draft.kind) {
+                            Text(label.text).font(.system(size: 10, weight: .semibold)).foregroundStyle(label.tint)
+                                .padding(.horizontal, 5).padding(.vertical, 1.5).background(label.wash, in: RoundedRectangle(cornerRadius: 4))
+                        }
+                    }.padding(.horizontal, 10).padding(.vertical, 7)
+                }
+                if chatDrafts.count > 5 {
+                    Divider().overlay(Theme.border)
+                    Text("and \(chatDrafts.count - 5) more").font(Theme.caption).foregroundStyle(Theme.faint).padding(.horizontal, 10).padding(.vertical, 6)
+                }
+            }
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border))
+            Text("Each becomes a card, and Generate writes no competing card on the same concept from the slide. On these slides, the explanation that clicked takes precedence over the slide’s wording.")
+                .font(Theme.caption).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    private func kindLabel(_ raw: String?) -> (text: String, tint: Color, wash: Color)? {
+        switch raw.flatMap(LearningPointKind.init(rawValue:)) {
+        case .misconception: ("Misconception", Theme.amber, Theme.amberWash)
+        case .ownWords: ("Your words", Theme.good, Theme.goodWash)
+        case .understood: ("Clicked", Theme.ai, Theme.aiWash)
+        case nil: nil
+        }
     }
 
     private func bullet(_ text: String) -> some View {

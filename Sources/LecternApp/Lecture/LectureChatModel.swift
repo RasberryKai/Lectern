@@ -38,8 +38,12 @@ extension LectureWindowModel {
         return messages + [pendingChatMessage.message]
     }
     var chatLearningPoints: [LearningPoint] { lecture.learningPoints }
-    /// Points distilled from the chat that the student hasn't kept or dropped yet: what the drawer above the composer shows.
-    var newChatLearningPoints: [LearningPoint] { lecture.learningPoints.filter { $0.included && !$0.reviewed } }
+    /// Card drafts from understood explanations the student hasn't added or skipped yet: what the drawer above the composer shows.
+    /// Older points without a draft still wait here for Keep or Drop.
+    var newChatLearningPoints: [LearningPoint] { lecture.learningPoints.filter { $0.included && !$0.reviewed && ($0.cardIDs ?? []).isEmpty } }
+    /// Points whose discussion ended at this message: the chat marks the end of the concept there.
+    func pointsEnding(at messageID: UUID) -> [LearningPoint] { lecture.learningPoints.filter { $0.episodeEndMessageID == messageID } }
+    func cardNumber(replacedBy point: LearningPoint) -> Int? { point.draft?.replacesCardID.flatMap { cardNumbers[$0] } }
     var runningChat: Job? { runningJobs.first { $0.kind == .chat || $0.kind == .ask } }
     var chatFailures: [Job] {
         lecture.jobs.filter { ($0.kind == .chat || $0.kind == .ask) && $0.threadID == displayedChat.id && [.failed, .interrupted].contains($0.state) && !dismissedJobIDs.contains($0.id) }
@@ -144,7 +148,7 @@ extension LectureWindowModel {
     func newChat() async {
         guard !readOnly, runningChat == nil, !isStartingChat, !isImportingChatImages else { return }
         chatDraftSaveTask?.cancel()
-        await run { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments); try await session.newChat() }
+        await run { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments); try await session.newChat(backend: settings.backend, model: settings.selectedModel) }
         chatDraft = lecture.currentChat.draft
         chatDraftAttachments = lecture.currentChat.draftAttachments
         chatAttachmentError = nil
@@ -161,7 +165,7 @@ extension LectureWindowModel {
             return
         }
         chatDraftSaveTask?.cancel()
-        await run { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments); try await session.openChat(id: id) }
+        await run { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments); try await session.openChat(id: id, backend: settings.backend, model: settings.selectedModel) }
         chatDraft = lecture.currentChat.draft
         chatDraftAttachments = lecture.currentChat.draftAttachments
         chatAttachmentError = nil
@@ -172,14 +176,7 @@ extension LectureWindowModel {
     func deleteChat(_ id: UUID) async { guard !readOnly else { return }; await run { try await session.deleteArchivedChat(id: id) } }
     func removeChatLearningPoint(_ id: UUID) async {
         guard !readOnly else { return }
-        await run {
-            _ = try await app.store.updateLecture(moduleID: ref.moduleID, lectureID: ref.lectureID) { lecture in
-                guard let index = lecture.learningPoints.firstIndex(where: { $0.id == id }) else { return }
-                lecture.learningPoints[index].included = false
-                lecture.learningPoints[index].reviewed = true
-            }
-            try await session.refresh()
-        }
+        await run { try await session.dispatch(.skipLearningPoint(pointID: id)) }
     }
     func keepChatLearningPoints(_ ids: [UUID]) async {
         guard !readOnly, !ids.isEmpty else { return }
@@ -189,6 +186,32 @@ extension LectureWindowModel {
             }
             try await session.refresh()
         }
+    }
+    /// Adds the card (or applies it to the card it improves). Edited text replaces the draft.
+    func addChatCardDraft(_ point: LearningPoint, front: String? = nil, back: String? = nil) async {
+        guard !readOnly, let draft = point.draft else { return }
+        await run { try await session.dispatch(.acceptLearningPointDraft(pointID: point.id, front: front ?? draft.front, back: back ?? draft.back)) }
+    }
+    func addAllChatCardDrafts() async {
+        guard !readOnly else { return }
+        let drafts = newChatLearningPoints.filter { $0.draft != nil }
+        let legacy = newChatLearningPoints.filter { $0.draft == nil }.map(\.id)
+        await run {
+            for point in drafts { try await session.dispatch(.acceptLearningPointDraft(pointID: point.id, front: point.draft!.front, back: point.draft!.back)) }
+        }
+        await keepChatLearningPoints(legacy)
+    }
+    func toggleClicked(_ message: ChatMessage) async {
+        guard !readOnly else { return }
+        await run { try await session.setAnswerClicked(messageID: message.id, clicked: !message.clicked, backend: settings.backend, model: settings.selectedModel) }
+    }
+    func resolveSuggestion(_ message: ChatMessage, apply: Bool) async {
+        guard !readOnly else { return }
+        await run {
+            try await session.flushEdits()
+            try await session.dispatch(.resolveCardSuggestion(chatID: displayedChat.id, messageID: message.id, apply: apply))
+        }
+        syncEditor(); app.scheduleReload()
     }
     func hasChat(forPage page: Int) -> Bool { firstChatMessage(forPage: page) != nil }
     func firstChatMessage(forPage page: Int) -> (chatID: UUID, messageID: UUID)? {
@@ -204,6 +227,17 @@ extension LectureWindowModel {
             if target.chatID != displayedChat.id { await resumeChat(target.chatID) }
             chatScrollTarget = nil
             chatScrollTarget = target.messageID
+        }
+    }
+    /// Opens the chat at the discussion a learning point came from.
+    func showChat(for point: LearningPoint) {
+        askVisible = true; panes.openChat(mode)
+        guard let messageID = point.episodeEndMessageID ?? point.evidence?.last?.messageID,
+              let chat = ([lecture.currentChat] + lecture.archivedChats).first(where: { $0.messages.contains { $0.id == messageID } }) else { return }
+        Task {
+            if chat.id != displayedChat.id { await resumeChat(chat.id) }
+            chatScrollTarget = nil
+            chatScrollTarget = messageID
         }
     }
     func fixFlagWithClaude(cardID: UUID) {
@@ -240,14 +274,6 @@ extension LectureWindowModel {
     func openChatCard(_ id: UUID) {
         reviewSearch = ""; reviewFilter = .all; setMode(.review); selectCard(id)
         panes.openChat(.review); askVisible = true
-    }
-    func makeCard(from message: ChatMessage) async {
-        guard !readOnly else { return }
-        let question = chatMessages.prefix(while: { $0.id != message.id }).last(where: { $0.role == .user })?.text ?? "Question"
-        let pages = Array(Set(message.citedPages + message.read.compactMap { if case .slide(let p) = $0 { p } else { nil } })).sorted()
-        let card = Card(sourcePages: pages, front: question, back: message.text)
-        await dispatch(.addCards([card]))
-        if activeCards.contains(where: { $0.id == card.id }) { openChatCard(card.id) }
     }
     func retryChatAnswer(_ message: ChatMessage) async {
         guard !readOnly, runningChat == nil else { return }

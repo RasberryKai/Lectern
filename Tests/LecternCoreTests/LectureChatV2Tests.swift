@@ -53,9 +53,17 @@ private actor V2Gate: AIProvider {
         let runsDistillation = extractsPoints || needsSummary
         var answer = AIResponse(content: #"{"message":"Explanation [S1]","edits":[]}"#)
         answer.read = [.slide(1)]
-        // Even an unwanted point returned during summary maintenance must be discarded.
-        let distillation = AIResponse(content: #"{"learningPoints":[{"text":"A grounded insight","pages":[1]}],"summary":"Older discussion"}"#)
-        let provider = FakeAIProvider(responses: [answer, distillation])
+        // The distillation closes the discussion with a point that quotes the student; only slide conversations may keep it.
+        let reply = answer, lectureID = lecture.id
+        let provider = ScriptedProvider { request in
+            if request.kind == .chat { return reply }
+            let saved = try await store.loadLecture(moduleID: module.id, lectureID: lectureID)
+            let messages = saved.currentChat.messages
+            let user = messages.last(where: { $0.role == .user })!, last = messages.last!
+            let point = ChatDistillation.Point(text: "A grounded insight", pages: [1], kind: "understood",
+                evidence: [.init(messageID: user.id.uuidString, quote: "Explain this")], front: "Q?", back: "A.", endMessageID: last.id.uuidString)
+            return AIResponse(content: String(decoding: try JSONEncoder().encode(ChatDistillation(summary: "Older discussion", closedThroughMessageID: last.id.uuidString, learningPoints: [point])), as: UTF8.self))
+        }
         let runner = JobRunner(store: store, providers: [provider])
         let jobID = try await runner.chat(moduleID: module.id, lectureID: lecture.id, question: "Explain this",
             contextRefs: refs, allowsCardCreation: allowsCardCreation)
@@ -63,6 +71,7 @@ private actor V2Gate: AIProvider {
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(saved.jobs.first(where: { $0.id == jobID })?.state == .succeeded)
         #expect(saved.learningPoints.map(\.text) == (extractsPoints ? ["A grounded insight"] : []))
+        #expect(saved.learningPoints.first?.draft?.front == (extractsPoints ? "Q?" : nil))
         let requests = await provider.requests
         #expect(requests.map(\.kind) == (runsDistillation ? [.chat, .distil] : [.chat]))
         #expect(saved.jobs.allSatisfy { $0.state == .succeeded })

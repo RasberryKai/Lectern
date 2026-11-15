@@ -31,6 +31,8 @@ struct AskPanel: View {
                             if model.chatMessages.isEmpty && model.runningChat == nil { starters }
                             ForEach(model.chatMessages) { message in
                                 ChatMessageView(model: model, message: message).id(message.id)
+                                let ended = model.pointsEnding(at: message.id)
+                                if !ended.isEmpty { ConceptEndLine(points: ended) }
                             }
                             runningAnswer
                             errors
@@ -242,6 +244,28 @@ struct AskPanel: View {
         focus.wrappedValue = .ask
     }
     private func send() { guard model.runningChat == nil else { return }; Task { await model.sendChat() } }
+}
+
+/// Marks where a discussion ended and what it left for the cards.
+struct ConceptEndLine: View {
+    let points: [LearningPoint]
+    var body: some View {
+        HStack(spacing: 8) {
+            Rectangle().fill(Theme.border).frame(height: 1)
+            HStack(spacing: 4) {
+                Text(verdict).fontWeight(.semibold).foregroundStyle(Theme.good)
+                Text("· \(Format.count(points.count, "card draft"))").foregroundStyle(Theme.faint)
+            }.font(.system(size: 10.5)).fixedSize()
+            Rectangle().fill(Theme.border).frame(height: 1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+    private var verdict: String {
+        if points.contains(where: { $0.kind == .misconception }) { return "Misconception cleared up" }
+        if points.contains(where: { $0.kind == .ownWords }) { return "In your words" }
+        let tries = (points.compactMap(\.difficulty).max() ?? 0) + 1
+        return tries > 1 ? "Clicked after \(tries) tries" : "Clicked"
+    }
 }
 
 struct ChatHistoryControls: View {

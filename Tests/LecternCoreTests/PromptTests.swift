@@ -18,7 +18,7 @@ import Testing
         if ProcessInfo.processInfo.environment["LECTERN_UPDATE_GOLDENS"] == "1" { try Data(prompt.utf8).write(to: fixture) }
         #expect(prompt == (try String(contentsOf: fixture, encoding: .utf8)))
         #expect(!prompt.contains("Excluded misconception")); #expect(!prompt.contains("Other slide only"))
-        #expect(PromptBuilder.systemPrompt.contains("global rules < module instructions < included learning points < explicit slide notes"))
+        #expect(PromptBuilder.systemPrompt.contains("global rules < module instructions < slide text < chat card drafts and included learning points < explicit slide notes"))
     }
     @Test func reviseDoesNotTellModelToAvoidItsOwnTargetAndIncludesOriginal() throws {
         let module = Module(name: "M")
