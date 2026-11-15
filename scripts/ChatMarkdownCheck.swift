@@ -20,7 +20,7 @@ private struct FixtureView: View {
         .popover(isPresented: Binding(get: { state.citation != nil }, set: { if !$0 { state.citation = nil } })) {
             Text(state.citation?.kind == "C" ? "Card preview" : "Slide preview").padding(20).allowsHitTesting(false)
         }
-        .padding(16).frame(width: 500)
+        .padding(16).frame(width: 660)
     }
 }
 
@@ -38,11 +38,39 @@ private struct FixtureView: View {
 
         Compare [C12] with [S48].
         """
-        let host = NSHostingView(rootView: FixtureView(state: state, text: markdown))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 650), styleMask: [.titled], backing: .buffered, defer: false)
+        // The probability table and range syntax reproduce the reported rendering failures.
+        let mathMarkdown = #"""
+
+        | Concept | What it tells you | How to calculate it |
+        |---|---|---|
+        | **Probability function** \(f(x)\) | Probability of exactly \(x\) | \(f(x)=P(X=x)\); all probabilities sum to 1. [S70] |
+        | **Cumulative distribution function** \(F(x)\) | Probability of getting \(x\) **or less** | \(F(x)=P(X\le x)=\sum_{x_i\le x}f(x_i)\). [S73] |
+        | **Mean / expected value** \(\mu\) | The probability-weighted average | \(\mu=E(X)=\sum_i x_i f(x_i)\). [S77] |
+        | **Variance** \(\sigma^2\) | How spread out outcomes are around the mean | \(\operatorname{Var}(X)=\sum_i (x_i-\mu)^2f(x_i)\). [S79] |
+        | **Standard deviation** \(\sigma\) | Spread in the **same units as X** | \(\sigma=\sqrt{\operatorname{Var}(X)}\). [S65] |
+
+        **Useful shortcut:** \(\operatorname{Var}(X)=E(X^2)-[E(X)]^2\). [S79–S80]
+
+        | Math with pipes | Other delimiters |
+        | --- | --- |
+        | \(P(X=x|Y=y)\) | $x_i + y_i$ |
+        | \(\|x_i\|\) | $$\sum_i x_i$$ |
+        | `x|y` | \[\sum_i x_i\] |
+
+        Grouped citations: [S70, S73, S77–S79]; [C12–C13]; [S79-80]; [S79—S80]; [S70, 73–74]; [S70; C12].
+
+        Literal code: `[S79–S80] \(x_i + y_i\)`
+        """#
+        let host = NSHostingView(rootView: FixtureView(state: state, text: markdown + "\n" + mathMarkdown))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 650), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = host
         window.orderFront(nil)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(45))
+            print("FAIL: Markdown check timed out")
+            exit(1)
+        }
         Task { @MainActor in
             var failures = 0
             func check(_ name: String, _ passed: Bool) {
@@ -59,7 +87,7 @@ private struct FixtureView: View {
                 for _ in 0..<50 {
                     await settle()
                     if let candidate = findWebView(host),
-                       (try? await candidate.evaluateJavaScript("document.querySelectorAll('.cite').length")) as? Int == 3 {
+                       (try? await candidate.evaluateJavaScript("document.readyState === 'complete' && !!window.MathJax?.startup?.document")) as? Bool == true {
                         web = candidate; break
                     }
                 }
@@ -81,6 +109,38 @@ private struct FixtureView: View {
                 let short = ChatMarkdown.html("| A | B |\n| --- | --- |\n| only one |")
                 check("Short rows retain empty cells", short.contains("<td>only one</td><td></td>"))
                 check("Invalid citation numbers are rejected", ChatCitation(kind: "S", number: 0) == nil && ChatCitation(kind: "X", number: 1) == nil)
+                for _ in 0..<50 {
+                    if (try await web.evaluateJavaScript("document.querySelectorAll('mjx-container').length")) as? Int == 18 { break }
+                    await settle()
+                }
+                let math = try await web.evaluateJavaScript("""
+                (()=>{
+                    const tables=document.querySelectorAll('table');
+                    return {
+                        rowMath:[...tables[1].tBodies[0].rows].map(r=>r.querySelectorAll('mjx-container').length),
+                        intactFormula:tables[1].rows[2].cells[2].querySelectorAll('em').length===0,
+                        pipeColumns:[...tables[2].rows].map(r=>r.cells.length),
+                        literalPipe:tables[2].rows[3].cells[0].querySelector('code')?.textContent==='x|y',
+                        pipeMath:tables[2].querySelectorAll('mjx-container').length,
+                        mathErrors:document.querySelectorAll('[data-mjx-error],merror').length,
+                        buttons:[...document.querySelectorAll('.cite')].map(e=>e.dataset.type+e.dataset.n),
+                        literalCode:[...document.querySelectorAll('code')].some(e=>e.textContent.includes('[S79–S80]') && !e.querySelector('.cite,mjx-container'))
+                    };
+                })()
+                """) as! [String: Any]
+                check("Every formula in the reported table is typeset", math["rowMath"] as? [Int] == [3, 3, 2, 2, 2])
+                check("TeX subscripts are not converted to Markdown emphasis", math["intactFormula"] as? Bool == true)
+                check("Pipes inside math and code preserve table columns and content", math["pipeColumns"] as? [Int] == [2, 2, 2, 2] && math["literalPipe"] as? Bool == true)
+                check("All math delimiters typeset inside table cells", math["pipeMath"] as? Int == 5)
+                check("MathJax reports no formula errors", math["mathErrors"] as? Int == 0)
+                check("Ranges and grouped citations expand to individual targets", math["buttons"] as? [String] == [
+                    "S48", "C12", "S48", "S70", "S73", "S77", "S79", "S65", "S79", "S80",
+                    "S70", "S73", "S77", "S78", "S79", "C12", "C13", "S79", "S80", "S79", "S80", "S70", "S73", "S74", "S70", "C12"
+                ])
+                check("Code keeps citation and math source literal", math["literalCode"] as? Bool == true)
+                for invalid in ["[S0]", "[S80–S79]", "[S1–S101]", "[S1–C2]", "[S999999999999999999999]"] {
+                    check("Invalid range stays literal: \(invalid)", ChatMarkdown.inline(invalid) == invalid)
+                }
                 let baselineWindows = app.windows.filter(\.isVisible).count
                 for kind in ["S", "C"] {
                     let number = kind == "S" ? 48 : 12
@@ -96,6 +156,9 @@ private struct FixtureView: View {
                 _ = try await web.evaluateJavaScript("document.querySelector('[data-type=\"C\"]').click()")
                 await settle()
                 check("Card click retains navigation", state.clicked == ChatCitation(kind: "C", number: 12))
+                _ = try await web.evaluateJavaScript("[...document.querySelectorAll('p')].find(p=>p.textContent.startsWith('Useful shortcut:')).querySelector('[data-type=\"S\"][data-n=\"80\"]')?.click()")
+                await settle()
+                check("Range endpoint retains slide navigation", state.clicked == ChatCitation(kind: "S", number: 80))
                 // Regression: JS false used to bridge to integer zero and leave a slide-0 preview open.
                 _ = try await web.evaluateJavaScript("window.webkit.messageHandlers.chat.postMessage({hover:false});null")
                 await settle()

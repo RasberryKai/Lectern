@@ -4,6 +4,8 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 CHECK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/lectern-markdown-check.XXXXXX")
 trap 'rm -rf "$CHECK_DIR"' EXIT
+# The standalone executable needs the same local MathJax files as the app.
+cp -R "$ROOT_DIR/Sources/LecternApp/Resources/MathJax" "$CHECK_DIR/MathJax"
 swiftc -swift-version 6 -parse-as-library \
   "$ROOT_DIR/Sources/LecternApp/Lecture/ChatMarkdownView.swift" \
   "$ROOT_DIR/scripts/ChatMarkdownCheck.swift" \
