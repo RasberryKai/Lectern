@@ -219,6 +219,15 @@ final class LectureWindowModel {
         focus(slides[next].pageIndex)
     }
 
+    /// Keep the stage inside the visible set after filtering or deselecting a slide.
+    func reconcilePrepareFocus() {
+        let pages = filteredSlides.map(\.pageIndex)
+        guard !pages.contains(where: { $0 == focusedPageIndex }) else { return }
+        let next = pages.first { $0 >= (focusedPageIndex ?? 0) } ?? pages.last
+        flushNote()
+        focusedPageIndex = next
+    }
+
     func focus(_ pageIndex: Int) {
         guard pageIndex != focusedPageIndex else { return }
         flushNote()

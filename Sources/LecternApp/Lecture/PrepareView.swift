@@ -21,6 +21,9 @@ struct PrepareView: View {
         } right: {
             LectureSidePanel(model: model, focus: focus)
         }
+        .onChange(of: model.filteredSlides.map(\.pageIndex), initial: true) { _, _ in
+            model.reconcilePrepareFocus()
+        }
     }
 
     // MARK: Thumbnails
@@ -42,7 +45,8 @@ struct PrepareView: View {
     // MARK: Focused slide
 
     @ViewBuilder private var center: some View {
-        if let index = model.focusedPageIndex, let slide = model.slide(index) {
+        if let index = model.focusedPageIndex, let slide = model.slide(index),
+           let position = model.filteredSlides.firstIndex(where: { $0.pageIndex == index }) {
             let page = index + 1
             let cards = model.cards(from: page)
             VStack(alignment: .leading, spacing: 14) {
@@ -79,7 +83,9 @@ struct PrepareView: View {
                     }
                     .buttonStyle(LinkButtonStyle(color: Theme.quiet))
                     Spacer()
-                    Text("\(page) / \(model.lecture.pageCount)").foregroundStyle(Theme.quiet).monospacedDigit()
+                    Text("\(position + 1) / \(model.filteredSlides.count)")
+                        .foregroundStyle(Theme.quiet).monospacedDigit()
+                        .help("Original slide \(page)")
                 }
                 .font(Theme.body)
                 if model.notesVisible { notes(index: index, page: page) }
@@ -87,7 +93,7 @@ struct PrepareView: View {
             .padding(.horizontal, 28).padding(.vertical, 22)
         } else {
             VStack(spacing: 8) {
-                Text(model.lecture.pageCount == 0 ? "This lecture has no slides." : "Choose a slide on the left.")
+                Text(model.lecture.pageCount == 0 ? "This lecture has no slides." : model.filteredSlides.isEmpty ? "No slides match this filter." : "Choose a slide on the left.")
                     .font(Theme.body).foregroundStyle(Theme.quiet)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
