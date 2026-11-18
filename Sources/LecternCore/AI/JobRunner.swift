@@ -338,7 +338,7 @@ public actor JobRunner {
                     trace.record("provider_call_started", ["backend": work.job.backend.rawValue, "model": work.job.model])
                     // One ordered consumer per attempt: separate Tasks per event could deliver text and reads out of order.
                     let (events, sink) = AsyncStream<AIEvent>.makeStream()
-                    let forwarding = Task { for await event in events { await self.receive(work: work, event: event) } }
+                    let forwarding = Task { for await event in events { self.receive(work: work, event: event) } }
                     let response: AIResponse
                     do {
                         response = try await provider.execute(work.request) { event in
