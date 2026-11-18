@@ -21,7 +21,7 @@ struct ChatMarkdownView: View {
     var onHoverCitation: (ChatCitation?) -> Void = { _ in }
     @State private var height: CGFloat = 28
     var body: some View {
-        ChatMarkdownWeb(html: ChatMarkdown.html(streaming ? ChatMarkdown.finishedBlocks(text) : text), height: $height,
+        ChatMarkdownWeb(html: ChatMarkdown.html(streaming ? ChatMarkdown.finishedBlocks(text) : text), streaming: streaming, height: $height,
                         onCitation: onCitation, onHoverCitation: onHoverCitation)
             .frame(height: max(28, height))
             .accessibilityLabel(text)
@@ -31,6 +31,7 @@ struct ChatMarkdownView: View {
 private struct ChatMarkdownWeb: NSViewRepresentable {
     @Environment(\.colorScheme) private var scheme
     let html: String
+    var streaming = false
     @Binding var height: CGFloat
     let onCitation: (String, Int) -> Void
     let onHoverCitation: (ChatCitation?) -> Void
@@ -47,7 +48,7 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
     }
     func updateNSView(_ view: WKWebView, context: Context) {
         context.coordinator.parent = self
-        let key = "\(scheme)\(html)"
+        let key = "\(scheme)\(streaming)\(html)"
         guard context.coordinator.key != key else { return }
         context.coordinator.key = key
         #if SWIFT_PACKAGE
@@ -103,11 +104,13 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
         code{font:12px ui-monospace,monospace;background:\(scheme == .dark ? "#34312b" : "#eeece6");padding:2px 4px;border-radius:4px}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:10px;background:\(scheme == .dark ? "#292722" : "#f0eee8");border-radius:7px}pre code{padding:0;background:none}
         .table{border:1px solid \(scheme == .dark ? "#49443a" : "#dedacf");border-radius:8px;margin:10px 0}table{border-collapse:collapse;width:100%;table-layout:fixed;font-size:12.5px;overflow-wrap:anywhere;word-break:normal}th{background:\(scheme == .dark ? "#33342f" : "#e9ede7");font-weight:600}td,th{padding:7px 9px;text-align:left;border-bottom:1px solid \(scheme == .dark ? "#423e36" : "#e5e1d7")}
         a{color:\(scheme == .dark ? "#9dc3eb" : "#2f5d8c")}button.cite{font:11px -apple-system;cursor:pointer;color:\(scheme == .dark ? "#bbd4eb" : "#2f5d8c");background:\(scheme == .dark ? "#293847" : "#e7eef5");border:0;border-radius:4px;padding:2px 5px;vertical-align:baseline;margin:0 2px}
+        main.streaming>:is(p,h4):last-child::after,main.streaming>:is(ul,ol):last-child>li:last-child::after{content:'';display:inline-block;width:7px;height:14px;margin-left:3px;border-radius:2px;background:\(scheme == .dark ? "#8db4dd" : "#2f5d8c");vertical-align:-2px;animation:caret 1s ease-in-out infinite}
+        @keyframes caret{0%,100%{opacity:.25}50%{opacity:1}}@media (prefers-reduced-motion: reduce){main.streaming *::after{animation:none!important;opacity:.7}}
         mjx-container{max-width:100%}mjx-container[display=true] svg{max-width:100%;height:auto}#status{color:#9b722f;font-size:11px}
         </style><script>
         function post(o){window.webkit.messageHandlers.chat.postMessage(o)}
         window.MathJax={loader:{paths:{tex:'[mathjax]/input/tex/extensions',fonts:'[mathjax]/fonts','@mathjax':'[mathjax]/fonts'}},tex:{inlineMath:{'[+]':[['$','$']]},processEscapes:true,processEnvironments:false},svg:{fontPath:'[mathjax]/fonts/%%FONT%%-font',fontCache:'local'},startup:{typeset:false}};
-        </script><script src="./tex-svg.js"></script></head><body><div id="content"><main>\(html)</main><div id="status"></div></div><script>
+        </script><script src="./tex-svg.js"></script></head><body><div id="content"><main\(streaming ? " class='streaming'" : "")>\(html)</main><div id="status"></div></div><script>
         const content=document.getElementById('content');
         function resize(){post({height:Math.ceil(content.getBoundingClientRect().height)+1})}
         new ResizeObserver(resize).observe(content);requestAnimationFrame(resize);

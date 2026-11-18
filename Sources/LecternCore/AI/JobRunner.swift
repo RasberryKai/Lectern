@@ -8,6 +8,37 @@ public struct JobProgress: Equatable, Sendable {
     public var streamedText: String
     public var warning: String?
     public var read: [ContextRef] = []
+    /// What the AI did so far, in order, for the chat's "what is it doing" hints.
+    public var activity: [JobActivity] = []
+
+    public mutating func apply(_ event: AIEvent) {
+        switch event {
+        case .stage(let stage):
+            self.stage = stage
+            if let step = JobActivity(stage: stage) { note(step) }
+        case .text(let text): streamedText += text
+        case .read(let ref):
+            guard !read.contains(ref) else { return }
+            read.append(ref); note(.reading(ref))
+        }
+    }
+    private mutating func note(_ step: JobActivity) { if activity.last != step { activity.append(step) } }
+}
+
+/// One step of a running AI job. Reads come from `.read` events; stages only add "thinking" or images.
+public enum JobActivity: Equatable, Sendable {
+    case thinking
+    case reading(ContextRef)
+    case images
+
+    init?(stage: String) {
+        switch stage {
+        // Bookkeeping stages, and ones the matching `.read` events describe better.
+        case "Queued", "Writing", "Reading slides…", "Succeeded", "Failed", "Cancelled", "Persistence failed": return nil
+        case "Reading uploaded images…": self = .images
+        default: self = .thinking
+        }
+    }
 }
 
 /// Every provider call passes through this actor. Durable state lives in LibraryStore;
@@ -385,7 +416,7 @@ public actor JobRunner {
     }
     func emit(moduleID: UUID, lectureID: UUID, jobID: UUID, event: AIEvent, warning: String? = nil) {
         var value = progress[jobID] ?? JobProgress(moduleID: moduleID, lectureID: lectureID, jobID: jobID, stage: "Queued", streamedText: "")
-        switch event { case .stage(let stage): value.stage = stage; case .text(let text): value.streamedText += text; case .read(let ref): if !value.read.contains(ref) { value.read.append(ref) } }
+        value.apply(event)
         if let warning { value.warning = warning }
         progress[jobID] = value; subscribers.values.forEach { $0.yield(value) }
     }

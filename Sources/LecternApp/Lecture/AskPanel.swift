@@ -74,20 +74,25 @@ struct AskPanel: View {
     }
     @ViewBuilder private var runningAnswer: some View {
         if let job = model.runningChat {
-            VStack(alignment: .leading, spacing: 8) {
-                let progress = model.progress(job.id)
-                if let text = progress?.streamedText, !text.isEmpty { ChatCitedMarkdownView(model: model, text: text, streaming: true) }
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.mini)
-                    Text(progress?.stage == "Queued" ? "Waiting for a free slot…" : (progress?.streamedText.isEmpty == false ? "\(job.backend.assistantName) is answering…" : (progress?.stage ?? "Reading your context…")))
-                        .font(Theme.caption).foregroundStyle(Theme.faint)
+            let progress = model.progress(job.id)
+            let text = progress?.streamedText ?? ""
+            // Hints stay until a whole paragraph can be shown; then the line becomes the saved message's "Read …" receipt.
+            let answering = !ChatMarkdown.finishedBlocks(text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            VStack(alignment: .leading, spacing: 10) {
+                if answering {
+                    if let read = progress?.read, !read.isEmpty {
+                        Label("Read " + model.chatContextLabel(read), systemImage: "sparkle").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
+                    }
+                    ChatCitedMarkdownView(model: model, text: text, streaming: true)
+                } else {
+                    let hint = model.chatWorkingHint(progress)
+                    ChatWorkingIndicator(doing: hint.doing, done: hint.done)
                 }
             }
+            .transition(.opacity)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: answering)
         } else if model.isStartingChat {
-            HStack(spacing: 7) {
-                ProgressView().controlSize(.mini)
-                Text("Preparing your question…").font(Theme.caption).foregroundStyle(Theme.faint)
-            }
+            ChatWorkingIndicator(doing: "Preparing your question", done: nil)
         }
     }
     @ViewBuilder private var errors: some View {
