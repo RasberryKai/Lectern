@@ -79,7 +79,12 @@ struct AskPanel: View {
             // Hints stay until a whole paragraph can be shown; then the line becomes the saved message's "Read …" receipt.
             let answering = !ChatMarkdown.finishedBlocks(text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             VStack(alignment: .leading, spacing: 10) {
-                if answering {
+                if progress?.stage == "Persistence failed" {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Couldn’t save the answer", systemImage: "exclamationmark.triangle").font(.system(size: 12.5, weight: .semibold))
+                        if let warning = progress?.warning { Text(warning).font(Theme.small).textSelection(.enabled) }
+                    }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Theme.badWash, in: RoundedRectangle(cornerRadius: 9))
+                } else if answering {
                     if let read = progress?.read, !read.isEmpty {
                         Label("Read " + model.chatContextLabel(read), systemImage: "sparkle").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
                     }

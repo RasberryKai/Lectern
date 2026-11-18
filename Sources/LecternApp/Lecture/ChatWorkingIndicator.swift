@@ -28,7 +28,7 @@ struct ChatWorkingIndicator: View {
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: doing)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(doing)
+        .accessibilityLabel(done.map { "\(doing), \($0)" } ?? doing)
     }
 }
 

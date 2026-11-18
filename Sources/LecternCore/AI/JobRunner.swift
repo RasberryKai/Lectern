@@ -336,10 +336,20 @@ public actor JobRunner {
                     guard let provider = providers[work.job.backend] else { throw AIError.configuration("Provider unavailable.") }
                     emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Sending"))
                     trace.record("provider_call_started", ["backend": work.job.backend.rawValue, "model": work.job.model])
-                    let response = try await provider.execute(work.request) { event in
-                        trace.event(event)
-                        Task { await self.receive(work: work, event: event) }
+                    // One ordered consumer per attempt: separate Tasks per event could deliver text and reads out of order.
+                    let (events, sink) = AsyncStream<AIEvent>.makeStream()
+                    let forwarding = Task { for await event in events { await self.receive(work: work, event: event) } }
+                    let response: AIResponse
+                    do {
+                        response = try await provider.execute(work.request) { event in
+                            trace.event(event)
+                            sink.yield(event)
+                        }
+                    } catch {
+                        sink.finish(); await forwarding.value
+                        throw error
                     }
+                    sink.finish(); await forwarding.value
                     recordRunnerResponse(response, trace: trace)
                     try Task.checkCancellation()
                     if work.request.chatSnapshot != nil {
