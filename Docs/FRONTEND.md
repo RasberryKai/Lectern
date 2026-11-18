@@ -18,6 +18,8 @@
 
 - **Presentation names and context.** Rename from a lecture row’s context menu or click the open presentation’s title for inline editing. Return or focus loss saves; Escape cancels; navigating away flushes the title. The header omits the module name. The far-right sidebar button and ⌘⌥B toggle Ask in Prepare and Source/Ask in Review. Ask offers Current slide and Whole lecture; older neighbouring-slide scopes fall back to Current slide.
 
+- **Moving lectures.** Right-click an imported lecture → Move lecture… and enter an empty lecture number in the same module. The old slot becomes empty, other lectures keep their numbers, and the plan expands if needed. The sheet explains when a destination's manual placeholder status will be replaced; the moved lecture keeps its own status. `LibraryStore.moveLecture` atomically changes only the module's slot mapping and order, preserving lecture/card/chat identity, PDFs, attachments, job snapshots and export history. Active jobs remain valid; archived modules and lectures cannot be moved.
+
 - **Single-window navigation.** Open/Review replaces the library content in the main window. Back returns to the previous library selection after saving notes, card edits and view state; a failed save keeps the lecture visible. Export and ⌘0 Overview use the same guarded navigation. Prepare/Review/source links stay inside the workspace.
 
 - **View state is window-local.** Mode, focused slide, filters and the selected card live in `LectureWindowModel` and are written once with `.setViewPreferences` when the window closes. Arrow-key browsing doesn't write to disk per keystroke or fill the 50-step undo stack, and archived lectures stay navigable without a write.

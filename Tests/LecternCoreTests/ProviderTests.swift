@@ -166,6 +166,7 @@ struct ProviderTests {
         #expect(structured.contains("--tools"))
         #expect(structured.contains("Read"))
         #expect(structured.contains("Read(//tmp/Lectern Job/input.pdf)"))
+        #expect(!structured.contains { $0.contains("WebSearch") || $0.contains("WebFetch") })
         #expect(structured.contains("--json-schema"))
         #expect(!structured.contains("--bare"))
         #expect(!structured.contains("--append-system-prompt"))
@@ -374,6 +375,12 @@ struct ProviderTests {
         let request = try chatRequest(in: root)
         let arguments = try ClaudeCLIProvider.arguments(for: request, model: "opus", pdfURL: nil)
         #expect(arguments.contains("stream-json")); #expect(arguments.contains("--json-schema"))
+        let toolsIndex = try #require(arguments.firstIndex(of: "--tools"))
+        #expect(arguments[toolsIndex + 1] == "Read,WebSearch,WebFetch")
+        let allowIndex = try #require(arguments.firstIndex(of: "--allowedTools"))
+        #expect(arguments[allowIndex + 1] == "WebSearch,WebFetch")
+        let promptIndex = try #require(arguments.firstIndex(of: "--system-prompt"))
+        #expect(arguments[promptIndex + 1].contains("using Markdown links"))
         #expect(!arguments.contains { $0.contains("input.pdf") })
         let path = try ChatProviderContext(request: request, snapshot: request.chatSnapshot!).file("slides/007.png").path
         let events: [[String: Any]] = [

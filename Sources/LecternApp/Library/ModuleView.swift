@@ -399,6 +399,7 @@ private struct LectureRow: View {
             Button("Rename presentation…") {
                 model.renamingLecture = LectureRef(moduleID: lecture.moduleID, lectureID: lecture.id)
             }.disabled(archived)
+            Button("Move lecture…") { model.movingLecture = ref }.disabled(archived)
             Button("Add PDFs…") { Task { await model.chooseAndAppendPDFs(to: ref) } }
                 .disabled(archived || lecture.pageCount == 0)
             if !archived, let progress {
@@ -477,6 +478,91 @@ private struct LectureRow: View {
     }
 }
 
+
+struct MoveLectureSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let ref: LectureRef
+    @State private var module: Module?
+    @State private var name = ""
+    @State private var destination = ""
+    @State private var error: String?
+    @State private var saving = false
+    @FocusState private var destinationFocused: Bool
+
+    private var slot: Int? { Int(destination.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    private var currentSlot: Int? { module?.lectureSlots[ref.lectureID] }
+    private var validation: String? {
+        guard let module else { return nil }
+        guard let slot, (1...Module.maximumPlannedLectureCount).contains(slot) else {
+            return "Enter a whole number from 1 to \(Module.maximumPlannedLectureCount)."
+        }
+        if slot == currentSlot { return "This presentation is already Lecture \(slot)." }
+        if module.lectureSlots.values.contains(slot) { return "Lecture \(slot) already has a presentation. Choose an empty slot." }
+        return nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Move lecture").font(Theme.serif(26))
+            if let currentSlot {
+                Text(Format.lectureTitle(index: currentSlot - 1, name: name))
+                    .font(Theme.body).foregroundStyle(Theme.quiet).lineLimit(2)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("New lecture number").font(.system(size: 13, weight: .semibold))
+                TextField("e.g. 5", text: $destination)
+                    .textFieldStyle(.roundedBorder).focused($destinationFocused)
+                    .accessibilityLabel("New lecture number").onSubmit(save)
+            }
+            Text("Slides, notes, cards, chats, history and status move together. The old slot becomes empty; other lectures keep their numbers.")
+                .font(Theme.body).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
+            if let module, let slot, validation == nil {
+                if slot > module.plannedLectureCount {
+                    Text("The module plan will expand to \(slot) lectures.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                }
+                if let status = module.slotStatusOverrides[slot] {
+                    Text("Replaces Lecture \(slot)'s manual “\(Format.statusLabel(status))” status with this lecture's status.")
+                        .font(Theme.small).foregroundStyle(Theme.amber)
+                }
+            }
+            if !destination.isEmpty, let validation {
+                Text(validation).font(Theme.small).foregroundStyle(Theme.quiet)
+            }
+            if let error { ErrorBanner(message: error) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                Button("Move", action: save)
+                    .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+                    .disabled(module == nil || saving || validation != nil)
+            }
+        }
+        .padding(28).frame(width: 480).background(Theme.surface)
+        .disabled(saving).interactiveDismissDisabled(saving)
+        .task {
+            do {
+                module = try await model.store.loadModule(moduleID: ref.moduleID)
+                name = try await model.store.loadLecture(moduleID: ref.moduleID, lectureID: ref.lectureID).name
+                destinationFocused = true
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    private func save() {
+        guard !saving, module != nil, validation == nil, let slot else { return }
+        saving = true
+        Task {
+            do {
+                try await model.moveLecture(ref, toSlot: slot)
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+            saving = false
+        }
+    }
+}
 
 struct RenameLectureSheet: View {
     @Environment(AppModel.self) private var model

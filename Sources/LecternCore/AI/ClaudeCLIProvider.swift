@@ -218,6 +218,9 @@ public struct ClaudeCLIProvider: AIProvider {
     }
 
     static func arguments(for request: AIRequest, model: String, pdfURL: URL?) throws -> [String] {
+        var tools = pdfURL == nil && request.chatSnapshot == nil ? [] : ["Read"]
+        let webTools = request.allowsWebSearch ? ["WebSearch", "WebFetch"] : []
+        tools += webTools
         var arguments = [
             "-p",
             "--safe-mode",
@@ -225,11 +228,14 @@ public struct ClaudeCLIProvider: AIProvider {
             "--no-chrome",
             "--disable-slash-commands",
             "--permission-mode", "dontAsk",
-            "--system-prompt", request.systemPrompt,
+            "--system-prompt", request.cliSystemPrompt,
             "--model", model,
             "--effort", effort(for: request.kind),
-            "--tools", pdfURL == nil && request.chatSnapshot == nil ? "" : "Read"
+            "--tools", tools.joined(separator: ",")
         ]
+        if !webTools.isEmpty {
+            arguments += ["--allowedTools", webTools.joined(separator: ",")]
+        }
         if let snapshot = request.chatSnapshot {
             let context = ChatProviderContext(request: request, snapshot: snapshot)
             for relative in context.allowedFiles {

@@ -132,6 +132,31 @@ public actor LibraryStore {
         module.slotStatusOverrides[slotID.index] = status
         try write(module, to: moduleDirectory(module.id).appendingPathComponent("module.json"))
     } }
+    /// Renumber a lecture without changing its identity, content or file paths. Only
+    /// module metadata changes, atomically, so active sessions and jobs stay valid.
+    @discardableResult public func moveLecture(moduleID: UUID, lectureID: UUID, toSlot slot: Int) throws -> Module { try locked {
+        var module = try moduleUnlocked(moduleID); try requireEditable(module)
+        guard module.lectureSlots[lectureID] != nil else {
+            throw LibraryError.invalid("Restore this lecture before moving it.")
+        }
+        guard (1...Module.maximumPlannedLectureCount).contains(slot) else {
+            throw LibraryError.invalid("Choose a lecture number between 1 and \(Module.maximumPlannedLectureCount).")
+        }
+        if module.lectureSlots[lectureID] == slot { return module }
+        guard !module.lectureSlots.values.contains(slot) else {
+            throw LibraryError.invalid("Lecture \(slot) already has a presentation. Choose an empty lecture slot.")
+        }
+        module.lectureSlots[lectureID] = slot
+        // The lecture keeps its own progress override, like its cards and chats.
+        module.slotStatusOverrides.removeValue(forKey: slot)
+        module.plannedLectureCount = max(module.plannedLectureCount, slot)
+        module.lectureIDs.removeAll { $0 == lectureID }
+        let insertion = module.lectureIDs.firstIndex { (module.lectureSlots[$0] ?? 0) > slot } ?? module.lectureIDs.endIndex
+        module.lectureIDs.insert(lectureID, at: insertion)
+        try validateModule(module)
+        try write(module, to: moduleDirectory(moduleID).appendingPathComponent("module.json"))
+        return module
+    } }
     /// Archiving does not cancel or discard paid work. Wait/cancel and retry when idle.
     @discardableResult public func setModuleArchived(moduleID: UUID, archived: Bool, at: Date = Date()) throws -> Module { try locked {
         var module = try moduleUnlocked(moduleID)

@@ -54,7 +54,7 @@ final class CodexRPCConnection: @unchecked Sendable {
         iterator = pair.stream.makeAsyncIterator()
     }
 
-    func start() throws {
+    func start(allowsWebSearch: Bool = false) throws {
         try Task.checkCancellation()
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw AIError.configuration("Codex was not found at \(executable.path). Install Codex or choose its executable in AI settings.")
@@ -62,9 +62,10 @@ final class CodexRPCConnection: @unchecked Sendable {
         try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         process.executableURL = executable
         process.currentDirectoryURL = directory
+        let webSearchMode = allowsWebSearch ? "live" : "disabled"
         let overrides = ["model_provider=\"openai\"", "forced_login_method=\"chatgpt\"", "features.shell_tool=false",
                          "features.view_image=false", "features.apps=false", "features.multi_agent=false", "features.hooks=false",
-                         "features.memories=false", "features.remote_plugin=false", "web_search=\"disabled\"",
+                         "features.memories=false", "features.remote_plugin=false", "web_search=\"\(webSearchMode)\"",
                          "project_doc_max_bytes=0", "history.persistence=\"none\"", "notify=[]", "mcp_servers={}"]
         process.arguments = ["app-server", "--listen", "stdio://"] + overrides.flatMap { ["-c", $0] }
         // The engine owns this isolated login profile. Never inherit API credentials,

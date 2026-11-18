@@ -257,6 +257,22 @@ private actor RetriedAskProvider: AIProvider {
         let snapshot = try String(contentsOf: store.jobDirectory(moduleID: module.id, lectureID: lecture.id, jobID: id).appendingPathComponent("snapshot.json"), encoding: .utf8)
         #expect(!snapshot.contains("Edited while generating"))
     }
+    @Test func generationCanFinishAfterMovingLecture() async throws {
+        let (store, module, lecture, root) = try await setup()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = GateProvider()
+        let runner = JobRunner(store: store, providers: [provider])
+        let jobID = try await runner.generate(moduleID: module.id, lectureID: lecture.id)
+        _ = try await store.moveLecture(moduleID: module.id, lectureID: lecture.id, toSlot: 5)
+        await provider.release()
+        await runner.waitUntilIdle()
+        let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(saved.jobs.first { $0.id == jobID }?.state == .succeeded)
+        #expect(saved.cards.count == 1)
+        #expect(try await store.dashboard().modules[0].slots[4].lectureID == lecture.id)
+        #expect(try await store.dashboard().modules[0].slots[0].lectureID == nil)
+    }
+
     @Test func cancelCannotLandAndRetryReusesOneJob() async throws {
         let (store, module, lecture, root) = try await setup(); defer { try? FileManager.default.removeItem(at: root) }
         let gate = GateProvider(); let runner = JobRunner(store: store, providers: [gate])

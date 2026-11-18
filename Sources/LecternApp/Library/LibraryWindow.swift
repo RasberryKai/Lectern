@@ -24,6 +24,7 @@ struct LibraryWindow: View {
         .background(WindowCloseGuard { await model.closeAllLectureWindows() })
         .foregroundStyle(Theme.ink)
         .sheet(item: $model.renamingLecture) { ref in RenameLectureSheet(ref: ref) }
+        .sheet(item: $model.movingLecture) { ref in MoveLectureSheet(ref: ref) }
         .sheet(isPresented: $model.showNewModule) { NewModuleSheet() }
         .sheet(item: Binding(get: { model.settingsModuleID.map(IdentifiedUUID.init) },
                              set: { model.settingsModuleID = $0?.id })) { item in

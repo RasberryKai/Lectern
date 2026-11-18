@@ -61,6 +61,7 @@ final class AppModel {
     private(set) var bootstrapReport: BootstrapReport? = nil
     var showBootstrapReport = false
     var renamingLecture: LectureRef?
+    var movingLecture: LectureRef?
     var activeLecture: LectureRef?
     private(set) var leavingLecture = false
     var selection: SidebarItem = .overview
@@ -223,6 +224,12 @@ final class AppModel {
             lecture.name = trimmed
         }
         try await workspace?.session.refresh()
+        try await reloadNow()
+    }
+
+    func moveLecture(_ ref: LectureRef, toSlot slot: Int) async throws {
+        try await lectureWindows[ref.lectureID]?.flushAllThrowing()
+        _ = try await store.moveLecture(moduleID: ref.moduleID, lectureID: ref.lectureID, toSlot: slot)
         try await reloadNow()
     }
 

@@ -1,11 +1,11 @@
 import LecternCore
 import SwiftUI
 
-/// Coverage: every slide on the left, a curved line to each card made from it on the right.
+/// Coverage: selected slides on the left, a curved line to each card made from them on the right.
 ///
 /// View-only. It reads card sources, slide selection, skip reasons and verdicts the lecture
 /// already stores, so it needs no AI and changes nothing. A slide that is selected but has no
-/// card that isn't Bad gets a red outline; slides left out in Prepare are greyed.
+/// card that isn't Bad gets a red outline; slides left out in Prepare are hidden.
 struct CoverageView: View {
     let model: LectureWindowModel
 
@@ -21,7 +21,7 @@ struct CoverageView: View {
         for skipped in lecture.skippedSlides { skipReasons[skipped.slide] = skipped.reason }
         return ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 28) {
-                ForEach(lecture.slides) { slide in
+                ForEach(lecture.slides.filter(\.isSelected)) { slide in
                     let page = slide.pageIndex + 1
                     CoverageRow(slide: slide, cards: cardsByPage[page] ?? [], numbers: numbers,
                                 skipReason: skipReasons[page], showsBacks: model.coverageShowsBacks,
@@ -48,14 +48,13 @@ private struct CoverageRow: View {
     let enlarge: () -> Void
 
     static let slideWidth: CGFloat = 320
-    static let unselectedWidth: CGFloat = 200
     static let linesWidth: CGFloat = 140
     static let cardSpacing: CGFloat = 10
 
     private var page: Int { slide.pageIndex + 1 }
     private var cardHeight: CGFloat { showsBacks ? 78 : 40 }
     private var hasLiveCards: Bool { cards.contains { $0.verdict != .bad } }
-    private var uncovered: Bool { slide.isSelected && !hasLiveCards }
+    private var uncovered: Bool { !hasLiveCards }
     private var stackHeight: CGFloat {
         cards.isEmpty ? 0 : CGFloat(cards.count) * cardHeight + CGFloat(cards.count - 1) * Self.cardSpacing
     }
@@ -88,7 +87,7 @@ private struct CoverageRow: View {
                 .foregroundStyle(Theme.faint)
             Button(action: enlarge) {
                 SlideImage(sourceURL: sourceURL, pageIndex: slide.pageIndex,
-                           width: slide.isSelected ? Self.slideWidth : Self.unselectedWidth, cornerRadius: 6)
+                           width: Self.slideWidth, cornerRadius: 6)
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.black.opacity(0.08)))
                     .shadow(color: .black.opacity(0.12), radius: 1.5, y: 1)
                     .overlay {
@@ -96,8 +95,7 @@ private struct CoverageRow: View {
                             RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.bad, lineWidth: 2).padding(-2)
                         }
                     }
-                    .frame(width: slide.isSelected ? Self.slideWidth : Self.unselectedWidth)
-                    .opacity(slide.isSelected ? 1 : 0.4)
+                    .frame(width: Self.slideWidth)
             }
             .buttonStyle(.plain)
             .help("Enlarge slide \(page)")
@@ -114,7 +112,6 @@ private struct CoverageRow: View {
     }
 
     private var statusText: String? {
-        if !slide.isSelected { return "Not selected in Prepare" }
         guard uncovered else { return nil }
         if let skipReason { return "No cards · AI skipped it: “\(skipReason)”" }
         return "No cards"
