@@ -28,7 +28,7 @@ struct AskPanel: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 22) {
-                            if model.chatMessages.isEmpty && model.runningChat == nil { starters }
+                            if model.chatMessages.isEmpty && model.runningChat == nil { emptyState }
                             ForEach(model.chatMessages) { message in
                                 ChatMessageView(model: model, message: message).id(message.id)
                             }
@@ -54,23 +54,35 @@ struct AskPanel: View {
         if model.mode == .review, let id = model.selectedCardID { return "Ask about card \(model.cardNumbers[id] ?? 1)" }
         return model.focusedPage.map { "Ask about slide \($0)" } ?? "Ask about this lecture"
     }
-    private var composerPlaceholder: String {
-        model.mode == .review ? "\(emptyTitle), or tell the AI what to change…" : "\(emptyTitle), or anything in this lecture…"
+    private var composerPlaceholder: String { "Ask anything · @ adds slides or cards" }
+    private var emptyLine: String {
+        if model.mode == .review, model.selectedCardID != nil { return "Ask about it, or tell it what to change on the card." }
+        return model.focusedPage == nil ? "It finds what it needs in the lecture on its own." : "It sees this slide and finds the rest of the lecture on its own."
     }
-    private var starterPrompts: [String] {
-        model.mode == .review ? ["Why is this the right answer?", "Make the back shorter", "Give me a memory hook", "Quiz me on this slide"] : ["Explain this slide simply", "What will the exam ask from this?", "Quiz me on this slide", "Which words here matter most?"]
-    }
-    private var starters: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            LogoMark().fill(Theme.accent).frame(width: 32, height: 32)
-            Text(emptyTitle).font(Theme.serif(21))
-            Text("AI already sees what you’re looking at. Mention other slides or cards with @, or just ask: it finds them in the lecture.").font(Theme.body).foregroundStyle(Theme.quiet)
-            ForEach(starterPrompts, id: \.self) { text in
-                Button(text) { model.setChatDraft(text); focus.wrappedValue = .ask }
-                    .buttonStyle(.plain).font(Theme.small).foregroundStyle(Theme.ink).padding(.horizontal, 12).padding(.vertical, 7)
-                    .background(Theme.surface, in: Capsule()).overlay(Capsule().strokeBorder(Theme.borderStrong))
+    /// Calm, centred empty chat: the mark on a white tile inside faint rings, a title that follows the screen, one line.
+    private var emptyState: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Circle().strokeBorder(Theme.border, lineWidth: 1).frame(width: 200, height: 200)
+                Circle().strokeBorder(Theme.borderStrong.opacity(0.6), lineWidth: 1).frame(width: 132, height: 132)
+                Circle().fill(Theme.aiWash).frame(width: 68, height: 68)
+                RoundedRectangle(cornerRadius: 15).fill(Theme.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Theme.ai.opacity(0.18)))
+                    .shadow(color: Theme.ai.opacity(0.14), radius: 8, y: 6)
+                    .overlay(LogoMark().fill(Theme.ai).frame(width: 26, height: 26))
+                    .frame(width: 52, height: 52)
+                Circle().fill(Theme.ai.opacity(0.4)).frame(width: 6, height: 6).offset(x: 59, y: -67)
+                Circle().fill(Theme.borderStrong).frame(width: 4, height: 4).offset(x: -76, y: 54)
             }
-        }.padding(.vertical, 24).frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: 200, height: 200)
+            .accessibilityHidden(true)
+            Text(emptyTitle).font(Theme.serif(25)).foregroundStyle(Theme.ink).padding(.top, 6)
+            Text(emptyLine).font(.system(size: 13)).foregroundStyle(Theme.quiet).multilineTextAlignment(.center)
+                .lineSpacing(2).frame(maxWidth: 230).padding(.top, 8)
+        }
+        .frame(maxWidth: .infinity)
+        .containerRelativeFrame(.vertical) { length, _ in max(0, length - 36) }
+        .accessibilityElement(children: .combine)
     }
     @ViewBuilder private var runningAnswer: some View {
         if let job = model.runningChat {
@@ -147,8 +159,6 @@ struct AskPanel: View {
             .animation(reduceMotion ? nil : .snappy(duration: 0.28), value: model.newChatLearningPoints.map(\.id))
             .clipped()
             attachmentError
-            Label("AI sees attached images and the context chips, and looks up other slides or cards when needed.", systemImage: "magnifyingglass")
-                .font(.system(size: 10.5)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
         }.padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 8)
             .onChange(of: model.chatDraft) { _, draft in
                 if draft != dismissedMentionDraft { dismissedMentionDraft = nil }
