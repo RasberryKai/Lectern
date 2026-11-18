@@ -8,6 +8,37 @@ public struct JobProgress: Equatable, Sendable {
     public var streamedText: String
     public var warning: String?
     public var read: [ContextRef] = []
+    /// What the AI did so far, in order, for the chat's "what is it doing" hints.
+    public var activity: [JobActivity] = []
+
+    public mutating func apply(_ event: AIEvent) {
+        switch event {
+        case .stage(let stage):
+            self.stage = stage
+            if let step = JobActivity(stage: stage) { note(step) }
+        case .text(let text): streamedText += text
+        case .read(let ref):
+            guard !read.contains(ref) else { return }
+            read.append(ref); note(.reading(ref))
+        }
+    }
+    private mutating func note(_ step: JobActivity) { if activity.last != step { activity.append(step) } }
+}
+
+/// One step of a running AI job. Reads come from `.read` events; stages only add "thinking" or images.
+public enum JobActivity: Equatable, Sendable {
+    case thinking
+    case reading(ContextRef)
+    case images
+
+    init?(stage: String) {
+        switch stage {
+        // Bookkeeping stages, and ones the matching `.read` events describe better.
+        case "Queued", "Writing", "Reading slides…", "Succeeded", "Failed", "Cancelled", "Persistence failed": return nil
+        case "Reading uploaded images…": self = .images
+        default: self = .thinking
+        }
+    }
 }
 
 /// Every provider call passes through this actor. Durable state lives in LibraryStore;
@@ -412,10 +443,20 @@ public actor JobRunner {
                     guard let provider = providers[work.job.backend] else { throw AIError.configuration("Provider unavailable.") }
                     emit(moduleID: work.moduleID, lectureID: work.lectureID, jobID: work.job.id, event: .stage("Sending"))
                     trace.record("provider_call_started", ["backend": work.job.backend.rawValue, "model": work.job.model])
-                    let response = try await provider.execute(work.request) { event in
-                        trace.event(event)
-                        Task { await self.receive(work: work, event: event) }
+                    // One ordered consumer per attempt: separate Tasks per event could deliver text and reads out of order.
+                    let (events, sink) = AsyncStream<AIEvent>.makeStream()
+                    let forwarding = Task { for await event in events { self.receive(work: work, event: event) } }
+                    let response: AIResponse
+                    do {
+                        response = try await provider.execute(work.request) { event in
+                            trace.event(event)
+                            sink.yield(event)
+                        }
+                    } catch {
+                        sink.finish(); await forwarding.value
+                        throw error
                     }
+                    sink.finish(); await forwarding.value
                     recordRunnerResponse(response, trace: trace)
                     try Task.checkCancellation()
                     if work.request.chatSnapshot != nil {
@@ -493,7 +534,7 @@ public actor JobRunner {
     }
     func emit(moduleID: UUID, lectureID: UUID, jobID: UUID, event: AIEvent, warning: String? = nil) {
         var value = progress[jobID] ?? JobProgress(moduleID: moduleID, lectureID: lectureID, jobID: jobID, stage: "Queued", streamedText: "")
-        switch event { case .stage(let stage): value.stage = stage; case .text(let text): value.streamedText += text; case .read(let ref): if !value.read.contains(ref) { value.read.append(ref) } }
+        value.apply(event)
         if let warning { value.warning = warning }
         progress[jobID] = value; subscribers.values.forEach { $0.yield(value) }
     }

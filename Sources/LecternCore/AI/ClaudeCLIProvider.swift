@@ -91,6 +91,9 @@ public struct ClaudeCLIProvider: AIProvider {
                                            model: request.model.isEmpty ? defaultModel : request.model,
                                            pdfURL: pdfURL)
         onEvent(.stage("Starting Claude"))
+        // The inline deck is in the prompt from the start; report it now so progress hints and the receipt show it while streaming.
+        if let snapshot = request.chatSnapshot, snapshot.initialRefs.contains(.allCards),
+           ChatProviderContext(request: request, snapshot: snapshot).hasVerifiedInlineDeck { onEvent(.read(.allCards)) }
         let preview = ChatPreviewEmitter(onEvent: onEvent)
         let tracker = request.chatSnapshot.map { ChatCLIReadTracker(context: ChatProviderContext(request: request, snapshot: $0), onEvent: onEvent) }
         let invocation = CLIInvocation(executableURL: executableURL,
