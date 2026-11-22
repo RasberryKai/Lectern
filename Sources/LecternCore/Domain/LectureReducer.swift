@@ -62,10 +62,10 @@ public extension Lecture {
             case .all: return true
             case .aiFlagged: return card.flag != nil
             case .proposals: return card.proposal != nil
-            case .unreviewed: return card.verdict == .unreviewed
+            case .unreviewed: return card.verdict.isAwaitingReview
             case .good: return card.verdict == .good
             case .bad: return card.verdict == .bad
-            case .needsAdjustment: return card.verdict == .needsAdjustment
+            case .needsAdjustment: return card.verdict.isAwaitingReview
             }
         }.enumerated().sorted { lhs, rhs in
             let l = lhs.element.flag != nil, r = rhs.element.flag != nil

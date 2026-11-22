@@ -12,7 +12,7 @@ struct GenerationOverlay: View {
             Spacer(minLength: 24)
             GenerationAnimation()
             VStack(spacing: 8) {
-                Text("Writing your cards").font(Theme.serif(28))
+                Text("Writing your cards").font(Theme.heading(28))
                 TimelineView(.periodic(from: job.startedAt, by: 1)) { context in
                     Text(detail(now: context.date))
                         .font(Theme.body).foregroundStyle(Theme.quiet).monospacedDigit()

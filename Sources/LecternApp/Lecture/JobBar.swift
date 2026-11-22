@@ -121,7 +121,7 @@ struct GenerateSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Generate cards").font(Theme.serif(26))
+            Text("Generate cards").font(Theme.heading(26))
 
             Text("Generate from \(Format.count(selected.count, "selected slide")).")
                 .font(Theme.body)
@@ -161,7 +161,7 @@ struct GenerateSheet: View {
                 Text("\(app.settings.backend.displayName) · \(app.settings.selectedModel) · \(app.settings.backend.billingNote)")
                     .font(Theme.body)
                 Spacer()
-                SettingsLink { Text("Change") }.buttonStyle(LinkButtonStyle())
+                Button("Change") { dismiss(); app.showSettings = true }.buttonStyle(LinkButtonStyle())
             }
 
             if scope.count > 100 {

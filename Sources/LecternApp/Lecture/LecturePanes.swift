@@ -7,10 +7,10 @@ nonisolated enum LectureSideTab: String { case content, chat }
 
 /// Independent layouts for the thumbnail workspace and the wider review list.
 @Observable final class LecturePaneState {
-    var prepareLeft: Double = UserDefaults.standard.object(forKey: "v2.prepare.left") as? Double ?? 210
-    var prepareRight: Double = UserDefaults.standard.object(forKey: "v2.prepare.right") as? Double ?? 400
-    var reviewLeft: Double = UserDefaults.standard.object(forKey: "v2.review.left") as? Double ?? 260
-    var reviewRight: Double = UserDefaults.standard.object(forKey: "v2.review.right") as? Double ?? 400
+    var prepareLeft: Double = UserDefaults.standard.object(forKey: "v2.prepare.left") as? Double ?? 180
+    var prepareRight: Double = UserDefaults.standard.object(forKey: "v2.prepare.right") as? Double ?? 360
+    var reviewLeft: Double = UserDefaults.standard.object(forKey: "v2.review.left") as? Double ?? 300
+    var reviewRight: Double = UserDefaults.standard.object(forKey: "v2.review.right") as? Double ?? 360
     var focusedDivider: PaneSide?
     var reviewLeftVisible = true
     private var prepareTab = LectureSideTab(rawValue: UserDefaults.standard.string(forKey: "v2.prepare.tab") ?? "content") ?? .content
@@ -58,21 +58,21 @@ struct LecturePanes<Left: View, Stage: View, Right: View>: View {
             let leftWidth = showLeft ? min(desiredLeft, max(150, budget - rightWidth)) : 0
             HStack(spacing: 0) {
                 if showLeft {
-                    left().frame(width: leftWidth).background(Theme.sidebar)
+                    left().frame(width: leftWidth).background(Theme.surface)
                     divider(.left, displayedWidth: leftWidth, maximum: budget - rightWidth)
                 }
                 stage().frame(maxWidth: .infinity, maxHeight: .infinity)
                     .layoutPriority(1)
                 if showRight {
                     divider(.right, displayedWidth: rightWidth, maximum: budget - leftWidth)
-                    right().frame(width: rightWidth).background(Theme.canvas)
+                    right().frame(width: rightWidth).background(Theme.surface)
                 }
             }
         }
     }
 
     private func divider(_ side: PaneSide, displayedWidth: Double, maximum: Double) -> some View {
-        PaneDivider(side: side, width: displayedWidth, maximum: maximum, defaultWidth: side == .left ? (model.mode == .prepare ? 210 : 260) : 400) { width in
+        PaneDivider(side: side, width: displayedWidth, maximum: maximum, defaultWidth: side == .left ? (model.mode == .prepare ? 180 : 300) : 360) { width in
             model.panes.resize(side, mode: model.mode, width: width)
         } focusChanged: { active in
             model.panes.focusedDivider = active ? side : nil
@@ -100,7 +100,9 @@ private struct PaneDivider: View {
     var body: some View {
         Rectangle().fill(Color.clear)
             .frame(width: 6)
-            .overlay { Rectangle().fill(Theme.border).frame(width: 1) }
+            .overlay {
+                if side == .left { Rectangle().fill(Theme.border).frame(width: 1) }
+            }
             .contentShape(Rectangle())
             .focusable().focusEffectDisabled().focused($focused)
             .onChange(of: focused) { _, value in focusChanged(value) }

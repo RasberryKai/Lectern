@@ -9,23 +9,39 @@ struct ReviewView: View {
         LecturePanes(model: model) {
             CardList(model: model)
         } stage: {
-            ScrollView {
-                if let card = model.selectedCard {
-                    CardDetail(model: model, card: card, focus: focus)
-                        .frame(maxWidth: 760)
-                        .padding(.horizontal, 28).padding(.vertical, 24)
+            GeometryReader { geometry in
+                ScrollView {
+                    reviewStage
+                        .frame(maxWidth: 600)
+                        .padding(.horizontal, geometry.size.width >= 480 ? 40 : 12)
+                        .padding(.vertical, 24)
                         .frame(maxWidth: .infinity)
-                } else { emptyState.padding(40) }
+                }
             }
         } right: {
             LectureSidePanel(model: model, focus: focus)
         }
     }
 
+    private var reviewStage: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                if model.selectedCard != nil { CardPager(model: model) }
+                Spacer()
+                SegmentedControl(options: [(false, "Browse"), (true, "Test")],
+                                 selection: Binding(get: { model.testMode }, set: { model.setTestMode($0) }),
+                                 activeFill: Theme.ink, activeText: Theme.canvas)
+                    .help("Test hides the answer until you press Space · T switches")
+            }
+            if let card = model.selectedCard { CardDetail(model: model, card: card, focus: focus) }
+            else { emptyState }
+        }
+    }
+
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 10) {
             if model.activeCards.isEmpty {
-                Text("No cards yet").font(Theme.serif(22))
+                Text("No cards yet").font(Theme.heading(22))
                 Text(model.lecture.pageCount > 0
                      ? "Select slides and note what matters in Prepare, then Generate. New cards land here as Unreviewed."
                      : "This lecture has no cards.")
@@ -34,17 +50,17 @@ struct ReviewView: View {
                     Button("Go to Prepare") { model.setMode(.prepare) }.buttonStyle(PrimaryButtonStyle())
                 }
             } else if model.testMode && model.reviewFilter == .unreviewed && model.count(for: .unreviewed) == 0 {
-                Text("Every card is tested").font(Theme.serif(22))
-                Text("\(Format.count(model.count(for: .good), "Good card")) ready for Anki. Needs work and Bad cards stay here.")
+                Text("Every card is tested").font(Theme.heading(22))
+                Text("\(Format.count(model.count(for: .good), "Good card")) ready for Anki. Bad cards stay here.")
                     .font(Theme.body).foregroundStyle(Theme.quiet)
                 HStack(spacing: 10) {
                     Button("Export to Anki") {
-                        Task { await model.app.returnToLibrary(destination: .export(model.ref.moduleID)) }
+                        Task { await model.app.returnToLibrary(destination: .export(model.ref.moduleID, lectureID: model.ref.lectureID)) }
                     }.buttonStyle(PrimaryButtonStyle())
                     Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
                 }
             } else {
-                Text("Nothing in this filter").font(Theme.serif(22))
+                Text("Nothing in this filter").font(Theme.heading(22))
                 if model.reviewSearch.isEmpty {
                     Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
                 } else {
@@ -64,7 +80,7 @@ private struct CardList: View {
 
     private let filters: [(ReviewFilter, String)] = [
         (.all, "All"), (.unreviewed, "To review"), (.aiFlagged, "AI flagged"),
-        (.needsAdjustment, "Needs work"), (.bad, "Bad"), (.good, "Good"), (.proposals, "Proposals")
+        (.bad, "Bad"), (.good, "Good"), (.proposals, "Proposals")
     ]
 
     var body: some View {
@@ -74,6 +90,7 @@ private struct CardList: View {
                     Image(systemName: "magnifyingglass").foregroundStyle(Theme.faint)
                     TextField("Search cards", text: $model.reviewSearch).textFieldStyle(.plain).font(Theme.body)
                         .accessibilityLabel("Search cards")
+                        .onChange(of: model.reviewSearch) { _, _ in model.setReviewFilter(model.reviewFilter) }
                 }
                 .padding(8).background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
                 .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border))
@@ -82,18 +99,21 @@ private struct CardList: View {
                     filterRows(columns: 2)
                     filterRows(columns: 1)
                 }
-            }.padding(10)
+            }.padding(14)
             Divider().overlay(Theme.border)
             let numbers = model.cardNumbers
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 2) {
                         ForEach(model.visibleCards) { card in
-                            CardRow(card: card, number: numbers[card.id] ?? 0, issues: !model.lecture.issues(for: card).isEmpty,
-                                    revising: model.runningJobs.contains { $0.kind == .revise && $0.targetCardID == card.id },
-                                    selected: card.id == model.selectedCardID)
-                                .id(card.id)
-                                .onTapGesture { model.selectCard(card.id) }
+                            Button { model.selectCard(card.id) } label: {
+                                CardRow(card: card, number: numbers[card.id] ?? 0, issues: !model.lecture.issues(for: card).isEmpty,
+                                        revising: model.runningJobs.contains { $0.kind == .revise && $0.targetCardID == card.id },
+                                        selected: card.id == model.selectedCardID)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityAddTraits(card.id == model.selectedCardID ? .isSelected : [])
+                            .id(card.id)
                         }
                     }
                     .padding(6)
@@ -168,7 +188,6 @@ private struct CardDetail: View {
     @Bindable var model: LectureWindowModel
     let card: Card
     var focus: FocusState<EditorField?>.Binding
-    @State private var showSourcePicker = false
 
     var body: some View {
         let issues = model.lecture.issues(for: card)
@@ -194,11 +213,11 @@ private struct CardDetail: View {
                 side("Front", text: $model.editorFront, field: .front, size: 24)
                 Rectangle().fill(Theme.border).frame(height: 1)
                 if hidden { answerPrompt } else { answer }
-                VerdictBar(model: model, focus: focus)
+                VerdictBar(model: model)
             }
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.border))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
             if !hidden { MathChoices(model: model, card: card) }
             hints(hidden: hidden)
             if !hidden { history }
@@ -232,8 +251,6 @@ private struct CardDetail: View {
             }.padding(16)
         }
         if let proposal = card.proposal { ProposalCard(model: model, card: card, proposal: proposal).padding(16) }
-        if (card.verdict == .needsAdjustment && card.proposal == nil) || focus.wrappedValue == .feedback { feedback }
-        if model.lecture.pageCount > 0 { sources }
     }
 
     private func hints(hidden: Bool) -> some View {
@@ -289,80 +306,11 @@ private struct CardDetail: View {
                             if focus.wrappedValue == field { model.editorChanged() }
                         }
                 }
-                .font(field == .front ? Theme.serif(size, weight: .medium) : .system(size: size))
+                .font(.system(size: size, weight: field == .front ? .semibold : .regular))
                 .lineSpacing(5)
             MathPreviewView(text: text.wrappedValue)
         }
         .padding(.horizontal, 26).padding(.vertical, 20)
-    }
-
-    private var sources: some View {
-        HStack(spacing: 8) {
-            Text("From").foregroundStyle(Theme.quiet)
-            ForEach(card.sourcePages, id: \.self) { page in
-                HStack(spacing: 5) {
-                    Button("Slide \(page)") { model.enlargedPage = page }.buttonStyle(.plain)
-                    Button {
-                        model.editorSources = card.sourcePages.filter { $0 != page }.map(String.init).joined(separator: ", ")
-                        model.editorChanged()
-                    } label: { Image(systemName: "xmark").font(.system(size: 9)).foregroundStyle(Theme.faint) }
-                    .buttonStyle(.plain).disabled(model.readOnly).accessibilityLabel("Remove slide \(page) source")
-                }
-                .padding(.horizontal, 7).padding(.vertical, 3)
-                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 5))
-                .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Theme.border))
-            }
-            Button("add") { showSourcePicker = true }.buttonStyle(LinkButtonStyle(color: Theme.quiet)).disabled(model.readOnly)
-                .popover(isPresented: $showSourcePicker) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Source slides").fontWeight(.semibold)
-                        TextField("e.g. 1, 2", text: $model.editorSources).textFieldStyle(.roundedBorder)
-                            .onChange(of: model.editorSources) { _, _ in model.editorChanged() }
-                        Button("Done") { showSourcePicker = false }.buttonStyle(PrimaryButtonStyle())
-                    }.padding(16).frame(width: 220)
-                }
-            Spacer()
-            if let point = card.learningPointID.flatMap({ id in model.lecture.learningPoints.first { $0.id == id } }) {
-                if model.canShowChat(for: point) {
-                    Button { model.showChat(for: point) } label: { Label("From your chat", systemImage: "bubble.left.and.text.bubble.right") }
-                        .buttonStyle(.plain).foregroundStyle(Theme.ai).help("Show where this explanation clicked")
-                } else {
-                    Text("From deleted chat").foregroundStyle(Theme.quiet).help("The source chat is no longer available.")
-                }
-            } else {
-                Text(card.history.count > 1 ? "Edited" : "As generated").foregroundStyle(Theme.quiet)
-            }
-        }
-        .font(Theme.small).padding(.horizontal, 26).padding(.vertical, 10)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
-    }
-
-    private var feedback: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("Your feedback:").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.amber)
-                TextField("What should change? Enter sends · Shift+Enter for a new line.", text: $model.feedbackDraft, axis: .vertical)
-                    .textFieldStyle(.plain).font(Theme.small).lineLimit(1...6)
-                    .focused(focus, equals: .feedback)
-                    .disabled(model.readOnly)
-            }
-            if !model.feedbackDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                HStack(spacing: 10) {
-                    Button("Send to AI ↩") { Task { await model.sendFeedback() } }
-                        .buttonStyle(SecondaryButtonStyle(foreground: Theme.aiStrong, stroke: Theme.ai))
-                        .disabled(model.readOnly || card.proposal != nil)
-                        .help(card.proposal != nil ? "Resolve the current proposal first." : "AI rewrites the card; you keep reviewing.")
-                    Button("Make module rule") { Task { await model.makeModuleRule() } }
-                        .buttonStyle(LinkButtonStyle())
-                        .disabled(model.readOnly)
-                        .help("Appends this feedback to the module instructions for future generations.")
-                    if let result = model.proposeResult { Text(result).font(Theme.caption).foregroundStyle(Theme.quiet).lineLimit(2) }
-                }
-            }
-        }
-        .padding(.horizontal, 22).padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.amberWash.opacity(0.55))
     }
 
     @ViewBuilder private var history: some View {
@@ -440,7 +388,7 @@ private struct ProposalCard: View {
             case .pending:
                 HStack { ProgressView().controlSize(.small); Text("Waiting for AI…").font(Theme.small) }
             case .failed:
-                Text("This proposal failed. Discard it and send the feedback again.").font(Theme.small).foregroundStyle(Theme.bad)
+                Text("This proposal failed. Discard it and request the change in chat again.").font(Theme.small).foregroundStyle(Theme.bad)
             case .ready:
                 if proposal.cards.count == 1, let draft = proposal.cards.first {
                     if draft.front != card.front { DiffText(label: "Front", before: card.front, after: draft.front) }
@@ -549,9 +497,13 @@ struct DiffText: View {
 
 struct ReviewSourcePane: View {
     @Bindable var model: LectureWindowModel
+    @State private var showSourcePicker = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if let card = model.selectedCard, !model.answerHidden {
+                    sourceActions(for: card)
+                }
                 if let card = model.selectedCard, !card.sourcePages.isEmpty {
                     let index = min(model.sourceIndex, card.sourcePages.count - 1)
                     let page = card.sourcePages[index]
@@ -581,35 +533,55 @@ struct ReviewSourcePane: View {
                         }
                         let note = model.noteText(for: page - 1)
                         if !note.isEmpty { Text(note).font(Theme.body).foregroundStyle(Theme.quiet) }
-                    } else { Text("This source slide is unavailable. Update its number on the card.").font(Theme.body).foregroundStyle(Theme.bad) }
+                    } else { Text("This source slide is unavailable. Choose Edit source slides to update its number.").font(Theme.body).foregroundStyle(Theme.bad) }
                 } else { Text("No source slides linked to this card.").font(Theme.body).foregroundStyle(Theme.quiet) }
             }.padding(16)
         }
     }
+
+    private func sourceActions(for card: Card) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button("Edit source slides") { showSourcePicker = true }
+                .buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                .disabled(model.readOnly)
+                .popover(isPresented: $showSourcePicker) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Source slides").fontWeight(.semibold)
+                        TextField("e.g. 1, 2", text: $model.editorSources)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Source slide numbers")
+                            .onChange(of: model.editorSources) { _, _ in model.editorChanged() }
+                        Button("Done") { showSourcePicker = false }
+                            .buttonStyle(PrimaryButtonStyle())
+                    }
+                    .padding(16).frame(width: 220)
+                    .onDisappear { Task { await model.run { try await model.session.flushEdits() } } }
+                }
+            if let point = card.learningPointID.flatMap({ id in model.lecture.learningPoints.first { $0.id == id } }) {
+                if model.canShowChat(for: point) {
+                    Button { model.showChat(for: point) } label: {
+                        Label("From your chat", systemImage: "bubble.left.and.text.bubble.right")
+                    }
+                    .buttonStyle(LinkButtonStyle(color: Theme.ai))
+                    .help("Show where this explanation clicked")
+                } else {
+                    Text("From deleted chat").font(Theme.small).foregroundStyle(Theme.quiet)
+                }
+            }
+        }
+    }
+
 }
 
 private struct VerdictBar: View {
     let model: LectureWindowModel
-    var focus: FocusState<EditorField?>.Binding
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 7) { pager; Spacer(minLength: 8); trailing }
-            VStack(alignment: .leading, spacing: 10) { pager; trailing }
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(Theme.inset.opacity(0.5))
-        .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
-    }
-
-    private var pager: some View {
-        HStack(spacing: 10) {
-            Button { model.stepCard(-1) } label: { Image(systemName: "chevron.left") }.accessibilityLabel("Previous card")
-            Text("\(model.selectedCard.flatMap { model.cardNumbers[$0.id] } ?? 0) / \(model.activeCards.count)")
-                .font(Theme.small).monospacedDigit().foregroundStyle(Theme.quiet)
-            Button { model.stepCard(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next card")
-        }.fixedSize()
+        trailing
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
     @ViewBuilder private var trailing: some View {
@@ -628,9 +600,8 @@ private struct VerdictBar: View {
 
     private var verdicts: some View {
         HStack(spacing: 6) {
-            verdictButton("Bad", key: "2", value: .bad)
-            verdictButton("Needs work", key: "3", value: .needsAdjustment)
             verdictButton("Good", key: "1", value: .good)
+            verdictButton("Bad", key: "2", value: .bad)
         }.fixedSize()
     }
 
@@ -638,17 +609,28 @@ private struct VerdictBar: View {
         let active = model.selectedCard?.verdict == value
         return Button {
             Task { await model.setVerdict(value) }
-            if value == .needsAdjustment { focus.wrappedValue = .feedback }
         } label: {
             HStack(spacing: 6) {
                 Circle().fill(value.v2Color).frame(width: 7, height: 7)
                 Text(title).font(.system(size: 12.5, weight: active ? .semibold : .medium))
                 ShortcutKey(text: key)
             }
-            .foregroundStyle(active ? value.v2Color : Theme.ink)
+            .foregroundStyle(active ? value.v2Color : Theme.quiet)
             .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(active ? value.v2Color.opacity(0.1) : Theme.surface, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(active ? value.v2Color : Theme.borderStrong))
+            .background(active ? value.v2Color.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 7))
         }.disabled(model.readOnly)
+    }
+}
+
+private struct CardPager: View {
+    let model: LectureWindowModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button { model.stepCard(-1) } label: { Image(systemName: "chevron.left") }.accessibilityLabel("Previous card")
+            Text("\(model.selectedCard.flatMap { model.cardNumbers[$0.id] } ?? 0) / \(model.activeCards.count)")
+                .font(Theme.small).monospacedDigit().foregroundStyle(Theme.quiet)
+            Button { model.stepCard(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next card")
+        }.buttonStyle(.plain).fixedSize()
     }
 }

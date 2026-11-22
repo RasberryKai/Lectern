@@ -96,7 +96,8 @@ public struct ViewPreferences: Codable, Equatable, Sendable {
         thumbnailSize = try c.decode(ThumbnailSize.self, forKey: .thumbnailSize)
         filter = try c.decode(SlideFilter.self, forKey: .filter)
         selectedCardID = try c.decodeIfPresent(UUID.self, forKey: .selectedCardID)
-        reviewFilter = try c.decode(ReviewFilter.self, forKey: .reviewFilter)
+        let savedReviewFilter = try c.decode(ReviewFilter.self, forKey: .reviewFilter)
+        reviewFilter = savedReviewFilter == .needsAdjustment ? .unreviewed : savedReviewFilter
         // A mode this build doesn't know (written by a newer one) must not make the lecture unreadable.
         mode = (try? c.decode(LectureMode.self, forKey: .mode)) ?? .prepare
         // Lectures saved before Coverage existed have no key.

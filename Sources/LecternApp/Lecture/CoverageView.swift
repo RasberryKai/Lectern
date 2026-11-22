@@ -19,20 +19,25 @@ struct CoverageView: View {
         for card in cards { for page in Set(card.sourcePages) { cardsByPage[page, default: []].append(card) } }
         var skipReasons: [Int: String] = [:]
         for skipped in lecture.skippedSlides { skipReasons[skipped.slide] = skipped.reason }
+        let selected = lecture.slides.filter(\.isSelected)
         return ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 28) {
-                ForEach(lecture.slides.filter(\.isSelected)) { slide in
+                if selected.isEmpty {
+                    Text("Select slides in Prepare to see their cards here.")
+                        .font(Theme.body).foregroundStyle(Theme.quiet)
+                }
+                ForEach(selected) { slide in
                     let page = slide.pageIndex + 1
                     CoverageRow(slide: slide, cards: cardsByPage[page] ?? [], numbers: numbers,
                                 skipReason: skipReasons[page], showsBacks: model.coverageShowsBacks,
                                 sourceURL: sourceURL) { model.enlargedPage = page }
                 }
             }
-            .frame(maxWidth: 1000, alignment: .leading)
-            .padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 40)
+            .frame(maxWidth: 880, alignment: .leading)
+            .padding(.horizontal, 32).padding(.top, 32).padding(.bottom, 40)
             .frame(maxWidth: .infinity)
         }
-        .background(Theme.canvas)
+        .background(Theme.canvasGrid)
     }
 }
 
@@ -47,7 +52,7 @@ private struct CoverageRow: View {
     let sourceURL: URL
     let enlarge: () -> Void
 
-    static let slideWidth: CGFloat = 320
+    static let slideWidth: CGFloat = 220
     static let linesWidth: CGFloat = 140
     static let cardSpacing: CGFloat = 10
 
@@ -63,7 +68,7 @@ private struct CoverageRow: View {
         HStack(alignment: .slideCenter, spacing: 0) {
             slideColumn.frame(width: Self.slideWidth, alignment: .leading)
             CoverageLines(count: cards.count, cardHeight: cardHeight, spacing: Self.cardSpacing)
-                .stroke(Theme.faint, style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                .stroke(Theme.borderStrong, style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round))
                 .frame(width: Self.linesWidth, height: stackHeight)
                 .alignmentGuide(.slideCenter) { $0[VerticalAlignment.center] }
                 .accessibilityHidden(true)
@@ -77,14 +82,13 @@ private struct CoverageRow: View {
             .frame(minWidth: 240, maxWidth: 520, alignment: .leading)
             .alignmentGuide(.slideCenter) { $0[VerticalAlignment.center] }
         }
+        .frame(minHeight: 135)
         .accessibilityElement(children: .contain)
     }
 
     private var slideColumn: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Slide \(page)")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Theme.faint)
+            Text("Slide \(page)").eyebrow()
             Button(action: enlarge) {
                 SlideImage(sourceURL: sourceURL, pageIndex: slide.pageIndex,
                            width: Self.slideWidth, cornerRadius: 6)
@@ -195,9 +199,10 @@ private struct CoverageCard: View {
         .frame(maxWidth: .infinity, minHeight: height, maxHeight: height, alignment: .leading)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.borderStrong))
-        .help(showsBack ? "" : card.back)
+        .help(showsBack ? "\(card.front)\n\(card.back)" : card.back)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Card \(number), \(card.verdict.v2Title): \(card.front)")
+        .accessibilityValue(showsBack ? card.back : "")
     }
 
     private func singleLine(_ text: String) -> String {
@@ -205,12 +210,12 @@ private struct CoverageCard: View {
     }
 }
 
-/// Green Good, amber Needs work, red Bad, hollow To review.
+/// Green Good, red Bad, hollow To review.
 private struct VerdictDot: View {
     let verdict: CardVerdict
     var body: some View {
         Group {
-            if verdict == .unreviewed {
+            if verdict.isAwaitingReview {
                 Circle().strokeBorder(Theme.faint, lineWidth: 1.5)
             } else {
                 Circle().fill(verdict.v2Color)

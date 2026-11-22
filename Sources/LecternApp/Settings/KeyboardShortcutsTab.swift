@@ -2,67 +2,74 @@ import SwiftUI
 
 struct KeyboardShortcutsTab: View {
     var body: some View {
-        Form {
-            Section("App") {
-                shortcut("Settings", "⌘,")
-                shortcut("Overview", "⌘0")
-                shortcut("New module", "⌘⇧N")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Shortcuts").settingsHeading()
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(spacing: 12) {
+                        section("App", [
+                            ("Settings", "⌘ ,"),
+                            ("Overview", "⌘ 0"),
+                            ("New module", "⌘ ⇧ N")
+                        ])
+                        section("Lecture workspace", [
+                            ("Prepare / Coverage / Review", "⌘1  ⌘2  ⌘3"),
+                            ("Generate cards", "⌘ G"),
+                            ("Toggle AI chat", "⌘ ⇧ A"),
+                            ("New chat", "⌘ N"),
+                            ("Cards (Prepare) / Source (Review)", "⌘ ⇧ S"),
+                            ("Toggle right pane", "⌘ ⌥ B")
+                        ])
+                        section("Prepare", [
+                            ("Previous / next slide", "←  →"),
+                            ("Use slide for cards", "Space"),
+                            ("Toggle thumbnails", "⌘ B"),
+                            ("Toggle notes", "⌘ J"),
+                            ("Open AI chat", "A")
+                        ])
+                    }
+                    VStack(spacing: 12) {
+                        section("Review", [
+                            ("Previous / next card", "←  →  or  J  K"),
+                            ("Good / Bad", "1  2"),
+                            ("Accept proposal", "↩"),
+                            ("Accept and mark Good", "⇧ ↩"),
+                            ("Discard proposal", "X"),
+                            ("Undo", "U"),
+                            ("Source slides", "S"),
+                            ("Browse / Test", "T"),
+                            ("Show answer (Test)", "Space"),
+                            ("Edit card front", "E")
+                        ])
+                        section("Chat", [
+                            ("Send", "↩"),
+                            ("New line", "⇧ ↩"),
+                            ("Attach context", "@"),
+                            ("Paste an image", "⌘ V")
+                        ])
+                    }
+                }
             }
-            Section {
-                shortcut("Toggle AI chat", "⌘⇧A")
-                shortcut("New chat", "⌘N")
-                shortcut("Toggle Cards in Prepare / Source in Review", "⌘⇧S")
-                Text("These work while typing in a lecture. Press the shortcut again to hide the active pane. Switching tabs keeps the pane open. ⌘A keeps its usual Select All behavior.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
-                shortcut("Prepare / Coverage / Review", "⌘1 / ⌘2 / ⌘3")
-                shortcut("Generate cards", "⌘G")
-                shortcut("Toggle right pane", "⌘⌥B")
-            } header: { Text("Lecture workspace") }
-            Section("Prepare · outside text fields") {
-                shortcut("Previous / next slide", "← ↑ / → ↓")
-                shortcut("Use slide for cards", "Space")
-                shortcut("Toggle thumbnails", "⌘B")
-                shortcut("Toggle notes", "⌘J")
-                shortcut("Open AI chat", "A")
-            }
-            Section("Review · outside text fields") {
-                shortcut("Previous / next card", "← ↑ J / → ↓ K")
-                shortcut("Good / Bad / Needs work", "1 / 2 / 3")
-                shortcut("Accept proposal", "Return")
-                shortcut("Accept and mark Good", "⇧Return")
-                shortcut("Discard proposal", "X")
-                shortcut("Undo last verdict or edit", "U")
-                shortcut("Open source / cycle source slides", "S")
-                shortcut("Enlarge source slide", "Space")
-                shortcut("Switch Browse / Test", "T")
-                shortcut("Show answer (Test)", "Space")
-                shortcut("Open source in Prepare", "G")
-                shortcut("Edit card front", "E")
-                shortcut("Open AI chat", "A")
-            }
-            Section("Chat and feedback") {
-                shortcut("Send", "Return / ⌘Return")
-                shortcut("New line", "⇧Return")
-                shortcut("Attach context in chat", "@")
-                shortcut("Navigate / select context", "↑ ↓ / Return")
-                shortcut("Paste an image into chat", "⌘V")
-                shortcut("Dismiss context picker / leave text field", "Esc")
-            }
-            Section("Pane dividers") {
-                shortcut("Resize focused divider", "← / →")
-                Text("Drag to resize; drag past the minimum to hide. Double-click to reset the width.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
-            }
+            .padding(.horizontal, 40).padding(.vertical, 32)
         }
-        .formStyle(.grouped)
     }
 
-    private func shortcut(_ title: String, _ keys: String) -> some View {
-        LabeledContent(title) {
-            Text(keys).font(.system(size: 12, weight: .medium, design: .monospaced))
-                .foregroundStyle(Theme.ink)
-                .padding(.horizontal, 7).padding(.vertical, 3)
-                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 4))
+    private func section(_ title: String, _ shortcuts: [(action: String, keys: String)]) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title).eyebrow().accessibilityAddTraits(.isHeader)
+            ForEach(shortcuts, id: \.action) { shortcut in
+                HStack(alignment: .firstTextBaseline) {
+                    Text(shortcut.action).font(Theme.small)
+                    Spacer(minLength: 4)
+                    Text(shortcut.keys)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.quiet)
+                        .fixedSize()
+                }
+                .accessibilityElement(children: .combine)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panel(padding: 16)
     }
 }

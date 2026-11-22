@@ -15,7 +15,7 @@ struct LectureWindow: View {
                 LectureWorkspace(model: model)
             } else if let loadError {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("This lecture can't be opened").font(Theme.serif(24))
+                    Text("This lecture can't be opened").font(Theme.heading(24))
                     Text(loadError).font(Theme.body).foregroundStyle(Theme.quiet).textSelection(.enabled)
                 }
                 .padding(40)
@@ -24,7 +24,7 @@ struct LectureWindow: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Theme.canvas)
+        .background(Theme.canvasGrid)
         .foregroundStyle(Theme.ink)
         .task { await load() }
     }
@@ -53,7 +53,7 @@ struct LectureWindow: View {
 }
 
 nonisolated enum EditorField: Hashable {
-    case note, front, back, sources, feedback, ask, title
+    case note, front, back, sources, ask, title
 }
 
 struct LectureWorkspace: View {
@@ -95,7 +95,7 @@ struct LectureWorkspace: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             JobBar(model: model)
         }
-        .background(Theme.canvas)
+        .background(Theme.canvasGrid)
         .navigationTitle(model.lecture.name)
         .navigationSubtitle(model.moduleName)
         .sheet(isPresented: $model.showGenerateSheet) { GenerateSheet(model: model) }
@@ -119,7 +119,6 @@ struct LectureWorkspace: View {
             model.setMode(mode)
         }
         .onChange(of: focus) { old, _ in
-            if old == .feedback { Task { await model.saveFeedback() } }
             if old == .note { model.flushNote() }
             if old == .front || old == .back || old == .sources { Task { await model.run { try await model.session.flushEdits() } } }
         }
@@ -130,6 +129,7 @@ struct LectureWorkspace: View {
     private var generationOverlayVisible: Bool { model.mode == .review && model.runningGenerate != nil }
 
     private func handleKey(_ event: NSEvent, editing: Bool) -> Bool {
+        guard !app.showSettings else { return false }
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
         if modifiers == .command, letter == "n" {
@@ -183,25 +183,9 @@ struct LectureWorkspace: View {
                 model.thumbnailsVisible.toggle(); return true
             default: break
             }
-            if Key.isReturn(event) {
-                switch focus {
-                case .feedback: Task { await model.sendFeedback() }; return true
-                case .ask:
-                    // The editor gives an open mention menu first refusal.
-                    return false
-                default: return false
-                }
-            }
-        }
-        if Key.isReturn(event), modifiers.isEmpty, focus == .feedback {
-            Task { await model.sendFeedback() }
-            focus = nil
-            NSApp.keyWindow?.makeFirstResponder(nil)
-            return true
         }
         if event.keyCode == Key.escape, editing {
             if focus == .ask { return false }
-            if focus == .feedback { Task { await model.saveFeedback() } }
             focus = nil
             NSApp.keyWindow?.makeFirstResponder(nil)
             return true
@@ -269,15 +253,11 @@ struct LectureWorkspace: View {
         default: break
         }
         // In Test, a verdict only counts after the answer was shown.
-        if model.answerHidden, ["1", "2", "3", "x", "s", "g"].contains(letter) { return true }
+        if model.answerHidden, ["1", "2", "x", "s", "g"].contains(letter) { return true }
         switch letter {
         case "t": model.setTestMode(!model.testMode); return true
         case "1": Task { await model.setVerdict(.good) }; return true
         case "2": Task { await model.setVerdict(.bad) }; return true
-        case "3":
-            Task { await model.setVerdict(.needsAdjustment) }
-            focus = .feedback
-            return true
         case "x": Task { await model.discardProposal() }; return true
         case "u": Task { await model.undo() }; return true
         case "j": model.stepCard(-1); return true
@@ -317,7 +297,7 @@ private struct EnlargedSlideSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Slide \(page)").font(Theme.serif(20))
+                Text("Slide \(page)").font(Theme.heading(20))
                 Spacer()
                 Button("Open in Prepare") { dismiss(); model.jumpToPrepare(page: page) }.buttonStyle(SecondaryButtonStyle())
                 Button("Close") { dismiss() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.cancelAction)
@@ -343,61 +323,67 @@ struct LectureTopBar: View {
     var focus: FocusState<EditorField?>.Binding
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                Task { await app.returnToLibrary() }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+        HStack(spacing: 16) {
+            HStack(spacing: 10) {
+                Button {
+                    Task { await app.returnToLibrary(destination: .module(model.ref.moduleID)) }
+                } label: {
+                    Label(model.moduleName, systemImage: "arrow.left")
+                        .lineLimit(1)
+                }
+                .buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                .disabled(app.leavingLecture)
+                if let slot = app.progress(model.ref.moduleID)?.slots.first(where: { $0.lectureID == model.ref.lectureID }) {
+                    Text(String(format: "%02d", slot.id.index))
+                        .font(Theme.small).foregroundStyle(Theme.faint).monospacedDigit()
+                }
+                presentationTitle
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back to library")
-            .disabled(app.leavingLecture)
-            presentationTitle
-            Text(model.moduleName).font(Theme.small).foregroundStyle(Theme.faint).lineLimit(1)
-            SegmentedControl(options: [(LectureMode.prepare, "Prepare"), (LectureMode.coverage, "Coverage"), (LectureMode.review, "Review")],
+            .frame(maxWidth: .infinity, alignment: .leading)
+            SegmentedControl(options: [(LectureMode.prepare, "Prepare"), (.coverage, "Coverage"), (.review, "Review")],
                              selection: Binding(get: { model.mode }, set: { model.setMode($0) }))
                 .help("⌘1 Prepare · ⌘2 Coverage · ⌘3 Review")
                 .disabled(model.lecture.pageCount == 0)
-            if model.mode == .review {
-                SegmentedControl(options: [(false, "Browse"), (true, "Test")],
-                                 selection: Binding(get: { model.testMode }, set: { model.setTestMode($0) }),
-                                 activeFill: Theme.ink, activeText: Theme.canvas)
-                    .help("Browse shows every answer · Test hides it until you press Space · T switches")
+            HStack(spacing: 10) {
+                switch model.mode {
+                case .prepare: prepareTrailing
+                case .coverage: coverageTrailing
+                case .review: reviewTrailing
+                }
+                if model.mode != .coverage { workspaceOptions }
             }
-            Spacer(minLength: 10)
-            switch model.mode {
-            case .prepare: prepareTrailing
-            case .coverage: coverageTrailing
-            case .review: reviewTrailing
-            }
-            if model.mode != .coverage { sidebarToggles }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-        .background(Theme.sidebar)
+        .padding(.horizontal, 16)
+        .frame(height: 56)
+        .background(Theme.surface)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
-    @ViewBuilder private var sidebarToggles: some View {
-        Button {
-            if model.mode == .prepare { model.thumbnailsVisible.toggle() }
-            else { model.panes.reviewLeftVisible.toggle() }
-        } label: { Image(systemName: "sidebar.left").frame(width: 28, height: 26) }
-            .buttonStyle(.plain).foregroundStyle(Theme.quiet)
-            .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
-            .accessibilityLabel("Toggle left sidebar")
-        Button {
-            model.askVisible.toggle()
-        } label: {
-            Image(systemName: "sidebar.right").frame(width: 28, height: 26)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Theme.quiet)
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
-        .accessibilityLabel("Toggle right sidebar")
-        .help("Toggle right sidebar · ⌘⌥B")
-        .keyboardShortcut("b", modifiers: [.command, .option])
+    private var workspaceOptions: some View {
+        Menu {
+            if model.mode == .prepare {
+                Picker("Show slides", selection: $model.prepareFilter) {
+                    Text("All").tag(PrepareFilter.all)
+                    Text("Selected").tag(PrepareFilter.selected)
+                }
+                Button("Select all slides") { Task { await model.setAllSelected(true) } }.disabled(model.readOnly)
+                Button("Deselect all slides") { Task { await model.setAllSelected(false) } }.disabled(model.readOnly)
+                Divider()
+                Picker("Thumbnail size", selection: $model.thumbnailSize) {
+                    Text("Compact").tag(ThumbnailSize.compact)
+                    Text("Regular").tag(ThumbnailSize.regular)
+                    Text("Large").tag(ThumbnailSize.large)
+                }
+                Toggle("Show thumbnails  ⌘B", isOn: $model.thumbnailsVisible)
+                Toggle("Show notes  ⌘J", isOn: $model.notesVisible)
+            } else {
+                Toggle("Show card list", isOn: $model.panes.reviewLeftVisible)
+            }
+            Toggle("Show right pane  ⌘⌥B", isOn: $model.askVisible)
+        } label: { Image(systemName: "ellipsis.circle") }
+        .menuStyle(.borderlessButton).fixedSize()
+        .accessibilityLabel("Workspace options")
     }
 
     @ViewBuilder private var presentationTitle: some View {
@@ -406,7 +392,7 @@ struct LectureTopBar: View {
                 get: { model.titleDraft ?? model.lecture.name },
                 set: { model.titleDraft = $0 }
             ))
-            .font(Theme.serif(20))
+            .font(Theme.heading(20))
             .textFieldStyle(.plain)
             .focused(focus, equals: .title)
             .frame(minWidth: 100, idealWidth: 220, maxWidth: 300)
@@ -422,7 +408,7 @@ struct LectureTopBar: View {
             }
         } else {
             Button { beginRename() } label: {
-                Text(model.lecture.name).font(Theme.serif(20)).lineLimit(1)
+                Text(model.lecture.name).font(Theme.heading(20)).lineLimit(1)
             }
             .buttonStyle(.plain)
             .help("Click to rename presentation")
@@ -445,25 +431,7 @@ struct LectureTopBar: View {
     }
 
     @ViewBuilder private var prepareTrailing: some View {
-        let selected = model.lecture.slides.filter(\.isSelected).count
-        Text("\(selected) of \(model.lecture.pageCount) slides for cards")
-            .font(Theme.body).foregroundStyle(Theme.quiet).monospacedDigit()
-        Menu {
-            Button("Select all slides") { Task { await model.setAllSelected(true) } }
-            Button("Deselect all slides") { Task { await model.setAllSelected(false) } }
-            Divider()
-            Picker("Thumbnail size", selection: $model.thumbnailSize) {
-                Text("Compact").tag(ThumbnailSize.compact)
-                Text("Regular").tag(ThumbnailSize.regular)
-                Text("Large").tag(ThumbnailSize.large)
-            }
-            Toggle("Show notes  ⌘J", isOn: $model.notesVisible)
-            Toggle("Show thumbnails  ⌘B", isOn: $model.thumbnailsVisible)
-            Toggle("Show Ask panel", isOn: $model.askVisible)
-        } label: {
-            Image(systemName: "ellipsis.circle")
-        }
-        .menuStyle(.borderlessButton).fixedSize()
+        coverageSummary
         if let running = model.runningGenerate {
             Button("Generating…") {}.buttonStyle(SecondaryButtonStyle(foreground: Theme.quiet, fill: Theme.inset)).disabled(true)
                 .help("Writing cards from \(Format.count(running.pages.count, "slide"))")
@@ -476,12 +444,16 @@ struct LectureTopBar: View {
     }
 
     @ViewBuilder private var coverageTrailing: some View {
+        coverageSummary
         SegmentedControl(options: [(false, "Front"), (true, "Front + back")],
                          selection: $model.coverageShowsBacks, activeFill: Theme.inset, activeText: Theme.ink)
             .help("Show each card's back under its front")
+    }
+
+    private var coverageSummary: some View {
         let selected = model.lecture.slides.filter(\.isSelected).count
         let without = model.lecture.uncoveredSelectedPages.count
-        Group {
+        return Group {
             if selected == 0 {
                 Text("No slides selected")
             } else if without == 0 {
@@ -494,14 +466,10 @@ struct LectureTopBar: View {
     }
 
     @ViewBuilder private var reviewTrailing: some View {
-        HStack(spacing: 8) {
-            Text("\(model.reviewedCount) of \(model.activeCards.count) reviewed")
-                .font(Theme.small).foregroundStyle(Theme.quiet).monospacedDigit()
-            ProgressView(value: Double(model.reviewedCount), total: Double(max(1, model.activeCards.count)))
-                .progressViewStyle(.linear).tint(Theme.accent).frame(width: 90)
-        }
+        Text("\(model.reviewedCount) of \(model.activeCards.count) reviewed")
+            .font(Theme.small).foregroundStyle(Theme.quiet).monospacedDigit()
         Button("Export to Anki") {
-            Task { await app.returnToLibrary(destination: .export(model.ref.moduleID)) }
+            Task { await app.returnToLibrary(destination: .export(model.ref.moduleID, lectureID: model.ref.lectureID)) }
         }
         .buttonStyle(SecondaryButtonStyle())
     }

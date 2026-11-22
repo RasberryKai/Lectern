@@ -67,6 +67,23 @@ import Testing
         await #expect(throws: LibraryError.self) { try await store.updateModuleSettings(moduleID: module.id, name: "M", plannedLectureCount: Int.max, examDate: nil) }
     }
 
+    @Test func staleInstructionsRejectTheEntireSettingsEdit() async throws {
+        let (store, module, _, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await store.appendModuleInstruction(moduleID: module.id, text: "Rule from Review")
+        await #expect(throws: LibraryError.self) {
+            try await store.updateModuleSettings(moduleID: module.id, name: "Changed", plannedLectureCount: 5,
+                examDate: nil, instructions: "Draft", expectedInstructions: "")
+        }
+        let current = try await store.loadModule(moduleID: module.id)
+        #expect(current.name == module.name)
+        #expect(current.instructions == "Rule from Review")
+        let saved = try await store.updateModuleSettings(moduleID: module.id, name: "Changed", plannedLectureCount: 5,
+            examDate: nil, instructions: "", expectedInstructions: current.instructions)
+        #expect(saved.instructions.isEmpty)
+        #expect(saved.plannedLectureCount == 5)
+    }
+
     @Test func archiveBlocksAllContentMutationsAndAIAndCanBeReversed() async throws {
         let (store, module, lecture, root) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
         _ = try await store.setModuleArchived(moduleID: module.id, archived: true)

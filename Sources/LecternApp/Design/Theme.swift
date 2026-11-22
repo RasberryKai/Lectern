@@ -2,29 +2,28 @@ import AppKit
 import LecternCore
 import SwiftUI
 
-/// Lectern design tokens, taken once from the v1 screens: ivory canvas, charcoal ink,
-/// muted green accent, blue for AI, amber for attention, red for rejection.
 enum Theme {
-    static let canvas = dynamic(light: 0xF7F5EF, dark: 0x1B1A17)
-    static let sidebar = dynamic(light: 0xEFECE3, dark: 0x22211D)
-    static let surface = dynamic(light: 0xFFFFFF, dark: 0x272621)
-    static let inset = dynamic(light: 0xF3F1EB, dark: 0x2E2C27)
-    static let border = dynamic(light: 0xE2DED3, dark: 0x3A3832)
-    static let borderStrong = dynamic(light: 0xC9C4B7, dark: 0x4C4941)
-    static let ink = dynamic(light: 0x1F1E1B, dark: 0xECE9E1)
-    static let quiet = dynamic(light: 0x5F5C55, dark: 0xA8A49A)
-    static let faint = dynamic(light: 0x8C887E, dark: 0x7C786F)
+    static let canvas = dynamic(light: 0xF4F4F1, dark: 0x141513)
+    static let sidebar = dynamic(light: 0xFAFAF8, dark: 0x181917)
+    static let surface = dynamic(light: 0xFFFFFF, dark: 0x1E1F1D)
+    static let inset = dynamic(light: 0xF7F7F4, dark: 0x1A1B19)
+    static let border = dynamic(light: 0xE0E0DA, dark: 0x2E2F2C)
+    static let borderStrong = dynamic(light: 0xCFCFC8, dark: 0x41423E)
+    static let ink = dynamic(light: 0x111110, dark: 0xECECE8)
+    static let quiet = dynamic(light: 0x5C5C56, dark: 0xA3A39C)
+    static let faint = dynamic(light: 0x73736C, dark: 0x989891)
 
     static let accent = dynamic(light: 0x3E5C41, dark: 0x4F7553)
+    static let launchGlint = dynamic(light: 0xB7D0B3, dark: 0xA9CBA6)
     static let accentText = dynamic(light: 0x3E5C41, dark: 0x8DB591)
-    static let onAccent = Color(hex: 0xF7F5EF)
+    static let onAccent = dynamic(light: 0xFFFFFF, dark: 0xF4F4F1)
 
     static let ai = dynamic(light: 0x2F5D8C, dark: 0x8DB4DD)
     static let aiStrong = dynamic(light: 0x244A70, dark: 0xA9CBEE)
     static let aiWash = dynamic(light: 0xE3ECF5, dark: 0x22303E)
 
     static let good = dynamic(light: 0x3F7A4A, dark: 0x8EC497)
-    static let goodWash = dynamic(light: 0xE7EFE6, dark: 0x233026)
+    static let goodWash = dynamic(light: 0xE7EFE6, dark: 0x1F2A20)
     static let amber = dynamic(light: 0x7A4810, dark: 0xE2B47C)
     static let amberWash = dynamic(light: 0xF6EBDD, dark: 0x3A2E1E)
     static let bad = dynamic(light: 0xB3412E, dark: 0xE88E7D)
@@ -45,9 +44,36 @@ enum Theme {
         }
     }
 
+    private static let grid = dynamic(light: 0xE9E9E4, dark: 0x1D1E1C)
+
+    static var canvasGrid: some View { canvasGrid(horizontalOffset: 0) }
+
+    static func canvasGrid(horizontalOffset: CGFloat) -> some View {
+        Canvas { context, size in
+            var lines = Path()
+            let firstColumn = horizontalOffset == 0 ? 40 : horizontalOffset.truncatingRemainder(dividingBy: 40)
+            for x in stride(from: firstColumn + 0.5, to: size.width, by: 40) {
+                lines.move(to: CGPoint(x: x, y: 0))
+                lines.addLine(to: CGPoint(x: x, y: size.height))
+            }
+            for y in stride(from: 0.5, to: size.height, by: 40) {
+                lines.move(to: CGPoint(x: 0, y: y))
+                lines.addLine(to: CGPoint(x: size.width, y: y))
+            }
+            context.stroke(lines, with: .color(grid), lineWidth: 1)
+        }
+        .background(canvas)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    static func heading(_ size: CGFloat, weight: Font.Weight = .bold) -> Font {
+        .system(size: size, weight: weight)
+    }
+
     // MARK: Type
 
-    /// Headings use Newsreader when installed (the logo wordmark face), otherwise the system serif.
+    /// The wordmark is the only serif element.
     static func serif(_ size: CGFloat, weight: Font.Weight = .semibold) -> Font {
         if NSFont(name: "Newsreader", size: size) != nil {
             return .custom("Newsreader", size: size).weight(weight)
@@ -115,8 +141,8 @@ struct PrimaryButtonStyle: ButtonStyle {
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(Theme.onAccent)
             .padding(.horizontal, 14).padding(.vertical, 7)
-            .background(tint.opacity(isEnabled ? (configuration.isPressed ? 0.85 : 1) : 0.4), in: RoundedRectangle(cornerRadius: 7))
-            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .background(tint.opacity(isEnabled ? (configuration.isPressed ? 0.85 : 1) : 0.4), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -130,9 +156,9 @@ struct SecondaryButtonStyle: ButtonStyle {
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(foreground.opacity(isEnabled ? 1 : 0.45))
             .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(configuration.isPressed ? Theme.inset : fill, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(stroke, lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .background(configuration.isPressed ? Theme.inset : fill, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(stroke, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -181,13 +207,14 @@ struct SegmentedControl<Value: Hashable>: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(active ? .isSelected : [])
                 if index < options.count - 1 { Rectangle().fill(Theme.border).frame(width: 1) }
             }
         }
         .fixedSize()
         .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 7))
-        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.borderStrong, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong, lineWidth: 1))
     }
 }
 
@@ -253,64 +280,6 @@ struct Pill: View {
             }
             .lineLimit(1)
             .fixedSize()
-    }
-}
-
-struct LegendSwatch: View {
-    let status: LectureProgressStatus
-    var body: some View {
-        RoundedRectangle(cornerRadius: 3)
-            .fill(Theme.stage(status))
-            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(status == .notImported ? Theme.borderStrong : .clear))
-            .frame(width: 14, height: 14)
-    }
-}
-
-/// One segment per planned lecture slot, coloured by lecture status.
-struct SlotStrip: View {
-    @Environment(AppModel.self) private var model
-    let slots: [LectureSlot]
-    var height: CGFloat = 26
-    var onTap: ((LectureSlot) -> Void)?
-
-    var body: some View {
-        GeometryReader { proxy in
-            let spacing: CGFloat = slots.count > 30 ? 2 : 5
-            let width = max(4, (proxy.size.width - spacing * CGFloat(max(0, slots.count - 1))) / CGFloat(max(1, slots.count)))
-            HStack(spacing: spacing) {
-                ForEach(slots) { slot in
-                    Button { onTap?(slot) } label: {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(slot.status == .notImported ? Theme.surface : Theme.stage(slot.status))
-                            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(slot.status == .notImported ? Theme.borderStrong : .clear))
-                            .overlay {
-                                if slot.statusOverride != nil {
-                                    Circle().fill(Theme.surface).frame(width: 5, height: 5)
-                                        .accessibilityHidden(true)
-                                }
-                            }
-                            .frame(width: width, height: height)
-                    }
-                    .buttonStyle(.plain)
-                    .help(Format.slotHelp(slot))
-                    .accessibilityLabel(Format.slotHelp(slot))
-                    .contextMenu {
-                        if let lectureID = slot.lectureID {
-                            LectureStatusOptions(current: slot.statusOverride) { status in
-                                Task { await model.setLectureStatus(status, for: LectureRef(moduleID: slot.id.moduleID, lectureID: lectureID)) }
-                            }
-                        } else {
-                            LectureStatusOptions(current: slot.statusOverride) { status in
-                                Task { await model.setEmptySlotStatus(status, for: slot.id) }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .frame(height: height)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Lecture progress")
     }
 }
 

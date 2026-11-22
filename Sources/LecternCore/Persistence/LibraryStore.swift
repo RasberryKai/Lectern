@@ -113,11 +113,17 @@ public actor LibraryStore {
         try validateModule(updated)
         try write(updated, to: url)
     } }
-    /// Narrow settings update preserves instruction/order/archive changes from other windows.
-    @discardableResult public func updateModuleSettings(moduleID: UUID, name: String, plannedLectureCount: Int, examDate: ExamDate?) throws -> Module { try locked {
+    /// Module settings are saved together. A stale instruction draft must not erase rules from Review.
+    @discardableResult public func updateModuleSettings(moduleID: UUID, name: String, plannedLectureCount: Int, examDate: ExamDate?, instructions: String? = nil, expectedInstructions: String? = nil) throws -> Module { try locked {
         var module = try moduleUnlocked(moduleID); try requireEditable(module)
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw LibraryError.invalid("Give the module a name.") }
+        if let instructions {
+            if let expectedInstructions, module.instructions != expectedInstructions {
+                throw LibraryError.invalid("Module instructions changed in another window. Reopen settings to edit the latest version.")
+            }
+            module.instructions = instructions
+        }
         module.name = name; module.plannedLectureCount = plannedLectureCount; module.examDate = examDate
         module.slotStatusOverrides = module.slotStatusOverrides.filter { $0.key <= plannedLectureCount }
         try validateModule(module, activeLectureCount: lectureListUnlocked(in: module).filter { !$0.isArchived }.count)

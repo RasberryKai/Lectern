@@ -12,8 +12,7 @@ nonisolated struct LectureRef: Codable, Hashable, Sendable, Identifiable {
 nonisolated enum SidebarItem: Hashable {
     case overview
     case module(UUID)
-    case export(UUID)
-    case settings
+    case export(UUID, lectureID: UUID? = nil)
 }
 
 /// Files picked or dropped together, shown in the import sheet before they are merged into one lecture.
@@ -66,6 +65,7 @@ final class AppModel {
     private(set) var leavingLecture = false
     var selection: SidebarItem = .overview
     var errorMessage: String? = nil
+    var showSettings = false
     var showNewModule = false
     var settingsModuleID: UUID? = nil
     /// Two or more PDFs waiting in the import sheet.
@@ -173,7 +173,7 @@ final class AppModel {
         dashboard = snapshot
         modules = list
         if case .module(let id) = selection, !list.contains(where: { $0.id == id }) { selection = .overview }
-        if case .export(let id) = selection, !list.contains(where: { $0.id == id }) { selection = .overview }
+        if case .export(let id, _) = selection, !list.contains(where: { $0.id == id }) { selection = .overview }
     }
 
     func module(_ id: UUID) -> Module? { modules.first { $0.id == id } }

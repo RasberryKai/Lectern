@@ -6,85 +6,99 @@ struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header
+            VStack(alignment: .leading, spacing: 18) {
                 if let dashboard = model.dashboard {
-                    totals(dashboard.totals)
-                    if dashboard.modules.isEmpty {
-                        emptyState
-                    } else {
-                        ForEach(dashboard.modules) { ModuleProgressCard(progress: $0) }
-                    }
-                    footer
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .bottom) {
+                            title
+                            Spacer(minLength: 18)
+                            totals(dashboard)
+                        }
+                        VStack(alignment: .leading, spacing: 12) { title; totals(dashboard) }
+                    }.frame(minHeight: 104, alignment: .topLeading)
+                    ForEach(dashboard.modules) { ModuleProgressCard(progress: $0) }
+                    if dashboard.modules.isEmpty { ModuleCreationForm() }
                 }
             }
-            .padding(.horizontal, 44).padding(.vertical, 34)
+            .padding(.horizontal, 40).padding(.vertical, 36)
             .frame(maxWidth: 1240, alignment: .leading)
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .lastTextBaseline) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Overview").font(Theme.serif(40))
-                let active = model.dashboard?.modules.count ?? 0
-                let archived = model.dashboard?.archivedModuleCount ?? 0
-                Text("\(Format.longDay(Date())) · \(Format.count(active, "active module"))\(archived > 0 ? " · \(archived) archived" : "")")
-                    .font(Theme.body).foregroundStyle(Theme.quiet)
+    private var title: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(Format.longDay(Date())).eyebrow()
+            Text("Overview").font(Theme.heading(56)).tracking(-2.2)
+        }
+    }
+
+    private func totals(_ dashboard: DashboardSnapshot) -> some View {
+        func lectureCount(_ status: LectureProgressStatus) -> Int {
+            dashboard.modules.reduce(0) { $0 + $1.statusCounts[status, default: 0] }
+        }
+        let lectures = dashboard.modules.flatMap(\.lectures)
+        let reviewCards = lectures.filter { $0.status == .toReview }.reduce(0) { $0 + $1.reviewCardCount }
+        let exportCards = lectures.filter { $0.status == .toExport }.reduce(0) { $0 + $1.readyExportCount }
+        let totals = dashboard.totals
+        return HStack(spacing: 6) {
+            metric(lectureCount(.preparing), "preparing", Theme.amber)
+            metric(lectureCount(.toReview), "to review · \(reviewCards) cards", Theme.ai)
+            metric(lectureCount(.toExport), "ready to export · \(exportCards) cards", Theme.accentText)
+            metric(totals.doneLectureCount, "of \(totals.plannedLectureCount) done", Theme.good)
+        }
+        .fixedSize()
+    }
+
+    private func metric(_ count: Int, _ caption: String, _ color: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(String(count)).font(.system(size: 12, weight: .bold)).monospacedDigit()
+            Text(caption).font(Theme.small).foregroundStyle(Theme.quiet)
+        }.padding(.horizontal, 9).frame(height: 32)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.border))
+    }
+}
+
+struct LectureSteps: View {
+    let status: LectureProgressStatus
+    private var current: Int {
+        switch status {
+        case .notImported: -1
+        case .preparing: 0
+        case .toReview: 1
+        case .toExport: 2
+        case .done: 3
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(Array(["Prepare", "Review", "Export"].enumerated()), id: \.offset) { index, label in
+                if index > 0 { Rectangle().fill(Theme.border).frame(width: 8, height: 1) }
+                Image(systemName: index < current ? "checkmark.circle.fill" : index == current ? "circle.inset.filled" : "circle")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(index < current ? Theme.good : index == current ? Theme.stage(status) : Theme.borderStrong)
+                Text(label).foregroundStyle(index <= current ? Theme.ink : Theme.quiet)
             }
-            Spacer()
-            HStack(spacing: 16) {
-                ForEach(Format.legendOrder, id: \.self) { status in
-                    HStack(spacing: 6) {
-                        LegendSwatch(status: status)
-                        Text(Format.statusLabel(status)).font(Theme.small).foregroundStyle(Theme.quiet)
-                    }
-                }
-            }
-        }
+        }.font(Theme.caption).fixedSize()
+        .accessibilityElement(children: .ignore).accessibilityLabel(Format.statusLabel(status))
+    }
+}
+
+extension ModuleProgress {
+    var examCaption: String {
+        module.examDate.map { "Exam \(Format.dayMonth($0.date(in: .current)))" } ?? "No exam date"
     }
 
-    private func totals(_ totals: ProgressTotals) -> some View {
-        HStack(spacing: 14) {
-            tile("\(totals.doneLectureCount) / \(totals.plannedLectureCount)", "Lectures done", "Completed automatically or manually")
-            tile("\(totals.reviewCardCount)", "Cards to review",
-                 "In \(Format.count(totals.reviewLectureCount, "lecture"))\(totals.proposalCount > 0 ? ", \(Format.count(totals.proposalCount, "proposal")) waiting" : "")")
-            tile("\(totals.readyExportCount)", "Ready to export",
-                 totals.changedExportCount > 0 ? "\(totals.changedExportCount) of them changed since export" : "Approved and not yet in Anki")
-            tile("\(totals.notImportedCount)", "Lectures not imported", "Planned slots still empty")
+    var paceCaption: String? {
+        switch pace {
+        case .future(_, let weekly): "\(weekly.formatted(.number.precision(.fractionLength(0...1)))) a week to finish"
+        case .dueToday: "Exam today"
+        case .overdue(let days): "Exam was \(Format.count(days, "day")) ago"
+        case .complete: totals.plannedLectureCount > 0 ? "All lectures done" : nil
+        case .noExam: nil
         }
-    }
-
-    private func tile(_ value: String, _ title: String, _ detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(value).font(Theme.serif(34)).monospacedDigit()
-            Text(title).font(.system(size: 13, weight: .semibold))
-            Text(detail).font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
-        .panel(padding: 18)
-    }
-
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Start with a module").font(Theme.serif(22))
-            Text("A module is a course. Give it a name, how many lectures you expect and, if you like, the exam date. Then drop lecture PDFs on it.")
-                .font(Theme.body).foregroundStyle(Theme.quiet)
-            Button("New module") { model.showNewModule = true }.buttonStyle(PrimaryButtonStyle())
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .panel(padding: 24)
-    }
-
-    private var footer: some View {
-        HStack(spacing: 4) {
-            Text("Right-click any lecture block to set its status, even without a PDF. Automatic completion tracks card generation, review and export.")
-                .foregroundStyle(Theme.quiet)
-            if let first = model.dashboard?.modules.first {
-                Button("Module settings") { model.settingsModuleID = first.module.id }.buttonStyle(LinkButtonStyle())
-            }
-        }
-        .font(Theme.small)
     }
 }
 
@@ -93,69 +107,117 @@ struct ModuleProgressCard: View {
     let progress: ModuleProgress
 
     var body: some View {
-        HStack(alignment: .top, spacing: 36) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .firstTextBaseline, spacing: 14) {
-                    Button { model.selection = .module(progress.module.id) } label: {
-                        Text(progress.module.name).font(Theme.serif(26)).lineLimit(1)
-                    }
-                    .buttonStyle(.plain)
-                    Text(Format.examLine(progress.module.examDate)).font(Theme.body).foregroundStyle(Theme.quiet)
-                    Spacer(minLength: 12)
-                    Pill(text: Format.paceBadge(progress.pace, remaining: progress.totals.remainingLectureCount), tone: Format.paceTone(progress.pace))
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Button(progress.module.name) { model.selection = .module(progress.id) }
+                    .buttonStyle(.plain).font(Theme.heading(24)).foregroundStyle(Theme.ink).lineLimit(1)
+                Text(progress.examCaption)
+                if let pace = progress.paceCaption {
+                    Text(pace).foregroundStyle(Theme.accentText).padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Theme.goodWash, in: Capsule())
                 }
-                SlotStrip(slots: progress.slots) { slot in
-                    if let lectureID = slot.lectureID {
-                        model.openLecture(LectureRef(moduleID: progress.module.id, lectureID: lectureID), mode: progress.lectures.first { $0.lectureID == lectureID }?.automaticStatus == .toReview ? .review : nil)
-                    } else {
-                        model.selection = .module(progress.module.id)
+                Spacer()
+                Text("\(progress.totals.doneLectureCount) / \(progress.totals.plannedLectureCount) done").monospacedDigit()
+            }.font(Theme.small).foregroundStyle(Theme.quiet)
+            if !progress.slots.isEmpty {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 4) {
+                        ForEach(progress.slots) { slot in
+                            Button {
+                                if let lecture = progress.lectures.first(where: { $0.id == slot.lectureID }) {
+                                    LectureDestination.open(lecture, in: progress.id, model: model)
+                                } else { model.selection = .module(progress.id) }
+                            } label: {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(slot.status == .notImported ? Theme.surface : Theme.stage(slot.status))
+                                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(slot.status == .notImported ? Theme.borderStrong : .clear))
+                                    .frame(width: 22, height: 14)
+                            }.buttonStyle(.plain).help(Format.slotHelp(slot)).accessibilityLabel(Format.slotHelp(slot))
+                            .contextMenu {
+                                LectureStatusOptions(current: slot.statusOverride) { status in
+                                    Task {
+                                        if let id = slot.lectureID {
+                                            await model.setLectureStatus(status, for: LectureRef(moduleID: progress.id, lectureID: id))
+                                        } else { await model.setEmptySlotStatus(status, for: slot.id) }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                Text(Format.statusSummary(counts: progress.statusCounts)).font(Theme.body).foregroundStyle(Theme.quiet)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(progress.slots.filter { $0.lectureID != nil && $0.status != .done }) { slot in
+                if let lecture = progress.lectures.first(where: { $0.id == slot.lectureID }) {
+                    Divider()
+                    HStack(spacing: 12) {
+                        Text(Format.lectureTitle(index: slot.id.index - 1, name: lecture.name))
+                            .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                        Text(detail(lecture)).font(Theme.small).foregroundStyle(Theme.quiet).lineLimit(2)
+                        Spacer()
+                        LectureSteps(status: slot.status)
+                        let button = Button(LectureDestination.label(slot.status)) {
+                            LectureDestination.open(lecture, in: progress.id, model: model)
+                        }
+                        if slot.status == .toReview && progress.id == model.dashboard?.modules.first?.id {
+                            button.buttonStyle(PrimaryButtonStyle()).frame(minWidth: 72, alignment: .trailing)
+                        } else {
+                            button.buttonStyle(SecondaryButtonStyle()).frame(minWidth: 72, alignment: .trailing)
+                        }
+                    }
+                }
+            }
+            Divider()
+            HStack {
+                Text(footerSummary).font(Theme.small).foregroundStyle(Theme.quiet)
+                Spacer()
+                if let slot = progress.slots.first(where: { $0.lectureID == nil && $0.status != .done }) {
+                    Button("Import lecture \(String(format: "%02d", slot.id.index))") {
+                        model.selection = .module(progress.id)
+                        Task { await model.chooseAndImportPDFs(into: progress.id, slot: slot.id.index) }
+                    }.buttonStyle(LinkButtonStyle())
+                }
+            }
+        }.panel(padding: 18)
+    }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Next up").eyebrow()
-                if progress.nextUp.isEmpty {
-                    Text("Nothing waiting. Import the next lecture when it's out.").font(Theme.body).foregroundStyle(Theme.quiet)
-                }
-                ForEach(Array(progress.nextUp.enumerated()), id: \.offset) { _, action in
-                    let line = Format.nextUp(action, in: progress)
-                    HStack {
-                        Text(line.text).font(Theme.body).lineLimit(1)
-                        Spacer(minLength: 12)
-                        Button(line.action) { NextUpRouter.perform(action, model: model) }
-                            .buttonStyle(LinkButtonStyle())
-                    }
-                }
-            }
-            .frame(width: 400, alignment: .leading)
+    private func detail(_ lecture: LectureProgress) -> String {
+        switch lecture.status {
+        case .toReview: "\(Format.count(lecture.reviewCardCount, "card")) to review"
+        case .toExport: "\(Format.count(lecture.readyExportCount, "card")) ready for Anki"
+        case .preparing: Format.preparationText(lecture.preparationReasons)
+        default: Format.statusLabel(lecture.status)
         }
-        .panel(padding: 24)
+    }
+
+    private var footerSummary: String {
+        let done = progress.slots.filter { $0.status == .done }.map { $0.id.index }
+        let ranges = IndexSet(done).rangeView.map { range in
+            let first = String(format: "%02d", range.lowerBound)
+            return range.count == 1 ? first : "\(first)–\(String(format: "%02d", range.upperBound - 1))"
+        }
+        return [ranges.isEmpty ? nil : ranges.joined(separator: ", ") + " done",
+                progress.totals.notImportedCount > 0 ? "\(progress.totals.notImportedCount) not imported" : nil]
+            .compactMap { $0 }.joined(separator: " · ")
     }
 }
 
-/// Routes typed Next-up actions by ID; never by label.
-enum NextUpRouter {
-    static func perform(_ action: NextUpAction, model: AppModel) {
-        switch action {
-        case .review(let lectureID, _):
-            guard let moduleID = moduleID(of: lectureID, model: model) else { return }
-            model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: .review)
-        case .export(let moduleID, _, _, _):
-            model.selection = .export(moduleID)
-        case .prepare(let lectureID, let reasons):
-            guard let moduleID = moduleID(of: lectureID, model: model) else { return }
-            let sourceless = reasons.contains(.addCards)
-            model.openLecture(LectureRef(moduleID: moduleID, lectureID: lectureID), mode: sourceless ? .review : .prepare)
-        case .importLecture(let moduleID, let slotID):
-            model.selection = .module(moduleID)
-            Task { await model.chooseAndImportPDFs(into: moduleID, slot: slotID.index) }
+enum LectureDestination {
+    static func label(_ status: LectureProgressStatus) -> String {
+        switch status {
+        case .toReview: "Review"
+        case .toExport: "Export"
+        case .preparing: "Prepare"
+        default: "Open"
         }
     }
 
-    private static func moduleID(of lectureID: UUID, model: AppModel) -> UUID? {
-        model.modules.first { $0.lectureIDs.contains(lectureID) }?.id
+    static func open(_ lecture: LectureProgress, in moduleID: UUID, model: AppModel) {
+        let ref = LectureRef(moduleID: moduleID, lectureID: lecture.id)
+        switch lecture.status {
+        case .toExport: model.selection = .export(moduleID, lectureID: lecture.id)
+        case .toReview: model.openLecture(ref, mode: .review)
+        case .preparing: model.openLecture(ref, mode: lecture.preparationReasons.contains(.addCards) ? .review : .prepare)
+        default: model.openLecture(ref, mode: nil)
+        }
     }
 }

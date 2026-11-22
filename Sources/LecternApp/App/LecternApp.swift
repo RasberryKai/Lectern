@@ -7,30 +7,47 @@ struct LecternApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel.shared
 
+    @Environment(\.openWindow) private var openWindow
+    @AppStorage("lectern.appearance") private var appearance = AppAppearance.system
+    @State private var finishedLaunch = false
+
     var body: some Scene {
         Window("Lectern", id: "library") {
-            LibraryWindow()
+            LaunchPresentation(libraryPhase: model.phase, finished: $finishedLaunch)
                 .environment(model)
+                .preferredColorScheme(appearance.colorScheme)
                 .frame(minWidth: 1100, minHeight: 700)
                 .task { await model.start() }
         }
-        .defaultSize(width: 1320, height: 860)
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1280, height: 900)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Module…") { model.showNewModule = true }
+                Button("New Module…") {
+                    openWindow(id: "library")
+                    Task {
+                        await model.returnToLibrary()
+                        guard model.activeLecture == nil else { return }
+                        model.showNewModule = true
+                    }
+                }
+                    .disabled(model.showSettings || model.settingsModuleID != nil || model.showNewModule)
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    openWindow(id: "library")
+                    model.showSettings = true
+                }
+                .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .sidebar) {
                 Button("Overview") { Task { await model.returnToLibrary(destination: .overview) } }
                     .keyboardShortcut("0", modifiers: [.command])
+                    .disabled(model.showSettings || model.showNewModule || model.settingsModuleID != nil)
             }
         }
 
-        Settings {
-            SettingsView()
-                .environment(model)
-                .frame(width: 760, height: 760)
-        }
     }
 }
 

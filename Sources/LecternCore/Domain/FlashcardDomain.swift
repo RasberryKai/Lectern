@@ -1,11 +1,14 @@
 import Foundation
 
-/// The four review states stored for a card. Replacement requests are card metadata, not a verdict.
+/// Stored review states. `needsAdjustment` remains readable for older libraries.
 public enum CardVerdict: String, Codable, CaseIterable, Sendable {
     case unreviewed
     case good
     case bad
     case needsAdjustment
+
+    /// Older Needs work cards return to the review queue without losing feedback or history.
+    public var isAwaitingReview: Bool { self == .unreviewed || self == .needsAdjustment }
 }
 
 /// Identifies the side of a card associated with an import issue.

@@ -37,7 +37,7 @@ struct ImportPDFsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(Theme.serif(26)).lineLimit(2)
+                Text(title).font(Theme.heading(26)).lineLimit(2)
                 Text(subtitle).font(Theme.small).foregroundStyle(Theme.quiet)
             }
 

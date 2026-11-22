@@ -2,16 +2,112 @@ import AppKit
 import LecternCore
 import SwiftUI
 
-struct SettingsView: View {
-    var body: some View {
-        TabView {
-            AISettingsTab().tabItem { Label("AI", systemImage: "sparkles") }
-            RulesTab().tabItem { Label("Card rules", systemImage: "text.book.closed") }
-            UsageTab().tabItem { Label("AI usage", systemImage: "chart.bar") }
-            LibraryTab().tabItem { Label("Library", systemImage: "books.vertical") }
-            KeyboardShortcutsTab().tabItem { Label("Shortcuts", systemImage: "keyboard") }
+private enum SettingsSection: String, CaseIterable {
+    case ai = "AI", rules = "Card rules", usage = "AI usage", library = "Library", shortcuts = "Shortcuts"
+
+    var icon: String {
+        switch self {
+        case .ai: "sparkles"
+        case .rules: "text.book.closed"
+        case .usage: "chart.bar"
+        case .library: "books.vertical"
+        case .shortcuts: "keyboard"
         }
-        .scenePadding()
+    }
+}
+
+enum AppAppearance: String, CaseIterable {
+    case system = "System", light = "Light", dark = "Dark"
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
+struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+    @AppStorage("lectern.appearance") private var appearance = AppAppearance.system
+    @State private var selected = SettingsSection.ai
+    @State private var visited: Set<SettingsSection> = [.ai]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                Button { model.showSettings = false } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                Spacer()
+                ForEach(SettingsSection.allCases, id: \.self) { section in
+                    Button {
+                        visited.insert(section)
+                        selected = section
+                    } label: {
+                        Label(section.rawValue, systemImage: section.icon)
+                            .font(.system(size: 13, weight: .medium))
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .foregroundStyle(selected == section ? Theme.accentText : Theme.quiet)
+                            .background(selected == section ? Theme.goodWash : .clear, in: RoundedRectangle(cornerRadius: 8))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected == section ? .isSelected : [])
+                }
+                Spacer()
+                Picker("Appearance", selection: $appearance) {
+                    ForEach(AppAppearance.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.fixedSize()
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(Theme.surface)
+            Divider()
+            ZStack(alignment: .topLeading) {
+                // Retain drafts, progress, and sign-in state when switching sections.
+                ForEach(SettingsSection.allCases.filter(visited.contains), id: \.self) { section in
+                    sectionView(section)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .opacity(selected == section ? 1 : 0)
+                        .disabled(selected != section)
+                        .allowsHitTesting(selected == section)
+                        .accessibilityHidden(selected != section)
+                }
+            }
+        }
+        .background(Theme.canvasGrid)
+        .foregroundStyle(Theme.ink)
+        .tint(Theme.accentText)
+        .navigationTitle(selected.rawValue)
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: SettingsSection) -> some View {
+        switch section {
+        case .ai: AISettingsTab()
+        case .rules: RulesTab()
+        case .usage: UsageTab()
+        case .library: LibraryTab()
+        case .shortcuts: KeyboardShortcutsTab()
+        }
+    }
+}
+
+extension View {
+    func settingsHeading() -> some View {
+        font(.system(size: 28, weight: .bold)).tracking(-1.1)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    func settingsField() -> some View {
+        textFieldStyle(.plain).font(Theme.body).padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong).allowsHitTesting(false))
     }
 }
 
@@ -29,76 +125,33 @@ private struct AISettingsTab: View {
     @State private var codexBusy = false
 
     var body: some View {
-        ScrollView(.vertical) {
-          Form {
-            Section {
-                Picker("Backend", selection: $draft.backend) {
-                    Text("Claude CLI (your subscription)").tag(AIBackend.claudeCLI)
-                    Text("Codex (ChatGPT account)").tag(AIBackend.codexCLI)
-                    Text("Anthropic API (API key, billed per token)").tag(AIBackend.messagesAPI)
+        ScrollView {
+            HStack(alignment: .top, spacing: 32) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Backend").settingsHeading().padding(.bottom, 8)
+                    backendButton(.claudeCLI, "Claude CLI", "Your Claude subscription")
+                    backendButton(.codexCLI, "Codex", "Your ChatGPT account")
+                    backendButton(.messagesAPI, "Anthropic API", "API key, billed per token")
+                    Text("Applies to new jobs. Running jobs keep their original backend and model. Lectern never switches backend on its own.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet).padding(.top, 8)
+                    if let error { ErrorBanner(message: error) }
                 }
-                .pickerStyle(.radioGroup)
-                Text("Active backend: \(model.settings.backend.displayName) · \(model.settings.selectedModel)")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
-                Text("Changes save automatically for new jobs. Running jobs keep their original backend and model.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
-                if let error { Text(error).font(Theme.small).foregroundStyle(Theme.bad) }
-                Text("Every job records the backend and model it used. Lectern never falls back to another backend on its own.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
+                .frame(width: 340, alignment: .leading)
+                VStack(alignment: .leading, spacing: 16) {
+                    switch draft.backend {
+                    case .claudeCLI:
+                        cliFields(codex: false)
+                    case .codexCLI:
+                        cliFields(codex: true)
+                    case .messagesAPI:
+                        apiFields
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).panel(padding: 24)
             }
-            Section("Claude CLI") {
-                TextField("Model", text: $draft.cliModel, prompt: Text(AISettings.defaultCLIModel))
-                HStack {
-                    TextField("CLI path", text: Binding(get: { draft.claudeCLIPath ?? "" }, set: { draft.claudeCLIPath = $0.isEmpty ? nil : $0 }),
-                              prompt: Text(ClaudeCLIProvider.resolveExecutable(configuredPath: nil).path))
-                    Button("Choose…") { chooseCLI() }
-                }
-                let resolved = ClaudeCLIProvider.resolveExecutable(configuredPath: draft.claudeCLIPath)
-                let found = FileManager.default.isExecutableFile(atPath: resolved.path)
-                Label(found ? "Found at \(resolved.path)" : "Not found at \(resolved.path)", systemImage: found ? "checkmark.circle" : "xmark.circle")
-                    .font(Theme.small).foregroundStyle(found ? Theme.good : Theme.bad)
-                Text("Sign in once in Terminal with `claude auth login` using an ordinary Claude Pro/Max/Team/Enterprise account. Lectern runs the unmodified CLI and never reads its login. Extra-usage credits on your account can still be charged after included limits.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-            }
-            Section("Codex CLI") {
-                TextField("Model", text: $draft.codexModel, prompt: Text(AISettings.defaultCodexModel))
-                HStack {
-                    TextField("CLI path", text: Binding(get: { draft.codexCLIPath ?? "" }, set: { draft.codexCLIPath = $0.isEmpty ? nil : $0 }),
-                              prompt: Text(CodexCLIProvider.resolveExecutable(configuredPath: nil).path))
-                    Button("Choose…") { chooseCodexCLI() }
-                }
-                let resolved = CodexCLIProvider.resolveExecutable(configuredPath: draft.codexCLIPath)
-                let found = FileManager.default.isExecutableFile(atPath: resolved.path)
-                Label(found ? "Found at \(resolved.path)" : "Not found at \(resolved.path)", systemImage: found ? "checkmark.circle" : "xmark.circle")
-                    .font(Theme.small).foregroundStyle(found ? Theme.good : Theme.bad)
-                HStack {
-                    Button(codexBusy ? "Waiting for ChatGPT sign-in…" : "Sign in with ChatGPT") { startCodexSignIn() }
-                        .disabled(codexBusy || !found)
-                    Button("Check sign-in") { Task { await checkCodexStatus() } }
-                        .disabled(codexBusy || !found)
-                }
-                if let codexStatus { Text(codexStatus).font(Theme.small).foregroundStyle(codexStatusColor).textSelection(.enabled) }
-                Text("Sign in here once with your ChatGPT account. Codex manages credentials in a Lectern-specific account folder, separate from other Codex setups; Lectern never reads them.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-            }
-            Section("Anthropic API") {
-                TextField("Model", text: $draft.messagesAPIModel, prompt: Text(AISettings.defaultMessagesAPIModel))
-                TextField("API version", text: $draft.messagesAPIVersion)
-                Stepper("Max output tokens: \(draft.maxOutputTokens)", value: $draft.maxOutputTokens, in: 256...128_000, step: 1024)
-                HStack {
-                    SecureField(model.apiKeySaved ? "Key saved in Keychain. Paste to replace." : "Paste an API key", text: $apiKey)
-                    Button("Save key") { saveKey() }.disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
-                    if model.apiKeySaved { Button("Remove", role: .destructive) { removeKey() } }
-                }
-                Text("The key is stored only in your macOS Keychain, never in Lectern's files.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
-            }
-            if let message { Text(message).font(Theme.small).foregroundStyle(Theme.good) }
-          }
-          .formStyle(.grouped)
-          .disabled(!loaded)
+            .padding(.horizontal, 40).padding(.vertical, 32)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .disabled(!loaded)
         .onChange(of: model.settingsLoaded, initial: true) { _, ready in
             if ready, !loaded { draft = model.settings; loaded = true }
         }
@@ -115,6 +168,86 @@ private struct AISettingsTab: View {
         .onDisappear { codexSignInTask?.cancel(); codexSignInTask = nil; codexBusy = false }
     }
 
+    private func backendButton(_ backend: AIBackend, _ name: String, _ detail: String) -> some View {
+        let selected = draft.backend == backend
+        return Button { draft.backend = backend } label: {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(selected ? Theme.accentText : Theme.faint)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(name).font(.system(size: 14, weight: .semibold))
+                    Text(detail).font(Theme.small).foregroundStyle(Theme.quiet)
+                }
+                Spacer()
+            }
+            .padding(14)
+            .background(selected ? Theme.goodWash : Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(selected ? Theme.accentText : Theme.border))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private func cliFields(codex: Bool) -> some View {
+        let configuredPath = codex ? $draft.codexCLIPath : $draft.claudeCLIPath
+        let resolve = codex ? CodexCLIProvider.resolveExecutable(configuredPath:) : ClaudeCLIProvider.resolveExecutable(configuredPath:)
+        let resolved = resolve(configuredPath.wrappedValue)
+        let found = FileManager.default.isExecutableFile(atPath: resolved.path)
+        Text(codex ? "Codex" : "Claude CLI").font(.system(size: 19, weight: .bold))
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Model").font(Theme.small.weight(.medium))
+            TextField("Model", text: codex ? $draft.codexModel : $draft.cliModel,
+                      prompt: Text(codex ? AISettings.defaultCodexModel : AISettings.defaultCLIModel)).settingsField()
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("CLI path").font(Theme.small.weight(.medium))
+            HStack {
+                TextField("CLI path", text: Binding(get: { configuredPath.wrappedValue ?? "" },
+                                                    set: { configuredPath.wrappedValue = $0.isEmpty ? nil : $0 }),
+                          prompt: Text(resolve(nil).path)).settingsField()
+                Button("Choose…") { chooseCLI(codex: codex) }.buttonStyle(SecondaryButtonStyle())
+            }
+            Label(found ? "Found at \(resolved.path)" : "Not found at \(resolved.path)", systemImage: found ? "checkmark.circle" : "xmark.circle")
+                .font(Theme.small).foregroundStyle(found ? Theme.good : Theme.bad)
+        }
+        Divider()
+        if codex {
+            Button(codexBusy ? "Waiting for ChatGPT sign-in…" : "Sign in with ChatGPT") { startCodexSignIn() }
+                .buttonStyle(PrimaryButtonStyle()).disabled(codexBusy || !found)
+            Button("Check sign-in") { Task { await checkCodexStatus() } }
+                .buttonStyle(SecondaryButtonStyle()).disabled(codexBusy || !found)
+            if let codexStatus { Text(codexStatus).font(Theme.small).foregroundStyle(codexStatusColor).textSelection(.enabled) }
+            Text("Codex manages credentials in a separate Lectern account folder.")
+                .font(Theme.small).foregroundStyle(Theme.quiet)
+        } else {
+            Text("Sign in once in Terminal with `claude auth login`. Lectern runs the unmodified CLI and never reads its login.")
+                .font(Theme.small).foregroundStyle(Theme.quiet)
+        }
+    }
+
+    @ViewBuilder private var apiFields: some View {
+        Text("Anthropic API").font(.system(size: 19, weight: .bold))
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Model").font(Theme.small.weight(.medium))
+            TextField("Model", text: $draft.messagesAPIModel, prompt: Text(AISettings.defaultMessagesAPIModel)).settingsField()
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("API version").font(Theme.small.weight(.medium))
+            TextField("API version", text: $draft.messagesAPIVersion).settingsField()
+        }
+        Stepper("Max output tokens · \(draft.maxOutputTokens.formatted())", value: $draft.maxOutputTokens, in: 256...128_000, step: 1024)
+        Divider()
+        SecureField(model.apiKeySaved ? "Paste a replacement API key" : "Paste an API key", text: $apiKey).settingsField()
+        HStack {
+            Button("Save key") { saveKey() }.buttonStyle(PrimaryButtonStyle()).disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+            if model.apiKeySaved { Button("Remove key", role: .destructive) { removeKey() }.buttonStyle(SecondaryButtonStyle(foreground: Theme.bad)) }
+        }
+        Text("The API key is stored in your macOS Keychain.").font(Theme.small).foregroundStyle(Theme.quiet)
+        if let message { Text(message).font(Theme.small).foregroundStyle(Theme.good) }
+    }
+
     private func save(_ settings: AISettings) async {
         do {
             try await model.updateSettings(settings)
@@ -124,20 +257,14 @@ private struct AISettingsTab: View {
         } catch { self.error = error.localizedDescription }
     }
 
-    private func chooseCLI() {
+    private func chooseCLI(codex: Bool) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
-        panel.message = "Choose the claude executable"
+        panel.message = codex ? "Choose the codex executable" : "Choose the claude executable"
         panel.showsHiddenFiles = true
-        if panel.runModal() == .OK, let url = panel.url { draft.claudeCLIPath = url.path }
-    }
-
-    private func chooseCodexCLI() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.message = "Choose the codex executable"
-        panel.showsHiddenFiles = true
-        if panel.runModal() == .OK, let url = panel.url { draft.codexCLIPath = url.path }
+        if panel.runModal() == .OK, let url = panel.url {
+            if codex { draft.codexCLIPath = url.path } else { draft.claudeCLIPath = url.path }
+        }
     }
 
     private func startCodexSignIn() {
@@ -203,28 +330,30 @@ private struct RulesTab: View {
     @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Global card rules").font(.system(size: 14, weight: .semibold))
+                Text("Global card rules").settingsHeading()
                 Text("version \(String(PromptBuilder.hash(saved).prefix(8)))").font(Theme.caption.monospaced()).foregroundStyle(Theme.faint)
                 Spacer()
             }
-            Text("Sent with every Generate and revision. Module instructions come after these, and slide notes win over both. Every job records the rules version it used.")
+            Text("Sent with every Generate and revision. Module instructions come after these, and slide notes win over both.")
                 .font(Theme.small).foregroundStyle(Theme.quiet)
             TextEditor(text: $draft)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(size: 13, design: .monospaced))
+                .accessibilityLabel("Global card rules")
                 .scrollContentBackground(.hidden)
-                .padding(6)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.borderStrong))
+                .padding(14)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border).allowsHitTesting(false))
             if let error { Text(error).font(Theme.small).foregroundStyle(Theme.bad) }
             HStack {
                 Text("Stored at \(model.store.rootURL.appendingPathComponent("rules.md").path)").font(Theme.caption).foregroundStyle(Theme.faint).lineLimit(1)
                 Spacer()
-                Button("Revert") { draft = saved }.disabled(draft == saved)
-                Button("Save rules") { Task { await save() } }.keyboardShortcut("s", modifiers: .command).disabled(draft == saved)
+                Button("Revert") { draft = saved }.buttonStyle(SecondaryButtonStyle()).disabled(draft == saved)
+                Button("Save rules") { Task { await save() } }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut("s", modifiers: .command).disabled(draft == saved)
             }
         }
+        .padding(.horizontal, 40).padding(.vertical, 32)
         .task { await load() }
     }
 
@@ -235,8 +364,9 @@ private struct RulesTab: View {
 
     private func save() async {
         do {
-            try await model.store.saveRules(draft)
-            saved = draft
+            let content = draft
+            try await model.store.saveRules(content)
+            saved = content
             error = nil
         } catch { self.error = error.localizedDescription }
     }
@@ -255,57 +385,68 @@ private struct UsageTab: View {
     private var summary: AIUsageSummary {
         AIUsageSummary.summarize(records: records, legacyJobs: jobs, learningPointsOnly: learningPointsOnly)
     }
-    private var apiCost: APICostSummary { APIPricing.summarize(jobs, records: records) }
+    private var apiCost: APICostSummary {
+        if learningPointsOnly {
+            return APIPricing.summarize([], records: records.filter { $0.context["feature"] == "learningPointsV2" })
+        }
+        return APIPricing.summarize(jobs, records: records)
+    }
 
     var body: some View {
+        let totals = summary
+        let cost = apiCost
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("AI usage").font(.system(size: 14, weight: .semibold))
+                    Text("AI usage").settingsHeading()
                     Spacer()
-                    Button("Refresh") { Task { await load() } }.disabled(loading)
+                    SegmentedControl(options: [(false, "All AI"), (true, "Learning points v2")], selection: $learningPointsOnly)
+                    Button("Refresh") { Task { await load() } }.buttonStyle(SecondaryButtonStyle()).disabled(loading)
                 }
-                Picker("Scope", selection: $learningPointsOnly) {
-                    Text("All AI").tag(false)
-                    Text("Learning points v2").tag(true)
-                }.pickerStyle(.segmented)
-                if learningPointsOnly {
-                    Text("Background learning-point and Review suggestion checks. Full card generation is included under All AI.")
-                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                if loading { ProgressView().controlSize(.small) }
+                if let error { ErrorBanner(message: error) }
+                HStack(spacing: 10) {
+                    metric("Provider calls", totals.providerCalls.formatted())
+                    metric("Input tokens", totals.inputTokens.formatted(.number.notation(.compactName)))
+                    metric("Output tokens", totals.outputTokens.formatted(.number.notation(.compactName)))
+                    metric("Anthropic API spend", Format.usd(cost.totalUSD))
                 }
-                if loading { ProgressView() }
-                if let error { Text(error).foregroundStyle(Theme.bad) }
-                Grid(alignment: .leading, horizontalSpacing: 22, verticalSpacing: 7) {
-                    row("Execution attempts", summary.attempts)
-                    row("Provider calls attempted", summary.providerCalls)
-                    row("Skipped checks", summary.skipped)
-                    row("Failed or cancelled attempts", summary.failed)
-                    row("Input tokens", summary.inputTokens)
-                    row("Output tokens", summary.outputTokens)
-                    row("Cache read tokens", summary.cacheReadTokens)
-                    row("Cache write tokens", summary.cacheWriteTokens)
-                    row("Attempts with unknown usage", summary.missingUsage)
-                    if learningPointsOnly {
-                        row("Learning points added", summary.pointsAdded)
-                        row("Learning points merged", summary.pointsMerged)
-                        row("Learning points rejected", summary.pointsRejected)
-                    }
-                }.font(Theme.body)
-                Divider()
-                Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 7) {
-                    GridRow {
-                        Text("Backend"); Text("Calls"); Text("Input"); Text("Output")
-                    }.font(.system(size: 11, weight: .semibold))
-                    ForEach(AIBackend.allCases, id: \.self) { backend in
-                        let value = AIUsageSummary.summarize(records: records, legacyJobs: jobs, learningPointsOnly: learningPointsOnly, backend: backend)
-                        GridRow {
-                            Text(backendLabel(backend))
-                            Text(value.providerCalls.formatted())
-                            Text(value.inputTokens.formatted())
-                            Text(value.outputTokens.formatted())
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Details").font(.headline)
+                        row("Execution attempts", totals.attempts)
+                        row("Skipped checks", totals.skipped)
+                        row("Failed or cancelled", totals.failed)
+                        row("Cache read tokens", totals.cacheReadTokens)
+                        row("Cache write tokens", totals.cacheWriteTokens)
+                        row("Unknown usage", totals.missingUsage)
+                        if learningPointsOnly {
+                            row("Learning points added", totals.pointsAdded)
+                            row("Learning points merged", totals.pointsMerged)
+                            row("Learning points rejected", totals.pointsRejected)
                         }
                     }
-                }.font(Theme.small).monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .leading).panel()
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("By backend").font(.headline)
+                        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                            GridRow {
+                                Text("Backend"); Text("Calls"); Text("Input"); Text("Output")
+                            }.eyebrow()
+                            ForEach(AIBackend.allCases, id: \.self) { backend in
+                                let value = AIUsageSummary.summarize(records: records, legacyJobs: jobs, learningPointsOnly: learningPointsOnly, backend: backend)
+                                GridRow {
+                                    Text(backendLabel(backend))
+                                    Text(value.providerCalls.formatted())
+                                    Text(value.inputTokens.formatted(.number.notation(.compactName)))
+                                    Text(value.outputTokens.formatted(.number.notation(.compactName)))
+                                }
+                            }
+                        }
+                        .font(Theme.small).monospacedDigit()
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).panel()
+                }
                 if learningPointsOnly {
                     DisclosureGroup("What triggered the checks") {
                         Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 6) {
@@ -319,21 +460,38 @@ private struct UsageTab: View {
                                 }
                             }
                         }.padding(.top, 6).font(Theme.small)
-                    }
-                } else {
-                    Text("Anthropic API spend · \(Format.usd(apiCost.totalUSD))").font(.system(size: 13, weight: .semibold))
-                    Text("\(apiCost.unpricedJobs) API attempts have no price. CLI tokens are included above; subscription cost and quota percentages are not available.")
-                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                    }.panel()
                 }
-                Text("Totals include reported usage from failed attempts and retries. Unknown usage is excluded from token totals. Input includes cache reads and writes; the cache rows are a breakdown, not extra tokens. One CLI invocation may contain several internal model steps. Historical jobs have less complete call counts; V2 breakdowns start with the new logs.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-            }.padding(.trailing, 8)
-        }.frame(maxWidth: .infinity, alignment: .leading).task { await load() }
+                if cost.unpricedJobs > 0 {
+                    Text("\(cost.unpricedJobs) API attempts have no price.").font(Theme.small).foregroundStyle(Theme.amber)
+                }
+                Text("Totals include failed attempts and retries. Unknown usage is left out of token totals. CLI subscription cost and quota aren't available.")
+                    .font(Theme.small).foregroundStyle(Theme.quiet)
+            }
+            .padding(.horizontal, 40).padding(.vertical, 32)
+        }
+        .task { await load() }
+    }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(value).font(.system(size: 27, weight: .bold)).tracking(-1).monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.65)
+            Text(title).font(Theme.small).foregroundStyle(Theme.quiet)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panel(padding: 16)
+        .accessibilityElement(children: .combine)
     }
 
     private func row(_ label: String, _ value: Int) -> some View {
-        GridRow { Text(label); Text(value.formatted()).monospacedDigit() }
+        HStack {
+            Text(label).foregroundStyle(Theme.quiet)
+            Spacer()
+            Text(value.formatted()).monospacedDigit()
+        }.font(Theme.body)
     }
+
     private func backendLabel(_ backend: AIBackend) -> String {
         switch backend { case .claudeCLI: "Claude CLI"; case .codexCLI: "Codex CLI"; case .messagesAPI: "Messages API" }
     }
@@ -367,26 +525,40 @@ private struct LibraryTab: View {
     @State private var working = false
 
     var body: some View {
-        Form {
-            Section("Library folder") {
-                Text(model.store.rootURL.path).font(Theme.small.monospaced()).textSelection(.enabled)
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([model.store.rootURL]) }
-                Text("PDFs are private copies inside this folder, so lectures keep working after the originals move.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet)
-            }
-            Section("Import from the earlier apps") {
-                Text("Your own Slide Learning and Flashcard Reviewer data was imported when Lectern first opened. Use these for a friend's exported folders or a backup. Originals are read, never changed; importing the same path twice skips what's already there.")
-                    .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("Import Slide Learning folder…") { Task { await importSlides() } }
-                    Button("Import reviewer sessions.json…") { Task { await importReviewer() } }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Library").settingsHeading()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Library folder").font(.headline)
+                    HStack {
+                        Text((model.store.rootURL.path as NSString).abbreviatingWithTildeInPath)
+                            .font(Theme.small.monospaced()).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).settingsField()
+                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([model.store.rootURL]) }
+                            .buttonStyle(SecondaryButtonStyle())
+                    }
+                    Text("PDFs are private copies inside this folder, so lectures keep working after the originals move.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
                 }
-                .disabled(working)
-                if working { ProgressView().controlSize(.small) }
-                if let result { Text(result).font(Theme.small).textSelection(.enabled) }
+                .panel()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Import from the earlier apps").font(.headline)
+                    Text("Import a Slide Learning folder or Flashcard Reviewer backup. Lectern reads the originals and skips items already imported from the same path.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                    HStack {
+                        Button("Import Slide Learning folder…") { Task { await importSlides() } }
+                        Button("Import reviewer sessions.json…") { Task { await importReviewer() } }
+                    }
+                    .buttonStyle(SecondaryButtonStyle()).disabled(working)
+                    if working { ProgressView().controlSize(.small) }
+                    if let result { Text(result).font(Theme.small).textSelection(.enabled) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).panel()
             }
+            .frame(maxWidth: 620, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 40).padding(.vertical, 32)
         }
-        .formStyle(.grouped)
     }
 
     private func importSlides() async {

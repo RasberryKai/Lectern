@@ -76,6 +76,18 @@ private struct SlidePDFView: NSViewRepresentable {
     func updateNSView(_ view: ZoomablePDFView, context: Context) {
         view.load(sourceURL: sourceURL, pageIndex: pageIndex)
     }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ZoomablePDFView, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite,
+              let page = nsView.document?.page(at: 0) else { return nil }
+        let crop = page.bounds(for: .cropBox).size
+        let rotated = page.rotation % 180 != 0
+        let size = rotated ? CGSize(width: crop.height, height: crop.width) : crop
+        guard size.width > 0, size.height > 0 else { return nil }
+        let scale = min(width / size.width, height / size.height)
+        return CGSize(width: size.width * scale, height: size.height * scale)
+    }
 }
 
 @MainActor final class ZoomablePDFView: PDFView {

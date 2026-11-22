@@ -4,7 +4,6 @@ import SwiftUI
 
 /// One lecture conversation, kept alive across slide navigation and Prepare/Review.
 struct AskPanel: View {
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var model: LectureWindowModel
     let page: Int
@@ -121,7 +120,7 @@ struct AskPanel: View {
                 Text(failure.message).font(Theme.small).textSelection(.enabled)
                 HStack {
                     Button("Try again") { Task { await model.sendChat(retrying: failure) } }.buttonStyle(SecondaryButtonStyle())
-                    if needsSettings(failure.message) { Button("Open Settings") { openSettings() }.buttonStyle(SecondaryButtonStyle()) }
+                    if needsSettings(failure.message) { Button("Open Settings") { model.app.showSettings = true }.buttonStyle(SecondaryButtonStyle()) }
                     Button("Dismiss") { model.chatPreparationFailure = nil }.buttonStyle(.plain)
                 }.disabled(model.readOnly || model.isStartingChat || model.runningChat != nil)
             }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Theme.badWash, in: RoundedRectangle(cornerRadius: 9))
@@ -133,7 +132,7 @@ struct AskPanel: View {
                 HStack {
                     Button("Try again") { Task { await model.retry(job.id) } }.buttonStyle(SecondaryButtonStyle())
                     if needsSettings(job.error ?? "") {
-                        Button("Open Settings") { openSettings() }.buttonStyle(SecondaryButtonStyle())
+                        Button("Open Settings") { model.app.showSettings = true }.buttonStyle(SecondaryButtonStyle())
                     }
                     Button("Dismiss") { model.dismissedJobIDs.insert(job.id) }.buttonStyle(.plain)
                 }.disabled(model.readOnly)

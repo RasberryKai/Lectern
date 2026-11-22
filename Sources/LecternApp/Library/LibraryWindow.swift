@@ -2,35 +2,49 @@ import LecternCore
 import SwiftUI
 
 struct LibraryWindow: View {
+    static let sidebarWidth: CGFloat = 212
     @Environment(AppModel.self) private var model
+
+    @Environment(\.launchPhase) private var launchPhase
 
     var body: some View {
         @Bindable var model = model
         Group {
-            if let ref = model.activeLecture {
+            if model.showNewModule {
+                ModuleCreationForm(onClose: { model.showNewModule = false })
+            } else if let moduleID = model.settingsModuleID {
+                ModuleSettingsSheet(moduleID: moduleID) { model.settingsModuleID = nil }
+                    .background(Theme.canvasGrid.ignoresSafeArea(edges: .top))
+            } else if let ref = model.activeLecture {
                 LectureWindow(ref: ref).id(ref)
+            } else if case .ready = model.phase, model.modules.isEmpty {
+                ModuleCreationForm()
             } else {
                 HStack(spacing: 0) {
                     Sidebar()
-                        .frame(width: 236)
-                        .background(Theme.sidebar)
-                    Rectangle().fill(Theme.border).frame(width: 1)
+                        .frame(width: Self.sidebarWidth)
+                        .background(Theme.sidebar.ignoresSafeArea(edges: .top))
+                    Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea(edges: .top)
                     detail
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Theme.canvas)
+                        .launchEntrance()
+                        .background(Theme.canvasGrid.ignoresSafeArea(edges: .top))
                 }
+            }
+        }
+        .disabled(model.showSettings)
+        .accessibilityHidden(model.showSettings)
+        .overlay {
+            if model.showSettings {
+                SettingsView().background(Theme.canvasGrid.ignoresSafeArea(edges: .top))
             }
         }
         .background(WindowCloseGuard { await model.closeAllLectureWindows() })
         .foregroundStyle(Theme.ink)
         .sheet(item: $model.renamingLecture) { ref in RenameLectureSheet(ref: ref) }
         .sheet(item: $model.movingLecture) { ref in MoveLectureSheet(ref: ref) }
-        .sheet(isPresented: $model.showNewModule) { NewModuleSheet() }
-        .sheet(item: Binding(get: { model.settingsModuleID.map(IdentifiedUUID.init) },
-                             set: { model.settingsModuleID = $0?.id })) { item in
-            ModuleSettingsSheet(moduleID: item.id)
-        }
-        .sheet(isPresented: $model.showBootstrapReport) { BootstrapReportSheet() }
+        .sheet(isPresented: Binding(get: { launchPhase != .covered && model.showBootstrapReport },
+                                    set: { model.showBootstrapReport = $0 })) { BootstrapReportSheet() }
         .sheet(item: $model.pendingImport) { pending in ImportPDFsSheet(pending: pending) }
         .alert("Something went wrong", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK", role: .cancel) { model.errorMessage = nil }
@@ -48,46 +62,55 @@ struct LibraryWindow: View {
             }
         case .failed(let message):
             VStack(alignment: .leading, spacing: 12) {
-                Text("Lectern couldn't open its library").font(Theme.serif(26))
+                Text("Lectern couldn't open its library").font(Theme.heading(26))
                 Text(message).font(Theme.body).foregroundStyle(Theme.quiet).textSelection(.enabled)
                 Text(model.store.rootURL.path).font(Theme.caption.monospaced()).foregroundStyle(Theme.faint).textSelection(.enabled)
             }
             .frame(maxWidth: 560)
         case .ready:
             switch model.selection {
-            case .overview, .settings: OverviewView()
+            case .overview: OverviewView()
             case .module(let id): ModuleView(moduleID: id).id(id)
-            case .export(let id): ExportView(moduleID: id).id(id)
+            case .export(let id, let lectureID): ExportView(moduleID: id, initialLectureID: lectureID).id(model.selection)
             }
         }
     }
 }
 
-nonisolated struct IdentifiedUUID: Identifiable { let id: UUID }
-
 // MARK: - Sidebar
 
 private struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.launchPhase) private var phase
+    @Environment(\.accessibilityReduceMotion) private var reduced
     @State private var archivedExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Wordmark(size: 24).padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 20)
+            Wordmark(size: 23)
+                .anchorPreference(key: LaunchDestination.self, value: .bounds) { $0 }
+                .opacity(phase == .finished || reduced ? 1 : 0)
+                .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 20)
             SidebarRow(title: "Overview", detail: nil, isSelected: model.selection == .overview) { model.selection = .overview }
-            HStack(spacing: 4) {
-                Text("Modules").eyebrow()
-                Text("· done / planned").font(Theme.caption).foregroundStyle(Theme.quiet)
+                .launchEntrance(row: 0)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Study").eyebrow()
+                    .padding(.horizontal, 22).padding(.bottom, 6)
+                upcomingStudyRow("Flashcards", icon: "rectangle.on.rectangle")
+                upcomingStudyRow("Mock exams", icon: "checkmark.square")
             }
-            .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 6)
+            .padding(.top, 22).launchEntrance(row: 1)
+            Text("Modules").eyebrow()
+                .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 6).launchEntrance(row: 2)
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(model.dashboard?.modules ?? []) { progress in
+                    ForEach(Array((model.dashboard?.modules ?? []).enumerated()), id: \.element.id) { index, progress in
                         SidebarRow(title: progress.module.name,
                                    detail: "\(progress.totals.doneLectureCount) / \(progress.totals.plannedLectureCount)",
                                    isSelected: isSelected(progress.module.id)) {
                             model.selection = .module(progress.module.id)
                         }
+                        .launchEntrance(row: 3 + index)
                     }
                     Button { model.showNewModule = true } label: {
                         Text("+ New module").font(Theme.body).foregroundStyle(Theme.accentText)
@@ -97,8 +120,9 @@ private struct Sidebar: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .padding(.horizontal, 14).padding(.top, 10)
-                    archived.padding(.top, 18)
+                    .padding(.horizontal, 12).padding(.top, 10)
+                    .launchEntrance(row: 5)
+                    archived.padding(.top, 18).launchEntrance(row: 6)
                 }
             }
             Spacer(minLength: 12)
@@ -107,18 +131,36 @@ private struct Sidebar: View {
                 Circle().fill(status.ready ? Theme.good : Theme.amber).frame(width: 7, height: 7)
                 Text(status.text).font(Theme.small).foregroundStyle(Theme.quiet)
             }
+            .launchEntrance(row: 6)
             .help(backendHelp)
             .padding(.horizontal, 22).padding(.bottom, 12)
-            SettingsLink {
-                Text("Settings").font(Theme.body).foregroundStyle(Theme.ink)
+            Button { model.showSettings = true } label: {
+                HStack { Label("Settings", systemImage: "gearshape"); Spacer(); Text("⌘ ,").foregroundStyle(Theme.quiet) }.font(Theme.body).foregroundStyle(Theme.ink)
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 22).padding(.bottom, 20)
+            .padding(.horizontal, 22).padding(.bottom, 20).launchEntrance(row: 7)
         }
     }
 
+    private func upcomingStudyRow(_ title: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).frame(width: 15).accessibilityHidden(true)
+            Text(title)
+            Spacer()
+            Text("Soon")
+                .font(Theme.caption.weight(.semibold))
+                .foregroundStyle(Theme.accentText)
+                .padding(.horizontal, 8).padding(.vertical, 2)
+                .background(Theme.goodWash, in: Capsule())
+        }
+        .font(Theme.body).foregroundStyle(Theme.quiet)
+        .padding(.horizontal, 24).padding(.vertical, 7)
+        .accessibilityElement(children: .combine)
+    }
+
     private func isSelected(_ id: UUID) -> Bool {
-        model.selection == .module(id) || model.selection == .export(id)
+        if case .export(let moduleID, _) = model.selection { return id == moduleID }
+        return model.selection == .module(id)
     }
 
     private var backendHelp: String {
@@ -166,80 +208,86 @@ private struct SidebarRow: View {
     var body: some View {
         Button(action: action) {
             HStack {
+                Image(systemName: detail == nil && !muted ? "square.grid.2x2" : "folder")
+                    .font(.system(size: 13))
                 Text(title).font(.system(size: 13, weight: isSelected ? .semibold : .regular)).lineLimit(1)
                 Spacer(minLength: 8)
                 if let detail { Text(detail).font(Theme.small).monospacedDigit().foregroundStyle(Theme.quiet) }
             }
-            .foregroundStyle(muted && !isSelected ? Theme.quiet : Theme.ink)
+            .foregroundStyle(isSelected ? Theme.accentText : muted ? Theme.quiet : Theme.ink)
             .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(isSelected ? Theme.surface : .clear, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(isSelected ? Theme.border : .clear))
+            .background(isSelected ? Theme.goodWash : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(isSelected ? Theme.accentText.opacity(0.25) : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 12)
     }
 }
 
 // MARK: - Sheets
 
-struct NewModuleSheet: View {
+struct ModuleCreationForm: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
+    var onClose: (() -> Void)?
     @State private var name = ""
-    @State private var instructions = ""
-    @State private var planned = 0
+    @State private var saving = false
     @State private var error: String?
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("New module").font(Theme.serif(26))
-            field("Name") {
-                TextField("e.g. Statistics II", text: $name).textFieldStyle(.roundedBorder).onSubmit(save)
-            }
-            field("Lectures planned") {
-                Stepper(value: $planned, in: 0...Module.maximumPlannedLectureCount) {
-                    Text(planned == 0 ? "Not set" : "\(planned)").monospacedDigit()
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 24) {
+                    LogoMark().fill(Theme.accent).padding(10).frame(width: 64, height: 64)
+                        .background(Theme.goodWash, in: RoundedRectangle(cornerRadius: 14))
+                    VStack(spacing: 10) {
+                        Text("Start with a module.").font(Theme.heading(60)).tracking(-2.4)
+                        Text("A module is one course. Name it, then drop its lecture PDFs on it.")
+                            .font(Theme.body).foregroundStyle(Theme.quiet)
+                    }
+                    HStack(spacing: 10) {
+                        TextField("Module name", text: $name)
+                            .textFieldStyle(.plain).moduleFormInput()
+                            .focused($nameFocused)
+                            .accessibilityLabel("Module name").onSubmit(save)
+                        Button(action: save) {
+                            Image(systemName: "arrow.right").frame(width: 16, height: 28)
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .accessibilityLabel("Create module")
+                        .help("Create module")
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .frame(maxWidth: 500)
+                    if let error { ErrorBanner(message: error) }
+                    if let onClose {
+                        Button("Cancel", action: onClose)
+                            .buttonStyle(LinkButtonStyle(color: Theme.quiet)).keyboardShortcut(.cancelAction)
+                    }
                 }
-                .fixedSize()
-            }
-            field("Module instructions (optional)") {
-                TextEditor(text: $instructions).font(Theme.body).frame(height: 80)
-                    .scrollContentBackground(.hidden).padding(6)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.borderStrong))
-                Text("Applied after the global rules, before slide notes. Example: “Open-book exam, test interpretation only.”")
-                    .font(Theme.caption).foregroundStyle(Theme.quiet)
-            }
-            if let error { ErrorBanner(message: error) }
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
-                Button("Create", action: save).buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                .padding(40)
+                .frame(maxWidth: 760, minHeight: 440)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
+                .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Theme.border))
+                .padding(32)
+                .frame(maxWidth: .infinity, minHeight: geometry.size.height)
             }
         }
-        .padding(28)
-        .frame(width: 480)
-        .background(Theme.surface)
-    }
-
-    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 13, weight: .semibold))
-            content()
-        }
+        .background(Theme.canvasGrid.ignoresSafeArea(edges: .top))
+        .disabled(saving)
+        .onAppear { nameFocused = true }
     }
 
     private func save() {
+        guard !saving, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        saving = true
         Task {
+            defer { saving = false }
             do {
-                let module = try await model.createModule(name: name, instructions: instructions)
-                if planned > 0 {
-                    try await model.store.updateModuleSettings(moduleID: module.id, name: module.name, plannedLectureCount: planned, examDate: nil)
-                    try await model.reloadNow()
-                }
-                dismiss()
+                try await model.createModule(name: name)
+                onClose?()
             } catch { self.error = error.localizedDescription }
         }
     }
@@ -251,7 +299,7 @@ struct BootstrapReportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Library opened").font(Theme.serif(24))
+            Text("Library opened").font(Theme.heading(24))
             if let report = model.bootstrapReport {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {

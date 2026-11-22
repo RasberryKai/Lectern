@@ -31,7 +31,8 @@ struct PrepareView: View {
     private var thumbnails: some View {
         CenteredThumbnailList(pageIndices: model.filteredSlides.map(\.pageIndex), focusedPageIndex: model.focusedPageIndex) { pageIndex in
             if let slide = model.slide(pageIndex) {
-                SlideCell(model: model, slide: slide, width: 250, sourceURL: sourceURL)
+                SlideCell(model: model, slide: slide, width: 320, sourceURL: sourceURL)
+                    .frame(maxWidth: thumbnailWidth)
             }
         }
         .overlay {
@@ -39,6 +40,14 @@ struct PrepareView: View {
                 Text(model.prepareFilter == .noCards ? "Every slide has cards." : "No slides match this filter.")
                     .font(Theme.small).foregroundStyle(Theme.quiet).padding(10)
             }
+        }
+    }
+
+    private var thumbnailWidth: CGFloat {
+        switch model.thumbnailSize {
+        case .compact: 105
+        case .regular: 180
+        case .large: .infinity
         }
     }
 
@@ -55,42 +64,38 @@ struct PrepareView: View {
                     Label("AI skipped this slide: \(skipped.reason)", systemImage: "arrow.uturn.right")
                         .font(Theme.small).foregroundStyle(Theme.amber)
                 }
-                ZStack {
-                    ZoomableSlideView(sourceURL: sourceURL, pageIndex: index)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(.horizontal, 34)
-                    HStack {
-                        slideNavigation("chevron.left", delta: -1)
-                        Spacer()
-                        slideNavigation("chevron.right", delta: 1)
-                    }
+                HStack {
+                    Text("Slide \(page)").eyebrow()
+                    Spacer()
+                    slideNavigation("chevron.left", delta: -1)
+                    Text("\(position + 1) / \(model.filteredSlides.count)")
+                        .font(Theme.caption).foregroundStyle(Theme.quiet).monospacedDigit()
+                    slideNavigation("chevron.right", delta: 1)
                 }
-                .layoutPriority(1)
+                ZoomableSlideView(sourceURL: sourceURL, pageIndex: index)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(1)
                 HStack(spacing: 8) {
                     Button { Task { await model.toggleSelection(index) } } label: {
                         HStack(spacing: 7) {
                             Image(systemName: slide.isSelected ? "checkmark.square.fill" : "square")
                                 .foregroundStyle(slide.isSelected ? Theme.accentText : Theme.faint)
-                            Text("Use for cards").fontWeight(.medium)
+                            Text(slide.isSelected ? "Used for cards" : "Use for cards").fontWeight(.medium)
                             ShortcutKey(text: "Space")
                         }
                     }
                     .buttonStyle(.plain).disabled(model.readOnly)
-                    Text("·").foregroundStyle(Theme.faint)
+                    Spacer(minLength: 4)
                     Button(cards.isEmpty ? "No cards from this slide" : "\(Format.count(cards.count, "card")) from this slide") {
                         model.askVisible = true
                         model.panes.setTab(.content, for: .prepare)
                     }
                     .buttonStyle(LinkButtonStyle(color: Theme.quiet))
-                    Spacer()
-                    Text("\(position + 1) / \(model.filteredSlides.count)")
-                        .foregroundStyle(Theme.quiet).monospacedDigit()
-                        .help("Original slide \(page)")
                 }
                 .font(Theme.body)
                 if model.notesVisible { notes(index: index, page: page) }
             }
-            .padding(.horizontal, 28).padding(.vertical, 22)
+            .padding(.horizontal, 40).padding(.vertical, 24)
         } else {
             VStack(spacing: 8) {
                 Text(model.lecture.pageCount == 0 ? "This lecture has no slides." : model.filteredSlides.isEmpty ? "No slides match this filter." : "Choose a slide on the left.")
@@ -103,7 +108,7 @@ struct PrepareView: View {
     private func slideNavigation(_ icon: String, delta: Int) -> some View {
         Button { model.moveFocus(delta) } label: {
             Image(systemName: icon).font(.system(size: 13))
-                .frame(width: 32, height: 32)
+                .frame(width: 24, height: 24)
                 .background(Theme.surface, in: Circle())
                 .overlay(Circle().strokeBorder(Theme.borderStrong))
         }
@@ -148,31 +153,43 @@ private struct SlideCell: View {
         let coverage = model.lecture.coverage(page: page)
         let hasThread = model.hasChat(forPage: page)
         let hasNote = !model.noteText(for: slide.pageIndex).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        VStack(alignment: .leading, spacing: 7) {
-            SlideImage(sourceURL: sourceURL, pageIndex: slide.pageIndex, width: width, cornerRadius: 4)
-                .frame(maxWidth: .infinity)
-                .opacity(slide.isSelected ? 1 : 0.45)
-            HStack(spacing: 5) {
-                Text("\(page) · \(coverage) cards").font(Theme.caption).monospacedDigit().foregroundStyle(Theme.quiet)
-                if hasThread {
-                    Button { model.showChat(forPage: page) } label: { Image(systemName: "bubble.right").foregroundStyle(Theme.ai) }
-                        .buttonStyle(.plain).help("Show the chat about slide \(page)")
+        HStack(alignment: .top, spacing: 6) {
+            Text("\(page)").font(Theme.caption).monospacedDigit()
+                .foregroundStyle(focused ? Theme.aiStrong : Theme.quiet)
+                .fontWeight(focused ? .bold : .regular)
+                .frame(minWidth: 15, alignment: .trailing)
+            VStack(alignment: .trailing, spacing: 4) {
+                SlideImage(sourceURL: sourceURL, pageIndex: slide.pageIndex, width: width, cornerRadius: 6)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(focused ? Theme.ai : Theme.border, lineWidth: focused ? 2.5 : 1)
+                    }
+                    .opacity(slide.isSelected ? 1 : 0.55)
+                HStack(spacing: 5) {
+                    if hasThread {
+                        Button { model.showChat(forPage: page) } label: { Image(systemName: "bubble.right") }
+                            .buttonStyle(.plain).foregroundStyle(Theme.ai)
+                            .accessibilityLabel("Show chat about slide \(page)")
+                    }
+                    if hasNote {
+                        Image(systemName: "note.text").foregroundStyle(Theme.quiet)
+                            .accessibilityLabel("Has a note")
+                    }
+                    Spacer(minLength: 0)
+                    Button { Task { await model.toggleSelection(slide.pageIndex) } } label: {
+                        Image(systemName: slide.isSelected ? "checkmark.square.fill" : "square")
+                            .foregroundStyle(slide.isSelected ? Theme.accentText : Theme.faint)
+                    }
+                    .buttonStyle(.plain).disabled(model.readOnly)
+                    .accessibilityLabel(slide.isSelected ? "Deselect slide \(page)" : "Select slide \(page)")
                 }
-                if hasNote { Text("note").font(Theme.caption).foregroundStyle(Theme.amber) }
-                Spacer(minLength: 2)
-                Button { Task { await model.toggleSelection(slide.pageIndex) } } label: {
-                    Image(systemName: slide.isSelected ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 15))
-                        .foregroundStyle(slide.isSelected ? Theme.accent : Theme.faint)
-                }
-                .buttonStyle(.plain)
-                .disabled(model.readOnly)
-                .help(slide.isSelected ? "Deselect slide \(page)" : "Select slide \(page)")
+                .font(Theme.caption)
             }
         }
-        .padding(8)
-        .background(focused ? Theme.surface : .clear, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(focused ? Theme.ai : .clear, lineWidth: 1.5))
+        .padding(7)
+        .background(focused ? Theme.aiWash : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(focused ? Theme.ai : .clear, lineWidth: 1.5))
+        .help("Slide \(page) · \(Format.count(coverage, "card"))")
         .contentShape(Rectangle())
         .onTapGesture { model.focus(slide.pageIndex) }
         .accessibilityElement(children: .combine)
@@ -233,7 +250,7 @@ struct PrepareCardsPane: View {
                 let cards = model.cards(from: model.focusedPage ?? 0)
                 if cards.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("No cards from this slide yet").font(Theme.serif(20))
+                        Text("No cards from this slide yet").font(Theme.heading(20))
                         Text("Select the slides you want to learn, then generate cards.").font(Theme.body).foregroundStyle(Theme.quiet)
                     }.padding(12)
                 }
@@ -263,9 +280,9 @@ struct PrepareCardsPane: View {
 
 extension CardVerdict {
     var v2Title: String {
-        switch self { case .unreviewed: "To review"; case .good: "Good"; case .bad: "Bad"; case .needsAdjustment: "Needs work" }
+        switch self { case .unreviewed: "To review"; case .good: "Good"; case .bad: "Bad"; case .needsAdjustment: "To review" }
     }
     var v2Color: Color {
-        switch self { case .unreviewed: Theme.faint; case .good: Theme.good; case .bad: Theme.bad; case .needsAdjustment: Theme.amber }
+        switch self { case .unreviewed: Theme.faint; case .good: Theme.good; case .bad: Theme.bad; case .needsAdjustment: Theme.faint }
     }
 }

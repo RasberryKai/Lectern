@@ -7,9 +7,12 @@ struct ModuleSettingsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let moduleID: UUID
+    var onClose: (() -> Void)? = nil
 
     @State private var loaded = false
     @State private var name = ""
+    @State private var instructions = ""
+    @State private var originalInstructions = ""
     @State private var planned = 0
     @State private var minimum = 0
     @State private var hasExam = false
@@ -21,17 +24,24 @@ struct ModuleSettingsSheet: View {
     @State private var confirmCancelJobs = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Module settings").font(Theme.serif(30))
-            if !loaded {
-                ProgressView().frame(maxWidth: .infinity, minHeight: 200)
-            } else {
-                form
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("Module settings").font(Theme.heading(32)).tracking(-1)
+                if !loaded {
+                    ProgressView().frame(maxWidth: .infinity, minHeight: 200)
+                } else {
+                    form
+                }
             }
+            .padding(36)
+            .frame(maxWidth: 560, alignment: .leading)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Theme.border))
+            .frame(maxWidth: .infinity)
+            .padding(32)
         }
-        .padding(30)
-        .frame(width: 520)
-        .background(Theme.surface)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .disabled(saving).interactiveDismissDisabled(saving)
         .task { await load() }
         .confirmationDialog("AI is still working on \(Format.count(runningJobCount, "job")) in this module",
                             isPresented: $confirmCancelJobs) {
@@ -43,82 +53,108 @@ struct ModuleSettingsSheet: View {
     }
 
     @ViewBuilder private var form: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Name").font(.system(size: 13, weight: .semibold))
-            TextField("Module name", text: $name).textFieldStyle(.roundedBorder).controlSize(.large)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Name").font(.system(size: 14, weight: .semibold))
+            TextField("Module name", text: $name)
+                .textFieldStyle(.plain).moduleFormInput()
+                .accessibilityLabel("Module name")
         }
         .disabled(archived)
 
-        HStack(alignment: .top, spacing: 24) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Lectures planned").font(.system(size: 13, weight: .semibold))
+        HStack(alignment: .top, spacing: 32) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Lectures planned").font(.system(size: 14, weight: .semibold))
                 HStack(spacing: 8) {
-                    Button("–") { planned = max(minimum, planned - 1) }
-                        .buttonStyle(SecondaryButtonStyle()).disabled(planned <= minimum)
+                    Button { planned = max(minimum, planned - 1) } label: {
+                        Image(systemName: "minus").frame(width: 16, height: 26)
+                    }
+                    .buttonStyle(SecondaryButtonStyle()).disabled(planned <= minimum)
+                    .accessibilityLabel("One fewer")
                     TextField("", value: $planned, format: .number)
-                        .multilineTextAlignment(.center).textFieldStyle(.roundedBorder).frame(width: 70)
+                        .multilineTextAlignment(.center).textFieldStyle(.plain)
+                        .moduleFormInput().frame(width: 76)
+                        .accessibilityLabel("Lectures planned")
                         .onSubmit { planned = min(max(planned, minimum), Module.maximumPlannedLectureCount) }
-                    Button("+") { planned = min(Module.maximumPlannedLectureCount, planned + 1) }
-                        .buttonStyle(SecondaryButtonStyle())
+                    Button { planned = min(Module.maximumPlannedLectureCount, planned + 1) } label: {
+                        Image(systemName: "plus").frame(width: 16, height: 26)
+                    }
+                    .buttonStyle(SecondaryButtonStyle()).disabled(planned >= Module.maximumPlannedLectureCount)
+                    .accessibilityLabel("One more")
                 }
-                Text("Empty slots show in the module and on the Overview. Can't go below the highest imported slot (\(minimum)).")
+                Text("At least \(minimum), the highest imported lecture number.")
                     .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 4) {
-                    Text("Exam date").font(.system(size: 13, weight: .semibold))
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 5) {
+                    Text("Exam date").font(.system(size: 14, weight: .semibold))
                     Text("optional").font(Theme.body).foregroundStyle(Theme.quiet)
                 }
                 if hasExam {
                     HStack {
                         DatePicker("Exam date", selection: $examDate, displayedComponents: .date)
                             .labelsHidden().datePickerStyle(.field)
+                        Spacer(minLength: 0)
                         Button("Clear") { hasExam = false }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
                     }
+                    .frame(minHeight: 20).moduleFormInput()
                 } else {
-                    Button("Add exam date") { hasExam = true }.buttonStyle(SecondaryButtonStyle())
+                    Button { hasExam = true } label: {
+                        Label("Add exam date", systemImage: "calendar")
+                            .frame(maxWidth: .infinity, minHeight: 26)
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
                 }
-                Text("Drives the pace line: lectures per week to finish in time.")
+                Text("Sets the pace: lectures per week to finish in time.")
                     .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .disabled(archived)
 
-        Divider().overlay(Theme.border)
-
         VStack(alignment: .leading, spacing: 10) {
-            Text(archived ? "Archived" : "Archive").font(.system(size: 13, weight: .semibold))
-            Text(archived
-                 ? "This module is read-only and hidden from the Overview. Slides, cards, chats and export history are all still here. Export still works."
-                 : "Moves the module under Archived and off the Overview. Slides, cards, chats and export history stay, read-only. Export still works. Unarchive any time; nothing is deleted.")
-                .font(Theme.body).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-            if archived {
-                Button("Unarchive module") { Task { await unarchive() } }.buttonStyle(SecondaryButtonStyle())
-            } else {
-                Button("Archive module") { Task { await startArchive() } }.buttonStyle(SecondaryButtonStyle())
+            HStack(spacing: 5) {
+                Text("Module instructions").font(.system(size: 14, weight: .semibold))
+                Text("optional").font(Theme.body).foregroundStyle(Theme.quiet)
             }
+            TextEditor(text: $instructions)
+                .font(Theme.body).scrollContentBackground(.hidden)
+                .frame(height: 84).moduleFormInput()
+                .accessibilityLabel("Module instructions").disabled(archived)
+            Text("Added after your global card rules, before slide notes.")
+                .font(Theme.small).foregroundStyle(Theme.quiet)
         }
 
+        Divider().overlay(Theme.border)
         if let error { ErrorBanner(message: error) }
-
-        HStack {
+        HStack(spacing: 10) {
+            if archived {
+                Button("Unarchive module") { Task { await unarchive() } }.buttonStyle(LinkButtonStyle())
+            } else {
+                Button("Archive module") { Task { await startArchive() } }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
+            }
             Spacer()
-            Button(archived ? "Close" : "Cancel") { dismiss() }
+            Button(archived ? "Close" : "Cancel", action: close)
                 .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
             if !archived {
-                Button("Save") { Task { await save() } }
+                Button(saving ? "Saving…" : "Save") { Task { await save() } }
                     .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
-                    .disabled(saving || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
+        .padding(.top, 8)
+    }
+
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
     }
 
     private func load() async {
         do {
             let module = try await model.store.loadModule(moduleID: moduleID)
             name = module.name
+            instructions = module.instructions
+            originalInstructions = module.instructions
             minimum = module.lectureSlots.values.max() ?? 0
             planned = module.plannedLectureCount
             archived = module.isArchived
@@ -132,9 +168,11 @@ struct ModuleSettingsSheet: View {
         do {
             let exam = hasExam ? try ExamDate(date: examDate, timeZone: .current) : nil
             try await model.store.updateModuleSettings(moduleID: moduleID, name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                                                       plannedLectureCount: planned, examDate: exam)
+                                                       plannedLectureCount: planned, examDate: exam,
+                                                       instructions: instructions == originalInstructions ? nil : instructions,
+                                                       expectedInstructions: originalInstructions)
             try await model.reloadNow()
-            dismiss()
+            close()
         } catch {
             // An import may have raced this draft; show the new minimum.
             if let module = try? await model.store.loadModule(moduleID: moduleID) {
@@ -167,4 +205,19 @@ struct ModuleSettingsSheet: View {
             error = nil
         } catch { self.error = error.localizedDescription }
     }
+}
+
+/// The generous bordered fields used by the module forms.
+private struct ModuleFormInput: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 14))
+            .padding(12)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong))
+    }
+}
+
+extension View {
+    func moduleFormInput() -> some View { modifier(ModuleFormInput()) }
 }

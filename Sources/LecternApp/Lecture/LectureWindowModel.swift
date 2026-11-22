@@ -77,7 +77,6 @@ final class LectureWindowModel {
     var editorFront = ""
     var editorBack = ""
     var editorSources = ""
-    var feedbackDraft = ""
     @ObservationIgnored private var lastStaged: (front: String, back: String, sources: [Int])? = nil
 
     // Ask drafts per anchor page.
@@ -96,7 +95,7 @@ final class LectureWindowModel {
         mode = lecture.pageCount == 0 ? .review : prefs.mode
         focusedPageIndex = lecture.pageCount > 0 ? (prefs.focusedPageIndex ?? 0) : nil
         prepareFilter = prefs.filter == .selected ? .selected : .all
-        reviewFilter = prefs.reviewFilter
+        reviewFilter = prefs.reviewFilter == .needsAdjustment ? .unreviewed : prefs.reviewFilter
         selectedCardID = prefs.selectedCardID
         thumbnailSize = prefs.thumbnailSize
         notesVisible = prefs.inspectorVisible
@@ -169,7 +168,7 @@ final class LectureWindowModel {
     }
 
     var activeCards: [Card] { lecture.cards.filter { !$0.isSuperseded } }
-    var reviewedCount: Int { activeCards.filter { $0.verdict != .unreviewed }.count }
+    var reviewedCount: Int { activeCards.filter { !$0.verdict.isAwaitingReview }.count }
 
     /// Stable display numbers in lecture order ("Card 19").
     var cardNumbers: [UUID: Int] {
@@ -367,7 +366,6 @@ final class LectureWindowModel {
         editorFront = card?.front ?? ""
         editorBack = card?.back ?? ""
         editorSources = card?.sourcePages.map(String.init).joined(separator: ", ") ?? ""
-        feedbackDraft = card?.feedback ?? ""
         lastStaged = card.map { (front: $0.front, back: $0.back, sources: $0.sourcePages) }
     }
 
@@ -385,9 +383,7 @@ final class LectureWindowModel {
         let matchesStaged = staged.map { $0.front == card.front && $0.back == card.back && $0.sources == card.sourcePages } ?? false
         let matchesBuffer = card.front == editorFront && card.back == editorBack && card.sourcePages == parsedSources
         if !matchesStaged && !matchesBuffer {
-            let feedback = feedbackDraft   // keep feedback the user is still typing
             loadEditor()
-            feedbackDraft = feedback
         }
     }
 
@@ -402,16 +398,9 @@ final class LectureWindowModel {
         session.stageCardEdit(cardID: id, front: editorFront, back: editorBack, sourcePages: sources)
     }
 
-    func saveFeedback() async {
-        guard let card = selectedCard, card.feedback != feedbackDraft else { return }
-        await dispatch(.setFeedback(cardID: card.id, feedbackDraft))
-    }
-
     private func flushCardInBackground() {
-        Task { [weak self] in
-            guard let self else { return }
-            await self.run { try await self.session.flushEdits() }
-            await self.saveFeedback()
+        Task {
+            await run { try await session.flushEdits() }
         }
     }
 
@@ -437,7 +426,7 @@ final class LectureWindowModel {
         await run { try await session.flushEdits() }
         let before = visibleCards
         await dispatch(.setVerdict(cardID: card.id, verdict))
-        guard errorMessage == nil, verdict != .needsAdjustment else { return }
+        guard errorMessage == nil else { return }
         advance(from: card.id, previous: before)
     }
 
@@ -517,29 +506,6 @@ final class LectureWindowModel {
         dismissedJobIDs.insert(jobID)
         setReviewFilter(fresh.allSatisfy { $0.verdict == .unreviewed } ? .unreviewed : .all)
         selectCard(first.id)
-    }
-
-    func sendFeedback() async {
-        guard !readOnly, let card = selectedCard else { return }
-        let feedback = feedbackDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !feedback.isEmpty else { errorMessage = "Write what should change first."; return }
-        let previous = visibleCards
-        var started = false
-        await run {
-            _ = try await session.revise(cardID: card.id, feedback: feedback, backend: backend, model: model)
-            try await session.refresh()
-            started = true
-        }
-        if started { advance(from: card.id, previous: previous) }
-        app.scheduleReload()
-    }
-
-    func makeModuleRule() async {
-        let feedback = feedbackDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !readOnly, !feedback.isEmpty else { return }
-        await run { try await app.library.makeModuleRule(moduleID: ref.moduleID, feedback: feedback) }
-        try? await app.reloadNow()
-        if errorMessage == nil { proposeResult = "Added to \(moduleName)'s instructions. It applies to the next generation." }
     }
 
     func askContext(for page: Int) -> ThreadContext {

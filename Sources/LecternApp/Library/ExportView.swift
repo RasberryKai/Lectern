@@ -22,30 +22,30 @@ struct ExportView: View {
     private var module: Module? { model.module(moduleID) }
     private var scopedLectures: [Lecture] { lectureScope.map { id in lectures.filter { $0.id == id } } ?? lectures }
 
+    init(moduleID: UUID, initialLectureID: UUID? = nil) {
+        self.moduleID = moduleID
+        _lectureScope = State(initialValue: initialLectureID)
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Button(module?.name ?? "Module") { model.selection = .module(moduleID) }
-                    .buttonStyle(.plain).font(Theme.body).foregroundStyle(Theme.accentText)
-                Text("Export to Anki").font(Theme.serif(22))
-                Spacer()
-            }
-            .padding(.horizontal, 28).padding(.vertical, 14)
-            .background(Theme.surface)
-            .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
-            ScrollView {
-                HStack(alignment: .top, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 20) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Button { model.selection = .module(moduleID) } label: {
+                    Label(module?.name.uppercased() ?? "MODULE", systemImage: "arrow.left").eyebrow()
+                }.buttonStyle(.plain)
+                Text("Export to Anki").font(Theme.heading(56)).tracking(-2.24)
+                HStack(alignment: .top, spacing: 40) {
+                    VStack(alignment: .leading, spacing: 16) {
                         whatToExport
                         lectureTable
                         previewTable
                     }
-                    .frame(maxWidth: .infinity)
-                    summary.frame(width: 320)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    summary.frame(width: 300)
                 }
-                .padding(.horizontal, 44).padding(.vertical, 28)
-                .frame(maxWidth: 1240)
             }
+            .padding(.horizontal, 40).padding(.vertical, 36)
+            .frame(maxWidth: 1240, alignment: .leading)
         }
         .task(id: model.dashboard) { await load() }
         .onChange(of: changedOnly) { _, _ in rebuildPreview() }
@@ -71,55 +71,82 @@ struct ExportView: View {
 
     // MARK: Options
 
-    private var eligible: (new: Int, changed: Int, all: Int) {
-        var new = 0, changed = 0, all = 0
-        for lecture in scopedLectures {
-            for card in lecture.cards where card.verdict == .good && !card.isSuperseded && lecture.issues(for: card).isEmpty {
-                all += 1
-                if card.exported == nil { new += 1 } else if card.changedSinceExport { changed += 1 }
-            }
+    private var changedCount: Int {
+        let included = Set(preview?.entries.map(\.cardID) ?? [])
+        return scopedLectures.reduce(0) { total, lecture in
+            total + lecture.cards.filter { included.contains($0.id) && $0.changedSinceExport }.count
         }
-        return (new, changed, all)
     }
 
     private var whatToExport: some View {
-        let counts = eligible
-        return VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("What to export").font(.system(size: 14, weight: .semibold))
-                Spacer()
-                Picker("Lectures", selection: $lectureScope) {
-                    Text("Whole module").tag(UUID?.none)
-                    ForEach(Array(lectures.enumerated()), id: \.element.id) { index, lecture in
-                        Text(Format.lectureTitle(index: (module?.lectureSlots[lecture.id] ?? (index + 1)) - 1, name: lecture.name)).tag(UUID?.some(lecture.id))
+                HStack(spacing: 2) {
+                    Button { lectureScope = nil } label: {
+                        scopeLabel("Whole module", selected: lectureScope == nil)
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(lectureScope == nil ? .isSelected : [])
+
+                    Menu {
+                        Picker("Lecture", selection: $lectureScope) {
+                            Text("Whole module").tag(nil as UUID?)
+                            Divider()
+                            ForEach(Array(lectures.enumerated()), id: \.element.id) { index, lecture in
+                                Text(lectureTitle(lecture, fallback: index)).tag(Optional(lecture.id))
+                            }
+                        }
+                        .pickerStyle(.inline)
+                    } label: {
+                        scopeLabel(scopedLectureTitle, selected: lectureScope != nil, showsMenu: true)
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .disabled(lectures.isEmpty)
+                    .accessibilityLabel("Choose lecture")
+                    .accessibilityValue(lectureScope == nil ? "Whole module" : scopedLectureTitle)
                 }
-                .labelsHidden().fixedSize()
+                .padding(3)
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.border))
+                Spacer()
+                Menu {
+                    Button("New and changed cards") { changedOnly = true }
+                    Button("All approved cards") { changedOnly = false }
+                } label: { Image(systemName: "ellipsis.circle") }
+                .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Export options")
             }
-            option(isOn: changedOnly, title: "New and changed since last export · \(Format.count(counts.new + counts.changed, "card"))",
-                   detail: "\(counts.new) new, \(counts.changed) edited after export. Edited cards keep their LecternID, so Anki updates them instead of creating duplicates.") { changedOnly = true }
-            option(isOn: !changedOnly, title: "All approved cards · \(Format.count(counts.all, "card"))",
-                   detail: "For a fresh deck or a new Anki profile.") { changedOnly = false }
+            Text(changedOnly ? "Approved cards that are new or changed since the last export" : "All approved cards, including previous exports")
+                .font(Theme.small).foregroundStyle(Theme.quiet)
         }
-        .panel(padding: 20)
     }
 
-    private func option(isOn: Bool, title: String, detail: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: isOn ? "largecircle.fill.circle" : "circle").foregroundStyle(isOn ? Theme.accent : Theme.faint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 13, weight: .semibold))
-                    Text(detail).font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
+    private func scopeLabel(_ title: String, selected: Bool, showsMenu: Bool = false) -> some View {
+        HStack(spacing: 7) {
+            Text(title).lineLimit(1).truncationMode(.tail)
+            if showsMenu {
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                    .accessibilityHidden(true)
             }
-            .padding(12)
-            .background(isOn ? Theme.goodWash : Theme.surface, in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(isOn ? Theme.accent : Theme.borderStrong, lineWidth: isOn ? 1.5 : 1))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .font(.system(size: 13, weight: selected ? .semibold : .medium))
+        .foregroundStyle(selected ? Theme.ink : Theme.quiet)
+        .padding(.horizontal, 12).frame(height: 29)
+        .background(selected ? Theme.surface : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(selected ? Theme.borderStrong : .clear))
+        .contentShape(Rectangle())
+    }
+
+    private var scopedLectureTitle: String {
+        guard let lectureScope, let index = lectures.firstIndex(where: { $0.id == lectureScope }) else {
+            return "Choose lecture"
+        }
+        return lectureTitle(lectures[index], fallback: index)
+    }
+
+    private func lectureTitle(_ lecture: Lecture, fallback: Int) -> String {
+        Format.lectureTitle(index: module?.lectureSlots[lecture.id].map { $0 - 1 } ?? fallback, name: lecture.name)
     }
 
     // MARK: Per lecture
@@ -128,17 +155,16 @@ struct ExportView: View {
         VStack(spacing: 0) {
             HStack {
                 Text("Lecture").frame(maxWidth: .infinity, alignment: .leading)
-                Text("Included").frame(width: 130, alignment: .leading)
-                Text("Left out").frame(width: 300, alignment: .leading)
+                Text("Included").frame(width: 76, alignment: .leading)
+                Text("Left out").frame(width: 136, alignment: .leading)
             }
             .eyebrow().padding(.horizontal, 18).padding(.vertical, 10)
-            ForEach(Array(scopedLectures.enumerated()), id: \.element.id) { _, lecture in
+            ForEach(Array(scopedLectures.enumerated()), id: \.element.id) { fallback, lecture in
                 Divider().overlay(Theme.border)
-                let index = (module?.lectureSlots[lecture.id] ?? 1) - 1
                 HStack {
-                    Text(Format.lectureTitle(index: index, name: lecture.name)).frame(maxWidth: .infinity, alignment: .leading).lineLimit(1)
-                    Text(included(lecture)).frame(width: 130, alignment: .leading)
-                    Text(leftOut(lecture)).foregroundStyle(Theme.quiet).frame(width: 300, alignment: .leading).lineLimit(2)
+                    Text(lectureTitle(lecture, fallback: fallback)).frame(maxWidth: .infinity, alignment: .leading).lineLimit(1)
+                    Text(included(lecture)).frame(width: 76, alignment: .leading)
+                    Text(leftOut(lecture)).foregroundStyle(Theme.quiet).frame(width: 136, alignment: .leading).lineLimit(2)
                 }
                 .font(Theme.body)
                 .padding(.horizontal, 18).padding(.vertical, 11)
@@ -149,70 +175,77 @@ struct ExportView: View {
     }
 
     private func included(_ lecture: Lecture) -> String {
-        let entries = preview?.entries.filter { $0.lectureID == lecture.id } ?? []
-        guard !entries.isEmpty else { return "0" }
-        let ids = Set(entries.map(\.cardID))
-        let changed = lecture.cards.filter { ids.contains($0.id) && $0.exported != nil }.count
-        let new = entries.count - changed
-        switch (new, changed) {
-        case (_, 0): return "\(new) new"
-        case (0, _): return "\(changed) changed"
-        default: return "\(new) new, \(changed) changed"
+        String(preview?.entries.filter { $0.lectureID == lecture.id }.count ?? 0)
+    }
+
+    private enum Exclusion: String, CaseIterable {
+        case bad = "Bad"
+        case math = "ambiguous math"
+        case unreviewed = "not reviewed yet"
+        case exported = "already in Anki"
+    }
+
+    private func exclusions(_ lecture: Lecture) -> [Exclusion: Int] {
+        var counts: [Exclusion: Int] = [:]
+        for card in lecture.cards where !card.isSuperseded {
+            if lecture.issues(for: card).contains(where: { $0.kind == .unresolvedMath }) {
+                counts[.math, default: 0] += 1
+                continue
+            }
+            switch card.verdict {
+            case .bad: counts[.bad, default: 0] += 1
+            case .needsAdjustment: counts[.unreviewed, default: 0] += 1
+            case .unreviewed: counts[.unreviewed, default: 0] += 1
+            case .good:
+                if changedOnly && card.exported != nil && !card.changedSinceExport {
+                    counts[.exported, default: 0] += 1
+                }
+            }
         }
+        return counts
     }
 
     private func leftOut(_ lecture: Lecture) -> String {
-        if lecture.jobs.contains(where: { $0.kind == .generate && $0.state == .running }) { return "Generating" }
-        let cards = lecture.cards.filter { !$0.isSuperseded }
-        var parts: [String] = []
-        let unreviewed = cards.filter { $0.verdict == .unreviewed }.count
-        let adjust = cards.filter { $0.verdict == .needsAdjustment }.count
-        let bad = cards.filter { $0.verdict == .bad }.count
-        if unreviewed > 0 { parts.append("\(unreviewed) unreviewed") }
-        if adjust > 0 { parts.append("\(adjust) need\(adjust == 1 ? "s" : "") adjustment") }
-        if bad > 0 { parts.append("\(bad) bad") }
-        if parts.isEmpty {
-            let good = cards.filter { $0.verdict == .good }.count
-            let included = preview?.entries.filter { $0.lectureID == lecture.id }.count ?? 0
-            if cards.isEmpty { return "No cards yet" }
-            return good > included ? "\(good - included) exported already" : "None"
+        guard lecture.cards.contains(where: { !$0.isSuperseded }) else { return "No cards yet" }
+        let counts = exclusions(lecture)
+        let reasons = Exclusion.allCases.compactMap { reason in
+            counts[reason].map { "\($0) \(reason.rawValue)" }
         }
-        return parts.joined(separator: ", ")
+        return reasons.isEmpty ? "None" : reasons.joined(separator: " · ")
     }
 
     // MARK: Preview
 
     private struct PreviewRow: Identifiable {
-        let id: Int
-        let lecternID: String
+        let id: UUID
         let front: String
         let back: String
         let tags: String
     }
 
     private var previewRows: [PreviewRow] {
-        guard let text = preview?.text else { return [] }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.hasPrefix("#") && !$0.isEmpty }
-        return lines.prefix(8).enumerated().map { index, line in
-            let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map { Self.display(String($0)) }
-            return PreviewRow(id: index, lecternID: fields.count > 0 ? fields[0] : "", front: fields.count > 1 ? fields[1] : "",
-                              back: fields.count > 2 ? fields[2] : "", tags: fields.count > 3 ? fields[3] : "")
+        guard let preview else { return [] }
+        // The final column is the tag. Front and back can contain quoted tabs, so
+        // display their source values with the same math conversion as the exporter.
+        let tags = preview.text.split(separator: "\n").filter { !$0.hasPrefix("#") }
+            .prefix(3).map { $0.split(separator: "\t").last.map(String.init) ?? "" }
+        return zip(preview.entries.prefix(3), tags).compactMap { entry, tag in
+            guard let lecture = lectures.first(where: { $0.id == entry.lectureID }),
+                  let card = lecture.cards.first(where: { $0.id == entry.cardID }),
+                  let front = try? FlashcardMathFormatter.formatForAnki(card.front, interpretations: card.mathInterpretations),
+                  let back = try? FlashcardMathFormatter.formatForAnki(card.back, interpretations: card.mathInterpretations)
+            else { return nil }
+            return PreviewRow(id: card.id, front: front, back: back, tags: tag)
         }
-    }
-
-    /// Reverses the file's HTML escaping for on-screen reading only.
-    private static func display(_ field: String) -> String {
-        var value = field
-        if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
-            value = String(value.dropFirst().dropLast()).replacingOccurrences(of: "\"\"", with: "\"")
-        }
-        return value.replacingOccurrences(of: "<br>", with: "\n").replacingOccurrences(of: "&lt;", with: "<")
-            .replacingOccurrences(of: "&gt;", with: ">").replacingOccurrences(of: "&#39;", with: "'").replacingOccurrences(of: "&amp;", with: "&")
     }
 
     private var previewTable: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Preview of the file").font(.system(size: 14, weight: .semibold))
+            HStack {
+                Text("Preview").font(.headline)
+                Spacer()
+                Text("Front, Back, Tags").font(Theme.small).foregroundStyle(Theme.quiet)
+            }
             if let previewError {
                 ErrorBanner(message: previewError)
             } else if previewRows.isEmpty {
@@ -220,26 +253,15 @@ struct ExportView: View {
                     .font(Theme.body).foregroundStyle(Theme.quiet)
             } else {
                 VStack(spacing: 0) {
-                    HStack(alignment: .top) {
-                        Text("Front").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Back").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Tags").frame(width: 170, alignment: .leading)
-                    }
-                    .eyebrow().padding(.horizontal, 14).padding(.vertical, 9)
                     ForEach(previewRows) { row in
                         Divider().overlay(Theme.border)
-                        HStack(alignment: .top) {
-                            Text(row.front).frame(maxWidth: .infinity, alignment: .leading)
-                            Text(row.back).foregroundStyle(Theme.quiet).frame(maxWidth: .infinity, alignment: .leading)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(row.tags).lineLimit(2)
-                                Text(shortID(row.lecternID)).font(Theme.caption.monospaced()).foregroundStyle(Theme.faint)
-                                    .help("LecternID \(row.lecternID): Anki matches on this to update instead of duplicating.")
-                            }
-                            .frame(width: 170, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(row.front).font(.system(size: 13, weight: .semibold))
+                            Text(row.back).font(Theme.body).foregroundStyle(Theme.quiet)
                         }
-                        .font(Theme.small)
-                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 10)
+                        .help(row.tags)
                     }
                     if let count = preview?.entries.count, count > previewRows.count {
                         Divider().overlay(Theme.border)
@@ -247,28 +269,21 @@ struct ExportView: View {
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.vertical, 8)
                     }
                 }
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border))
             }
-        }
-    }
-
-    private func shortID(_ id: String) -> String {
-        guard let card = id.split(separator: ":").last, card.count > 8 else { return id }
-        return "\(card.prefix(4).lowercased())…\(card.suffix(3).lowercased())"
+        }.panel(padding: 18)
     }
 
     // MARK: Summary and actions
 
     private var summary: some View {
         let count = preview?.entries.count ?? 0
-        let ambiguous = scopedLectures.flatMap { lecture in
-            lecture.cards.filter { !$0.isSuperseded && lecture.issues(for: $0).contains { $0.kind == .unresolvedMath } }
-        }.count
+        let ambiguous = scopedLectures.reduce(0) { $0 + exclusions($1)[.math, default: 0] }
         return VStack(alignment: .leading, spacing: 12) {
-            Text(Format.count(count, "card")).font(Theme.serif(32))
-            Text("Anki text file · LecternID, Front, Back, Tags · math adapted to \\( \\) delimiters")
-                .font(Theme.small).foregroundStyle(Theme.quiet)
+            Text("\(Format.count(count, "card")) ready").font(Theme.heading(30))
+            let changed = changedCount
+            if changed > 0 {
+                Text("\(changed) changed since the last export").font(Theme.small).foregroundStyle(Theme.quiet)
+            }
             if ambiguous > 0 {
                 Text("\(Format.count(ambiguous, "card")) \(ambiguous == 1 ? "has" : "have") ambiguous math and \(ambiguous == 1 ? "is" : "are") left out until resolved in Review.")
                     .font(Theme.small).foregroundStyle(Theme.amber)
@@ -293,7 +308,8 @@ struct ExportView: View {
                     }
                 }
             }
-            Text("In Anki: File › Import, pick the file and your deck. Cards are marked exported here only after the file is saved.")
+            Text("1   Download the file\n2   In Anki, choose File › Import\n3   Pick your deck").lineSpacing(6)
+            Text(verbatim: "Cards count as exported once the file is saved. Math is converted to \\( \\) for Anki.")
                 .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
             DisclosureGroup("One-time Anki setup", isExpanded: $showSetup) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -308,8 +324,8 @@ struct ExportView: View {
             }
             .font(Theme.small)
             Divider().overlay(Theme.border)
-            Button("Download module backup") { backup() }.buttonStyle(SecondaryButtonStyle())
-            Button("Restore a module backup…") { restore() }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
+            Button("Download module backup") { backup() }.buttonStyle(LinkButtonStyle())
+            Button("Restore a backup…") { restore() }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
         }
         .panel(padding: 22)
     }
