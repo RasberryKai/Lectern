@@ -24,7 +24,7 @@ public actor LibraryStore {
     public nonisolated func jobDirectory(moduleID: UUID, lectureID: UUID, jobID: UUID) -> URL { lectureDirectory(moduleID, lectureID).appendingPathComponent("jobs/\(jobID.uuidString)", isDirectory: true) }
     nonisolated func moduleDirectory(_ id: UUID) -> URL { rootURL.appendingPathComponent("Modules/\(id.uuidString)", isDirectory: true) }
     nonisolated func lectureDirectory(_ module: UUID, _ lecture: UUID) -> URL { moduleDirectory(module).appendingPathComponent("Lectures/\(lecture.uuidString)", isDirectory: true) }
-    private func locked<T>(_ body: () throws -> T) throws -> T {
+    func locked<T>(_ body: () throws -> T) throws -> T {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
         let fd = open(rootURL.appendingPathComponent(".library.lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard fd >= 0 else { throw LibraryError.unavailable("Cannot open library lock.") }
@@ -34,7 +34,7 @@ public actor LibraryStore {
         return try body()
     }
     public func modules() throws -> [Module] { try locked { try modulesUnlocked() } }
-    private func modulesUnlocked() throws -> [Module] {
+    func modulesUnlocked() throws -> [Module] {
         try directories(rootURL.appendingPathComponent("Modules")).map { directory in
             guard let id = UUID(uuidString: directory.lastPathComponent) else { throw LibraryError.invalid("Invalid module directory identity.") }
             return try moduleUnlocked(id)
@@ -47,7 +47,7 @@ public actor LibraryStore {
         return DashboardBuilder.build(modules: modules, lectures: lectures, now: now, timeZone: timeZone)
     } }
     public func loadModule(moduleID: UUID) throws -> Module { try locked { try moduleUnlocked(moduleID) } }
-    private func moduleUnlocked(_ id: UUID) throws -> Module {
+    func moduleUnlocked(_ id: UUID) throws -> Module {
         let url = moduleDirectory(id).appendingPathComponent("module.json")
         var module: Module = try read(url)
         guard module.id == id else { throw LibraryError.invalid("Module identity does not match its directory.") }
@@ -66,7 +66,7 @@ public actor LibraryStore {
         if module != original { try write(module, to: url) }
         return module
     }
-    private func requireEditable(_ module: Module) throws {
+    func requireEditable(_ module: Module) throws {
         guard !module.isArchived else { throw LibraryError.archivedModule(module.id) }
     }
     /// An early guard for expensive job preparation; every durable mutation checks again under its lock.
@@ -184,7 +184,7 @@ public actor LibraryStore {
         try lectureListUnlocked(in: moduleUnlocked(moduleID)).filter { includingArchived || !$0.isArchived }
     } }
 
-    private func lectureListUnlocked(in module: Module) throws -> [Lecture] {
+    func lectureListUnlocked(in module: Module) throws -> [Lecture] {
         try module.lectureIDs.map { try readLecture(module.id, $0) }
     }
 
@@ -432,6 +432,8 @@ public actor LibraryStore {
         var schemaVersion = 1
         var module: Module
         var lectures: [Backup]
+        var studyJournal: Data? = nil
+        var studyOverrides: StudyOverrides? = nil
     }
     public func exportModuleBackup(moduleID: UUID, to url: URL) throws {
         try assertExternalDestination(url)
@@ -450,7 +452,12 @@ public actor LibraryStore {
                     provenance: FileManager.default.fileExists(atPath: provenance.path) ? try Data(contentsOf: provenance) : nil,
                     chatAttachments: try attachmentBlobs(for: lecture))
             }
-            try Self.encoder().encode(ModuleBackup(module: module, lectures: backups)).write(to: url, options: .atomic)
+            let directory = moduleDirectory(moduleID)
+            let journal = try StudyJournal(directory: directory).committed
+            let overrides: StudyOverrides? = try readStudyPreferences(studyOverridesURL(in: directory))
+            let backup = ModuleBackup(module: module, lectures: backups,
+                                      studyJournal: journal.isEmpty ? nil : journal, studyOverrides: overrides)
+            try Self.encoder().encode(backup).write(to: url, options: .atomic)
         }
     }
     /// Publish a whole restored module with one directory rename, after validating every lecture/PDF.
@@ -467,6 +474,8 @@ public actor LibraryStore {
         guard !FileManager.default.fileExists(atPath: target.path) else { throw LibraryError.alreadyExists(module.id) }
         let staging = rootURL.appendingPathComponent(".restore-module-\(UUID())")
         defer { try? FileManager.default.removeItem(at: staging) }
+        if let journal = backup.studyJournal { _ = try StudyJournal.replay(journal) }
+        if let overrides = backup.studyOverrides { try overrides.applying(to: StudyPreferences().defaults).validated() }
         for entry in backup.lectures {
             guard entry.schemaVersion == 1, entry.module.id == module.id, entry.lecture.moduleID == module.id else { throw LibraryError.invalid("Mismatched module backup entry.") }
             guard !module.isArchived || !entry.lecture.jobs.contains(where: { $0.state == .running }) else { throw LibraryError.invalid("An archived backup cannot contain running jobs.") }
@@ -484,6 +493,8 @@ public actor LibraryStore {
             try write(entry.lecture, to: directory.appendingPathComponent("lecture.json"))
         }
         try write(module, to: staging.appendingPathComponent("module.json"))
+        if let journal = backup.studyJournal { try journal.write(to: staging.appendingPathComponent(StudyJournal.journalName), options: .atomic) }
+        if let overrides = backup.studyOverrides { try write(overrides, to: studyOverridesURL(in: staging)) }
         try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.moveItem(at: staging, to: target)
         return module
@@ -533,7 +544,7 @@ public actor LibraryStore {
             return id
         }
     }
-    private func readLecture(_ module: UUID, _ id: UUID) throws -> Lecture {
+    func readLecture(_ module: UUID, _ id: UUID) throws -> Lecture {
         let lecture: Lecture = try read(lectureDirectory(module, id).appendingPathComponent("lecture.json"))
         try validate(lecture)
         guard lecture.id == id, lecture.moduleID == module else { throw LibraryError.invalid("Lecture identity does not match its directory.") }
@@ -547,7 +558,7 @@ public actor LibraryStore {
         _ = try lecture.validated()
         _ = try attachmentMetadata(for: lecture)
     }
-    private func read<T: Decodable>(_ url: URL) throws -> T {
+    func read<T: Decodable>(_ url: URL) throws -> T {
         func decode(_ data: Data) throws -> T {
             if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], let version = object["schemaVersion"] as? Int, version != 1 { throw LibraryError.unsupportedSchema(version) }
             let result = try Self.decoder().decode(T.self, from: data)
@@ -572,7 +583,7 @@ public actor LibraryStore {
             try backup.write(to: url, options: .atomic); return result
         }
     }
-    private func write<T: Encodable>(_ value: T, to url: URL) throws {
+    func write<T: Encodable>(_ value: T, to url: URL) throws {
         let data = try Self.encoder().encode(value)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: url.path) { try Data(contentsOf: url).write(to: url.appendingPathExtension("bak"), options: .atomic) }

@@ -1,0 +1,223 @@
+{
+  "reference": "py-fsrs v6.3.2",
+  "startUnixSeconds": 1767311880,
+  "sequences": [
+    {
+      "name": "fresh-and-long-gap",
+      "reviews": [
+        {
+          "minute": 0,
+          "grade": 3,
+          "stability": 2.3065,
+          "difficulty": 2.118103970459016,
+          "state": "review",
+          "dueSeconds": 172800
+        },
+        {
+          "minute": 2880,
+          "grade": 3,
+          "stability": 10.964332335820698,
+          "difficulty": 2.111214235785395,
+          "state": "review",
+          "dueSeconds": 1123200
+        },
+        {
+          "minute": 11520,
+          "grade": 3,
+          "stability": 33.21905895509341,
+          "difficulty": 2.1043313908464483,
+          "state": "review",
+          "dueSeconds": 3542400
+        },
+        {
+          "minute": 129600,
+          "grade": 1,
+          "stability": 2.8851812970955044,
+          "difficulty": 7.389975788014609,
+          "state": "relearning",
+          "dueSeconds": 7776600
+        },
+        {
+          "minute": 129610,
+          "grade": 3,
+          "stability": 2.8851812970955044,
+          "difficulty": 7.377814181523433,
+          "state": "review",
+          "dueSeconds": 8035800
+        }
+      ]
+    },
+    {
+      "name": "learning-crosses-midnight",
+      "reviews": [
+        {
+          "minute": 0,
+          "grade": 1,
+          "stability": 0.212,
+          "difficulty": 6.4133,
+          "state": "learning",
+          "dueSeconds": 60
+        },
+        {
+          "minute": 1,
+          "grade": 1,
+          "stability": 0.08335671711031604,
+          "difficulty": 8.806304468856837,
+          "state": "learning",
+          "dueSeconds": 120
+        },
+        {
+          "minute": 2,
+          "grade": 3,
+          "stability": 0.10314065007785231,
+          "difficulty": 8.792726533684817,
+          "state": "review",
+          "dueSeconds": 86520
+        },
+        {
+          "minute": 1442,
+          "grade": 3,
+          "stability": 0.6952546986897922,
+          "difficulty": 8.77916217644797,
+          "state": "review",
+          "dueSeconds": 172920
+        }
+      ]
+    },
+    {
+      "name": "mature-lapse-and-retry",
+      "reviews": [
+        {
+          "minute": 0,
+          "grade": 3,
+          "stability": 2.3065,
+          "difficulty": 2.118103970459016,
+          "state": "review",
+          "dueSeconds": 172800
+        },
+        {
+          "minute": 2880,
+          "grade": 3,
+          "stability": 10.964332335820698,
+          "difficulty": 2.111214235785395,
+          "state": "review",
+          "dueSeconds": 1123200
+        },
+        {
+          "minute": 10080,
+          "grade": 3,
+          "stability": 30.13323120791683,
+          "difficulty": 2.1043313908464483,
+          "state": "review",
+          "dueSeconds": 3196800
+        },
+        {
+          "minute": 38880,
+          "grade": 1,
+          "stability": 2.3539048171448704,
+          "difficulty": 7.389975788014609,
+          "state": "relearning",
+          "dueSeconds": 2333400
+        },
+        {
+          "minute": 38882,
+          "grade": 1,
+          "stability": 0.7899558673197176,
+          "difficulty": 9.12733115898188,
+          "state": "relearning",
+          "dueSeconds": 2333520
+        },
+        {
+          "minute": 38884,
+          "grade": 3,
+          "stability": 0.8430002758769194,
+          "difficulty": 9.113432197119735,
+          "state": "review",
+          "dueSeconds": 2419440
+        },
+        {
+          "minute": 57600,
+          "grade": 3,
+          "stability": 4.161704546148654,
+          "difficulty": 9.099547134219453,
+          "state": "review",
+          "dueSeconds": 3801600
+        }
+      ]
+    },
+    {
+      "name": "elapsed-day-boundary",
+      "reviews": [
+        {
+          "minute": 0,
+          "grade": 3,
+          "stability": 2.3065,
+          "difficulty": 2.118103970459016,
+          "state": "review",
+          "dueSeconds": 172800
+        },
+        {
+          "minute": 1439,
+          "grade": 3,
+          "stability": 2.3065,
+          "difficulty": 2.111214235785395,
+          "state": "review",
+          "dueSeconds": 259140
+        },
+        {
+          "minute": 2879,
+          "grade": 3,
+          "stability": 7.319186097840142,
+          "difficulty": 2.1043313908464483,
+          "state": "review",
+          "dueSeconds": 777540
+        },
+        {
+          "minute": 2879,
+          "grade": 1,
+          "stability": 2.279600686258619,
+          "difficulty": 7.389975788014609,
+          "state": "relearning",
+          "dueSeconds": 173340
+        },
+        {
+          "minute": 2880,
+          "grade": 3,
+          "stability": 2.279600686258619,
+          "difficulty": 7.377814181523433,
+          "state": "review",
+          "dueSeconds": 345600
+        }
+      ]
+    },
+    {
+      "name": "lapse-retry-next-day",
+      "reviews": [
+        {
+          "minute": 0,
+          "grade": 3,
+          "stability": 2.3065,
+          "difficulty": 2.118103970459016,
+          "state": "review",
+          "dueSeconds": 172800
+        },
+        {
+          "minute": 2880,
+          "grade": 1,
+          "stability": 0.6075801062519337,
+          "difficulty": 7.394502741279718,
+          "state": "relearning",
+          "dueSeconds": 173400
+        },
+        {
+          "minute": 4320,
+          "grade": 3,
+          "stability": 2.4004040500172708,
+          "difficulty": 7.382336607835277,
+          "state": "review",
+          "dueSeconds": 432000
+        }
+      ]
+    }
+  ]
+}

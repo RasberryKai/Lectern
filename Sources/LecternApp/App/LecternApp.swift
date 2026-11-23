@@ -26,8 +26,8 @@ struct LecternApp: App {
                 Button("New Module…") {
                     openWindow(id: "library")
                     Task {
-                        await model.returnToLibrary()
-                        guard model.activeLecture == nil else { return }
+                        await model.returnToLibrary(destination: model.selection)
+                        guard model.activeLecture == nil, model.studySession == nil else { return }
                         model.showNewModule = true
                     }
                 }
@@ -64,9 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Lecture windows hold staged edits. Quit waits until every one has saved.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let model = AppModel.shared
-        guard model.hasOpenLectureWindows else { return .terminateNow }
+        guard model.hasOpenLectureWindows || model.studySession != nil else { return .terminateNow }
         Task { @MainActor in
-            let saved = await model.closeAllLectureWindows()
+            let saved = await model.closeForWindow()
             NSApp.reply(toApplicationShouldTerminate: saved)
         }
         return .terminateLater

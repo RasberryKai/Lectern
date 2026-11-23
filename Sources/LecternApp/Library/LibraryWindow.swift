@@ -17,6 +17,8 @@ struct LibraryWindow: View {
                     .background(Theme.canvasGrid.ignoresSafeArea(edges: .top))
             } else if let ref = model.activeLecture {
                 LectureWindow(ref: ref).id(ref)
+            } else if let session = model.studySession {
+                StudySessionView(session: session)
             } else if case .ready = model.phase, model.modules.isEmpty {
                 ModuleCreationForm()
             } else {
@@ -39,7 +41,7 @@ struct LibraryWindow: View {
                 SettingsView().background(Theme.canvasGrid.ignoresSafeArea(edges: .top))
             }
         }
-        .background(WindowCloseGuard { await model.closeAllLectureWindows() })
+        .background(WindowCloseGuard { await model.closeForWindow() })
         .foregroundStyle(Theme.ink)
         .sheet(item: $model.renamingLecture) { ref in RenameLectureSheet(ref: ref) }
         .sheet(item: $model.movingLecture) { ref in MoveLectureSheet(ref: ref) }
@@ -70,8 +72,10 @@ struct LibraryWindow: View {
         case .ready:
             switch model.selection {
             case .overview: OverviewView()
+            case .flashcards: FlashcardsView()
             case .module(let id): ModuleView(moduleID: id).id(id)
             case .export(let id, let lectureID): ExportView(moduleID: id, initialLectureID: lectureID).id(model.selection)
+            case .flashcardExport(let id): ExportView(moduleID: id, fromFlashcards: true).id(model.selection)
             }
         }
     }
@@ -96,7 +100,10 @@ private struct Sidebar: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("Study").eyebrow()
                     .padding(.horizontal, 22).padding(.bottom, 6)
-                upcomingStudyRow("Flashcards", icon: "rectangle.on.rectangle")
+                SidebarRow(title: "Flashcards", detail: model.studyCatalog.plan(now: model.studyNow).cards.count.formatted(),
+                           isSelected: flashcardsSelected, icon: "rectangle.on.rectangle") {
+                    model.selection = .flashcards
+                }
                 upcomingStudyRow("Mock exams", icon: "checkmark.square")
             }
             .padding(.top, 22).launchEntrance(row: 1)
@@ -106,7 +113,7 @@ private struct Sidebar: View {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array((model.dashboard?.modules ?? []).enumerated()), id: \.element.id) { index, progress in
                         SidebarRow(title: progress.module.name,
-                                   detail: "\(progress.totals.doneLectureCount) / \(progress.totals.plannedLectureCount)",
+                                   detail: "\(progress.cardMakingDoneCount) / \(progress.totals.plannedLectureCount)",
                                    isSelected: isSelected(progress.module.id)) {
                             model.selection = .module(progress.module.id)
                         }
@@ -163,6 +170,13 @@ private struct Sidebar: View {
         return model.selection == .module(id)
     }
 
+    private var flashcardsSelected: Bool {
+        switch model.selection {
+        case .flashcards, .flashcardExport: true
+        default: false
+        }
+    }
+
     private var backendHelp: String {
         switch model.settings.backend {
         case .claudeCLI: "Uses \(model.cliExecutable.path). Sign in with `claude auth login` in Terminal."
@@ -203,12 +217,13 @@ private struct SidebarRow: View {
     let detail: String?
     let isSelected: Bool
     var muted = false
+    var icon: String? = nil
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack {
-                Image(systemName: detail == nil && !muted ? "square.grid.2x2" : "folder")
+                Image(systemName: icon ?? (detail == nil && !muted ? "square.grid.2x2" : "folder"))
                     .font(.system(size: 13))
                 Text(title).font(.system(size: 13, weight: isSelected ? .semibold : .regular)).lineLimit(1)
                 Spacer(minLength: 8)

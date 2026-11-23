@@ -290,7 +290,7 @@ struct LectureStatusOptions: View {
     var body: some View {
         option("Automatic", status: nil)
         Divider()
-        ForEach(Format.legendOrder.filter { $0 != .notImported }, id: \.self) { status in
+        ForEach([LectureProgressStatus.done, .toReview, .preparing], id: \.self) { status in
             option(Format.statusLabel(status), status: status)
         }
     }

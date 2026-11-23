@@ -11,8 +11,10 @@ nonisolated struct LectureRef: Codable, Hashable, Sendable, Identifiable {
 
 nonisolated enum SidebarItem: Hashable {
     case overview
+    case flashcards
     case module(UUID)
     case export(UUID, lectureID: UUID? = nil)
+    case flashcardExport(UUID)
 }
 
 /// Files picked or dropped together, shown in the import sheet before they are merged into one lecture.
@@ -53,6 +55,10 @@ final class AppModel {
 
     private(set) var phase: Phase = .loading
     private(set) var dashboard: DashboardSnapshot? = nil
+    private(set) var studyCatalog = StudyCatalog()
+    private(set) var studyNow = Date()
+    private(set) var studySession: StudySessionModel?
+    private(set) var studyError: String?
     private(set) var modules: [Module] = []
     private(set) var settings: AISettings = .default
     private(set) var settingsLoaded = false
@@ -66,16 +72,20 @@ final class AppModel {
     var selection: SidebarItem = .overview
     var errorMessage: String? = nil
     var showSettings = false
+    var showStudySettingsOnOpen = false
     var showNewModule = false
     var settingsModuleID: UUID? = nil
     /// Two or more PDFs waiting in the import sheet.
     var pendingImport: PendingPDFImport? = nil
     /// Lecture windows read and clear this to switch mode when "Review"/"Open" targets an open window.
     var requestedModes: [UUID: LectureMode] = [:]
+    var requestedSourcePages: [UUID: Int] = [:]
 
     @ObservationIgnored private var lectureWindows: [UUID: LectureWindowModel] = [:]
     @ObservationIgnored private var eventTask: Task<Void, Never>? = nil
     @ObservationIgnored private var reloadTask: Task<Void, Never>? = nil
+    @ObservationIgnored private var studyRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var studyRefreshRevision = 0
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var started = false
     @ObservationIgnored private var librarySessionLock: LibrarySessionLock?
@@ -174,6 +184,74 @@ final class AppModel {
         modules = list
         if case .module(let id) = selection, !list.contains(where: { $0.id == id }) { selection = .overview }
         if case .export(let id, _) = selection, !list.contains(where: { $0.id == id }) { selection = .overview }
+        if case .flashcardExport(let id) = selection, !list.contains(where: { $0.id == id }) { selection = .flashcards }
+        await refreshStudy()
+    }
+
+    // MARK: Study
+
+    func refreshStudy() async {
+        studyRefreshRevision += 1
+        let revision = studyRefreshRevision
+        do {
+            let now = Date()
+            let catalog = try await store.studyCatalog(now: now)
+            guard revision == studyRefreshRevision else { return }
+            studyCatalog = catalog
+            studyNow = now
+            studyError = nil
+            scheduleStudyRefresh()
+        } catch {
+            guard revision == studyRefreshRevision else { return }
+            studyError = error.localizedDescription
+        }
+    }
+
+    private func scheduleStudyRefresh() {
+        studyRefreshTask?.cancel()
+        let snapshotDate = studyNow
+        let tomorrow = Calendar.current.dateInterval(of: .day, for: snapshotDate)?.end ?? snapshotDate.addingTimeInterval(3600)
+        let nextDue = studyCatalog.decks.lazy.flatMap(\.approvedCards)
+            .compactMap(\.memory?.due).filter { $0 > snapshotDate }.min() ?? tomorrow
+        let delay = max(0.25, min(nextDue, tomorrow).timeIntervalSinceNow)
+        studyRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await self?.refreshStudy()
+        }
+    }
+
+    func startStudy(scope: StudyScope, options: StudySessionOptions? = nil,
+                    includeFuture: Bool = false, extraNewPerModule: Int = 0, limitNewInSession: Int? = nil) async {
+        await refreshStudy()
+        if let studyError { errorMessage = studyError; return }
+        let resolved = options ?? studyCatalog.configuration(moduleID: scope.moduleID).session
+        let plan = studyCatalog.plan(scope: scope, options: resolved, includeFuture: includeFuture,
+                                     extraNewPerModule: extraNewPerModule, limitNewInSession: limitNewInSession)
+        studySession = StudySessionModel(app: self, scope: scope, options: resolved,
+                                         includeFuture: includeFuture, extraNewPerModule: extraNewPerModule, plan: plan)
+    }
+
+    func endStudy() {
+        studySession = nil
+        scheduleReload()
+    }
+
+    func openStudySource(_ entry: StudyCard, page: Int) {
+        requestedSourcePages[entry.lectureID] = page
+        openLecture(LectureRef(moduleID: entry.moduleID, lectureID: entry.lectureID), mode: .prepare)
+    }
+
+    func openStudySettings() {
+        showStudySettingsOnOpen = true
+        showSettings = true
+    }
+
+    func setStudyNewCardLimit(moduleID: UUID, limit: Int) async {
+        do {
+            try await store.setStudyNewCardLimit(moduleID: moduleID, limit: limit)
+            await refreshStudy()
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func module(_ id: UUID) -> Module? { modules.first { $0.id == id } }
@@ -433,6 +511,11 @@ final class AppModel {
     }
     var hasOpenLectureWindows: Bool { !lectureWindows.isEmpty }
 
+    func closeForWindow() async -> Bool {
+        if let studySession, !(await studySession.prepareForWindowClose()) { return false }
+        return await closeAllLectureWindows()
+    }
+
     /// Application termination: every window must save before the app may quit.
     func closeAllLectureWindows() async -> Bool {
         var failures: [String] = []
@@ -459,9 +542,16 @@ final class AppModel {
             if let ref = activeLecture, let workspace = lectureWindows[ref.lectureID] {
                 try await workspace.closeAndFlush()
             }
-            if let ref = activeLecture { requestedModes.removeValue(forKey: ref.lectureID) }
+            if let ref = activeLecture {
+                requestedModes.removeValue(forKey: ref.lectureID)
+                requestedSourcePages.removeValue(forKey: ref.lectureID)
+            }
             activeLecture = nil
-            if let destination { selection = destination }
+            if let destination {
+                if let studySession, !(await studySession.prepareForWindowClose()) { return }
+                selection = destination
+                endStudy()
+            }
             scheduleReload()
         } catch {
             errorMessage = "Your edits could not be saved. The lecture stays open. \(error.localizedDescription)"

@@ -1,0 +1,24 @@
+# Lectern Study scheduler
+
+## Decision
+
+Ship **FSRS‑6 with the default 21 weights and 90% desired retention**. FSRS tracks difficulty and stability, the number of days until predicted recall drops to 90%. Its forgetting curve estimates recall from stability and elapsed time. Each grade updates memory and schedules the next review near the retention target. Anki uses FSRS, and a benchmark on review histories found that the FSRS family predicted recall better than SM‑2. Solve cards still need pilot data because their cases vary in difficulty. [Anki’s FSRS guide](https://docs.ankiweb.net/deck-options.html#fsrs) · [SM‑2 comparison](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Benchmark/2eeba955accf2a545ec7572e62a4c4d7e5fb591f)
+
+FSRS‑7 has shipped in `ts-fsrs` and models fractional-day reviews with a second stability value. The official MIT-licensed `swift-fsrs` v6.0.0 has configurable steps and upstream tests, but its defaults still select FSRS‑5 unless given the 21 weights. I also ran it with those weights and fuzzing off. On a second Good at **23h 59m** across a UTC date boundary, it scheduled **7 days**, versus **2 days** with Py‑FSRS. Use the focused Swift port pinned to **Py‑FSRS v6.3.2** so the model, interval rounding, and elapsed-day behavior all have one parity reference. Lectern gets deterministic replay and keeps its dependency-free core. [FSRS‑7 release](https://open-spaced-repetition.github.io/ts-fsrs/updates/fsrs/6.0.0) · [Swift release and tests](https://github.com/open-spaced-repetition/swift-fsrs/tree/v6.0.0) · [Python reference](https://github.com/open-spaced-repetition/py-fsrs/tree/v6.3.2)
+
+## How the features fit
+
+| Feature | Implementation contract |
+| --- | --- |
+| **Daily queue** | Use approved, current cards from active lectures and modules. Queue all due reviews first. The **20-card cap per module per local calendar day** applies to new cards only and counts first grades committed across sessions. Defer adjacent split siblings when another eligible card fits. No history import at cold start. |
+| **Grade and retry** | Flip Missed / Got it and checked solve fail / pass map to Again / Good. Persist each grade before advancing. A miss goes to the session tail and can be retried early. The persisted due times are +1 minute for learning and +10 minutes for relearning if the session ends first. A retry is a second event. A mature lapse stays counted after the retry passes. FSRS‑6 in this port uses whole elapsed 24-hour periods, so crossing midnight alone leaves the short-term update in effect. |
+| **Solve cards** | Schedule the stable card ID. Keep verified cases locally. Before revealing a case, commit a presentation event so an abandoned attempt still consumes that version. Check locally with Number, Choice, Order, Grid or Term. Invalid input leaves the grade open. A retry draws another unseen case. With an empty pool, defer the card with its due date intact. Generate and Refill verify cases in the background, using exercise-sheet examples only when enabled. |
+| **Review, exam, export** | Keep memory across content revisions. A confirmed flip/solve switch starts a new scheduling epoch, retaining prior events. The future exam PRD can use the tested demotion transition to record Again with a distinct source for an already-studied card. Anki export continues for flips and adds a static verified solve example. |
+
+## Persistence and rollout
+
+Under each module, use `reviews.jsonl` as the durable journal and `study.json` as its rebuildable snapshot. Journal versioned events with an idempotency ID, card ID, scheduling epoch, timestamp, study-day key, and source. Grades add rating, elapsed answering time, and solve version ID and answer when applicable. Record kind switches as reset events and solve presentations with their version ID. Replay in append order with the pinned model. Snapshot memory, daily introductions, seen versions, and the last applied log position. The first Study grade per card and epoch consumes one new-card slot.
+
+Phase 1 should use `LibraryStore`’s lock to recheck eligibility and the introduction budget, durably append the event, then atomically refresh the snapshot. Recover the snapshot from the journal after an interrupted write. Treat absent sidecars as empty. Include the journal in module backup and carry a moved lecture’s card history across modules without moving its original daily-budget usage.
+
+The Phase 0 core has Python-generated fixtures for learning, mature lapses, retries, midnight, and the 24-hour boundary, plus queue and legacy-library tests. Wire the journal and Study UI in Phase 1. Once there is enough real review history, fit the same model offline and compare recall calibration and log loss against defaults on later held-out reviews before changing weights. [Py‑FSRS optimizer](https://github.com/open-spaced-repetition/py-fsrs#optimize-scheduler-parameters)

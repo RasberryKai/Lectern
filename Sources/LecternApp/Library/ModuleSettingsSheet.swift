@@ -4,6 +4,8 @@ import SwiftUI
 /// Draft-based module settings. Cancel writes nothing; Save uses the narrow settings API;
 /// Archive/Unarchive is a separate, immediate and reversible action.
 struct ModuleSettingsSheet: View {
+    private enum Section { case general, study }
+
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let moduleID: UUID
@@ -22,6 +24,9 @@ struct ModuleSettingsSheet: View {
     @State private var saving = false
     @State private var runningJobCount = 0
     @State private var confirmCancelJobs = false
+    @State private var section = Section.general
+    @State private var studyDraft = StudyOverrides()
+    @State private var savedStudy = StudyOverrides()
 
     var body: some View {
         ScrollView {
@@ -30,7 +35,17 @@ struct ModuleSettingsSheet: View {
                 if !loaded {
                     ProgressView().frame(maxWidth: .infinity, minHeight: 200)
                 } else {
-                    form
+                    Picker("Module settings section", selection: $section) {
+                        Text("General").tag(Section.general)
+                        Text("Study").tag(Section.study)
+                    }
+                    .labelsHidden().pickerStyle(.segmented)
+                    switch section {
+                    case .general: form
+                    case .study:
+                        ModuleStudySettings(moduleID: moduleID, archived: archived, draft: $studyDraft, saved: $savedStudy)
+                        Button("Back", action: close).buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                    }
                 }
             }
             .padding(36)
@@ -159,6 +174,8 @@ struct ModuleSettingsSheet: View {
             planned = module.plannedLectureCount
             archived = module.isArchived
             if let exam = module.examDate { hasExam = true; examDate = exam.date(in: .current) }
+            savedStudy = try await model.store.studyOverrides(moduleID: moduleID)
+            studyDraft = savedStudy
             loaded = true
         } catch { self.error = error.localizedDescription; loaded = true }
     }

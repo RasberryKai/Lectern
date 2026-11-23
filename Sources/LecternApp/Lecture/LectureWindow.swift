@@ -43,6 +43,8 @@ struct LectureWindow: View {
             session.startObserving()
             let windowModel = LectureWindowModel(ref: ref, session: session, app: app)
             if let mode = app.requestedModes.removeValue(forKey: ref.lectureID) { windowModel.setMode(mode) }
+            if let page = app.requestedSourcePages.removeValue(forKey: ref.lectureID),
+               page > 0, page <= lecture.pageCount { windowModel.focus(page - 1) }
             app.register(windowModel)
             model = windowModel
             if !windowModel.readOnly { Task { await session.endIdleChatDiscussions(backend: app.settings.backend, model: app.settings.selectedModel) } }
@@ -326,9 +328,11 @@ struct LectureTopBar: View {
         HStack(spacing: 16) {
             HStack(spacing: 10) {
                 Button {
-                    Task { await app.returnToLibrary(destination: .module(model.ref.moduleID)) }
+                    Task {
+                        await app.returnToLibrary(destination: app.studySession == nil ? .module(model.ref.moduleID) : nil)
+                    }
                 } label: {
-                    Label(model.moduleName, systemImage: "arrow.left")
+                    Label(app.studySession == nil ? model.moduleName : "Back to study", systemImage: "arrow.left")
                         .lineLimit(1)
                 }
                 .buttonStyle(LinkButtonStyle(color: Theme.quiet))

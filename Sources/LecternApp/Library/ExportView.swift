@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct ExportView: View {
     @Environment(AppModel.self) private var model
     let moduleID: UUID
+    let fromFlashcards: Bool
 
     @State private var lectures: [Lecture] = []
     @State private var changedOnly = true
@@ -22,16 +23,18 @@ struct ExportView: View {
     private var module: Module? { model.module(moduleID) }
     private var scopedLectures: [Lecture] { lectureScope.map { id in lectures.filter { $0.id == id } } ?? lectures }
 
-    init(moduleID: UUID, initialLectureID: UUID? = nil) {
+    init(moduleID: UUID, initialLectureID: UUID? = nil, fromFlashcards: Bool = false) {
         self.moduleID = moduleID
+        self.fromFlashcards = fromFlashcards
         _lectureScope = State(initialValue: initialLectureID)
+        _changedOnly = State(initialValue: !fromFlashcards)
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Button { model.selection = .module(moduleID) } label: {
-                    Label(module?.name.uppercased() ?? "MODULE", systemImage: "arrow.left").eyebrow()
+                Button { model.selection = fromFlashcards ? .flashcards : .module(moduleID) } label: {
+                    Label(fromFlashcards ? "Flashcards" : module?.name ?? "Module", systemImage: "arrow.left").eyebrow()
                 }.buttonStyle(.plain)
                 Text("Export to Anki").font(Theme.heading(56)).tracking(-2.24)
                 HStack(alignment: .top, spacing: 40) {

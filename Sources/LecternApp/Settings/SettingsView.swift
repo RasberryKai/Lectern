@@ -3,12 +3,13 @@ import LecternCore
 import SwiftUI
 
 private enum SettingsSection: String, CaseIterable {
-    case ai = "AI", rules = "Card rules", usage = "AI usage", library = "Library", shortcuts = "Shortcuts"
+    case ai = "AI", rules = "Card rules", study = "Study", usage = "AI usage", library = "Library", shortcuts = "Shortcuts"
 
     var icon: String {
         switch self {
         case .ai: "sparkles"
         case .rules: "text.book.closed"
+        case .study: "rectangle.on.rectangle"
         case .usage: "chart.bar"
         case .library: "books.vertical"
         case .shortcuts: "keyboard"
@@ -84,6 +85,15 @@ struct SettingsView: View {
         .foregroundStyle(Theme.ink)
         .tint(Theme.accentText)
         .navigationTitle(selected.rawValue)
+        .onAppear { selectStudyIfRequested() }
+        .onChange(of: model.showStudySettingsOnOpen) { _, _ in selectStudyIfRequested() }
+    }
+
+    private func selectStudyIfRequested() {
+        guard model.showStudySettingsOnOpen else { return }
+        visited.insert(.study)
+        selected = .study
+        model.showStudySettingsOnOpen = false
     }
 
     @ViewBuilder
@@ -91,6 +101,7 @@ struct SettingsView: View {
         switch section {
         case .ai: AISettingsTab()
         case .rules: RulesTab()
+        case .study: StudySettingsTab()
         case .usage: UsageTab()
         case .library: LibraryTab()
         case .shortcuts: KeyboardShortcutsTab()
