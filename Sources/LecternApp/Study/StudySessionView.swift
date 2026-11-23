@@ -321,7 +321,7 @@ struct StudySessionView: View {
                     .accessibilityAddTraits(.isHeader)
                 Text(completionDetail).font(.system(size: 15)).foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
-                if let next = session.nextDue, session.status != .limited {
+                if session.continuationDueCount == 0, let next = session.nextDue, session.status != .limited {
                     Text("Next review \(next.formatted(.relative(presentation: .numeric))).")
                         .font(Theme.body).foregroundStyle(Theme.quiet)
                 }
@@ -370,8 +370,11 @@ struct StudySessionView: View {
     private var completionTitle: String {
         switch session.status {
         case .studying: "Study"
-        case .empty: session.approvedCount == 0 ? "Ready when you are" : "Nothing due"
-        case .done: "Done for today"
+        case .empty:
+            if session.continuationDueCount > 0 { "Cards ready to review" }
+            else if session.approvedCount == 0 { "Ready when you are" }
+            else { "Nothing due" }
+        case .done: session.continuationDueCount > 0 ? "Session complete" : "Done for today"
         case .ended: "Session ended"
         case .limited:
             switch session.options.stop {
@@ -386,7 +389,8 @@ struct StudySessionView: View {
         switch session.status {
         case .studying: ""
         case .empty:
-            if session.approvedCount == 0 { "Approve cards in Review first." }
+            if session.continuationDueCount > 0 { "\(Format.count(session.continuationDueCount, "card")) due now." }
+            else if session.approvedCount == 0 { "Approve cards in Review first." }
             else if session.options.cardTypes == .solve { "Choose Flip cards in session options to study the approved cards." }
             else if session.nextDue != nil { "Your scheduled cards are up to date." }
             else if session.unseenCount > 0 { "You’ve reached your new-card limit for today." }
@@ -409,7 +413,13 @@ struct StudySessionView: View {
             if (session.status == .limited || session.status == .ended), session.canKeepGoing {
                 Button("Keep going") { session.keepGoing() }.buttonStyle(PrimaryButtonStyle())
             }
-            if session.status == .done, let next = session.nextModule {
+            if (session.status == .done || session.status == .empty), session.continuationDueCount > 0 {
+                Button("Study \(session.continuationDueCount) due") {
+                    Task {
+                        await session.app.startStudy(scope: session.scope, options: session.options, limitNewInSession: 0)
+                    }
+                }.buttonStyle(PrimaryButtonStyle())
+            } else if session.status == .done, let next = session.nextModule {
                 Button("Next · \(next.module.name) · \(next.count)") {
                     Task { await session.app.startStudy(scope: .module(next.module.id)) }
                 }

@@ -122,6 +122,9 @@ final class StudySessionModel {
     var approvedCount: Int { status == .empty ? plan.approvedCount : refreshedPlan.approvedCount }
     var nextDue: Date? { refreshedPlan.nextDue ?? (status == .empty ? plan.nextDue : nil) }
     var canKeepGoing: Bool { position < queue.count }
+    var continuationDueCount: Int {
+        app.studyCatalog.plan(scope: scope, options: options, limitNewInSession: 0, now: app.studyNow).cards.count
+    }
 
     var cramCount: Int {
         guard unseenCount > 0 else { return 0 }
