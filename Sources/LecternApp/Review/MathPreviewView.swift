@@ -2,49 +2,59 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// Ported from Flashcard Reviewer. A compact, offline TeX preview for card text. The caller's source is never
-/// rewritten; dollar signs that do not look like math are escaped only in the
-/// private preview copy passed to MathJax.
-struct MathPreviewView: View {
+/// Displays a card side as text, typesetting any TeX with the bundled MathJax runtime.
+struct RenderedCardText: View {
+    private let text: String
+    private let size: CGFloat
+    private let emphasized: Bool
     private let analysis: MathPreviewAnalysis
-    @State private var contentHeight: CGFloat = 30
+    @State private var contentHeight: CGFloat = 0
 
-    init(text: String) {
+    init(text: String, size: CGFloat, emphasized: Bool) {
+        self.text = text
+        self.size = size
+        self.emphasized = emphasized
         analysis = MathPreviewAnalysis(text: text)
     }
 
     var body: some View {
-        if analysis.shouldShow {
-            VStack(alignment: .leading, spacing: 4) {
-                MathPreviewWebView(
-                    previewText: analysis.previewText,
-                    contentHeight: $contentHeight
-                )
-                .frame(height: max(contentHeight, 30))
-                .accessibilityLabel("Rendered math preview")
+        Group {
+            if analysis.shouldShow {
+                VStack(alignment: .leading, spacing: 4) {
+                    MathPreviewWebView(
+                        previewText: analysis.previewText,
+                        size: size,
+                        emphasized: emphasized,
+                        contentHeight: $contentHeight
+                    )
+                    .frame(height: max(contentHeight, ceil(size * 1.2)))
+                    .allowsHitTesting(false)
 
-                if let warning = analysis.warning {
-                    Text(warning)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let warning = analysis.warning {
+                        Text(warning)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .background(Theme.inset, in: RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Theme.border, lineWidth: 1)
+            } else {
+                Text(verbatim: text.isEmpty ? "\u{200B}" : text)
+                    .font(.system(size: size, weight: emphasized ? .semibold : .regular))
+                    .foregroundStyle(Theme.ink)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
     }
 }
 
 private struct MathPreviewWebView: NSViewRepresentable {
     @Environment(\.colorScheme) private var colorScheme
     let previewText: String
+    let size: CGFloat
+    let emphasized: Bool
     @Binding var contentHeight: CGFloat
 
     func makeCoordinator() -> Coordinator {
@@ -57,17 +67,16 @@ private struct MathPreviewWebView: NSViewRepresentable {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(context.coordinator, name: "contentHeight")
 
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = CardMathWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.underPageBackgroundColor = .clear
         webView.setValue(false, forKey: "drawsBackground")
-        context.coordinator.load(previewText, colorScheme: colorScheme, in: webView)
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.contentHeight = $contentHeight
-        context.coordinator.load(previewText, colorScheme: colorScheme, in: webView)
+        context.coordinator.load(previewText, size: size, emphasized: emphasized, colorScheme: colorScheme, in: webView)
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -79,14 +88,13 @@ private struct MathPreviewWebView: NSViewRepresentable {
             self.contentHeight = contentHeight
         }
 
-        func load(_ text: String, colorScheme: ColorScheme, in webView: WKWebView) {
+        func load(_ text: String, size: CGFloat, emphasized: Bool, colorScheme: ColorScheme, in webView: WKWebView) {
             guard loadedText != text || loadedColorScheme != colorScheme else { return }
             loadedText = text
             loadedColorScheme = colorScheme
-            contentHeight.wrappedValue = 30
 
             let encodedSource = Data(text.utf8).base64EncodedString()
-            let html = Self.html(encodedSource: encodedSource, colorScheme: colorScheme)
+            let html = Self.html(encodedSource: encodedSource, size: size, emphasized: emphasized, colorScheme: colorScheme)
 #if SWIFT_PACKAGE
             let resourceBundle = Bundle.module
 #else
@@ -102,8 +110,10 @@ private struct MathPreviewWebView: NSViewRepresentable {
             didReceive message: WKScriptMessage
         ) {
             guard message.name == "contentHeight", let number = message.body as? NSNumber else { return }
-            let height = min(max(CGFloat(truncating: number), 30), 8_000)
-            contentHeight.wrappedValue = height
+            let height = CGFloat(truncating: number)
+            if height.isFinite, height > 0, height != contentHeight.wrappedValue {
+                contentHeight.wrappedValue = height
+            }
         }
 
         func webView(
@@ -136,7 +146,7 @@ private struct MathPreviewWebView: NSViewRepresentable {
             )
         }
 
-        private static func html(encodedSource: String, colorScheme: ColorScheme) -> String {
+        private static func html(encodedSource: String, size: CGFloat, emphasized: Bool, colorScheme: ColorScheme) -> String {
             """
             <!doctype html>
             <html lang="en">
@@ -146,11 +156,12 @@ private struct MathPreviewWebView: NSViewRepresentable {
               <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'self' file:; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'">
               <style>
                 :root { color-scheme: \(colorScheme == .dark ? "dark" : "light"); }
-                html, body { margin: 0; padding: 0; background: transparent; }
-                body { color: CanvasText; font: 14px/1.48 -apple-system, BlinkMacSystemFont, sans-serif; overflow-wrap: anywhere; }
-                #content { white-space: pre-wrap; overflow-wrap: anywhere; }
+                html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+                body { color: \(colorScheme == .dark ? "#ECECE8" : "#111110"); font: \(emphasized ? 600 : 400) \(size)px/\(size + 9)px -apple-system, BlinkMacSystemFont, sans-serif; }
+                #card { display: flow-root; }
+                #content { display: flow-root; white-space: pre-wrap; overflow-wrap: anywhere; }
                 mjx-container { max-width: 100%; }
-                mjx-container[display="true"] { overflow-x: auto; overflow-y: hidden; }
+                mjx-container svg { max-width: 100%; height: auto; }
                 #status { display: none; margin-top: 5px; padding: 4px 7px; border-radius: 4px; background: #fff1d6; color: #714500; font: 12px/1.35 -apple-system, BlinkMacSystemFont, sans-serif; }
                 \(colorScheme == .dark ? "#status { background: #493916; color: #ffe2a0; }" : "")
               </style>
@@ -190,25 +201,28 @@ private struct MathPreviewWebView: NSViewRepresentable {
                   startup: { typeset: false }
                 };
               </script>
-              <script src="./tex-svg.js" onerror="window.showMathStatus('The bundled MathJax runtime could not be loaded.')"></script>
             </head>
             <body>
-              <div id="content"></div>
-              <div id="status" role="status" aria-live="polite"></div>
+              <div id="card">
+                <div id="content"></div>
+                <div id="status" role="status" aria-live="polite"></div>
+              </div>
               <script>
+                const card = document.getElementById('card');
+                const content = document.getElementById('content');
                 window.reportPreviewHeight = function() {
-                  const height = Math.ceil(document.documentElement.scrollHeight);
-                  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.contentHeight) {
-                    window.webkit.messageHandlers.contentHeight.postMessage(Math.max(30, height));
-                  }
+                  const height = Math.ceil(card.getBoundingClientRect().height);
+                  window.webkit?.messageHandlers.contentHeight?.postMessage(height);
                 };
                 const encoded = '\(encodedSource)';
                 const binary = atob(encoded);
                 const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-                document.getElementById('content').textContent = new TextDecoder().decode(bytes);
-                new ResizeObserver(window.reportPreviewHeight).observe(document.body);
-                window.MathJax.startup.promise
-                  .then(() => window.MathJax.typesetPromise([document.getElementById('content')]))
+                content.textContent = new TextDecoder().decode(bytes);
+                new ResizeObserver(window.reportPreviewHeight).observe(card);
+              </script>
+              <script src="./tex-svg.js" onerror="window.showMathStatus('The bundled MathJax runtime could not be loaded.')"></script>
+              <script>
+                window.MathJax.startup.promise?.then(() => window.MathJax.typesetPromise([content]))
                   .then(() => {
                     if (window.__mathJaxErrors.length) {
                       const detail = Array.from(new Set(window.__mathJaxErrors)).join('; ');
@@ -226,6 +240,10 @@ private struct MathPreviewWebView: NSViewRepresentable {
             """
         }
     }
+}
+
+private final class CardMathWebView: WKWebView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 private struct MathPreviewAnalysis {

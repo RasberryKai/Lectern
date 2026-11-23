@@ -1,4 +1,4 @@
-# Lectern card rules v1
+# Lectern card rules v2
 
 Adapted from Flashcards-v9: content rules retained; clipboard syntax is replaced by the structured JSON contract. Examples using `==` illustrate front and back only. Return JSON, never clipboard lines or Markdown code fences. Use Anki \(…\) and \[...\] math delimiters. Slide notes override these rules.
 
@@ -62,6 +62,22 @@ Bad: `When is an AGB clause presumed unfair? == ...` (reads as an exhaustive lis
 
 Good: `Two situations in which an AGB clause is presumed unfair, though other clauses can still fail the general test? == ...`
 
+### No giveaway yes/no questions
+
+A yes/no question whose wording predicts the answer tests nothing. "Does X automatically mean Y?", "Is X always…?", "Does X only…?", "Is X necessarily…?" are almost always answered No, so they can be passed without knowing the rule. Ask for the consequence or the deciding condition instead. Keep a yes/no card only when Yes and No are both plausible from the wording alone.
+
+Bad:
+
+```
+Does a defect automatically entitle the buyer to withdraw from the contract? == No, only after a deadline for supplementary performance has expired (§§ 437 No. 2, 323 BGB)
+```
+
+Good:
+
+```
+When can a buyer withdraw from the contract because of a defect? == Only after a reasonable deadline for supplementary performance has expired without success (§§ 437 No. 2, 323 BGB)
+```
+
 Self-check every card: could Kai read and answer it in under 30 seconds? Does the answer carry exactly one idea (or one short closed set)? Would the answer still make sense to someone seeing it cold? If not, cut, split or sharpen.
 
 Bad (too long, two independent facts):
@@ -111,6 +127,8 @@ What gives an agent power of representation? == The principal's actual permissio
 ```
 
 Shortlist cards stay a minority of the deck. The default is still the single-idea 30-second card. Never use shortlists for arguments, objections, criticisms, examples or characteristics — split those into understanding cards or drop them.
+
+**No look-alike siblings.** When a set is too long for one shortlist, never split it into cards whose fronts differ only by a number or one word (`Kohlberg stage 3?`, `Kohlberg stage 4?`). Kai ends up answering from the number, not the content. Chunk the set into named groups instead (`Kohlberg's conventional level: its two stages?`), or ask what tells two neighbouring items apart (`What separates Kohlberg's stage 4 from stage 3?`).
 
 ## Core principle: transferable knowledge, not the material's examples
 
@@ -214,7 +232,7 @@ What does § 306 BGB say? == The contract stays valid if an AGB clause is invali
 Good:
 
 ```
-Does a debtor only owe what the contract literally says? == No, good faith can add duties like informing, warning or taking care (§ 242 BGB)
+What can good faith add to a debtor's duties beyond the contract text? == Duties like informing, warning or taking care (§ 242 BGB)
 What happens to a contract when one AGB clause is invalid? == The contract survives and statutory law replaces the clause (§ 306 BGB)
 ```
 

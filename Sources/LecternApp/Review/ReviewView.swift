@@ -188,6 +188,7 @@ private struct CardDetail: View {
     @Bindable var model: LectureWindowModel
     let card: Card
     var focus: FocusState<EditorField?>.Binding
+    @State private var editingSide: EditorField?
 
     var body: some View {
         let issues = model.lecture.issues(for: card)
@@ -221,6 +222,13 @@ private struct CardDetail: View {
             if !hidden { MathChoices(model: model, card: card) }
             hints(hidden: hidden)
             if !hidden { history }
+        }
+        .onChange(of: card.id) { _, _ in editingSide = nil }
+        .onChange(of: hidden) { _, hidden in
+            if hidden && editingSide == .back { editingSide = nil }
+        }
+        .onChange(of: editingSide) { old, _ in
+            if old != nil { Task { await model.run { try await model.session.flushEdits() } } }
         }
     }
 
@@ -286,29 +294,40 @@ private struct CardDetail: View {
     }
 
     private func side(_ title: String, text: Binding<String>, field: EditorField, size: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).eyebrow()
-            // Let the card grow with wrapped text and blank lines, up to a scrollable height.
-            Text(verbatim: text.wrappedValue + "\u{200B}")
-                .lineLimit(20)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .hidden()
-                .overlay {
-                    TextEditor(text: text)
-                        .scrollContentBackground(.hidden)
-                        .focused(focus, equals: field)
-                        .disabled(model.readOnly)
-                        .accessibilityLabel(title)
-                        .onChange(of: text.wrappedValue) { _, _ in
-                            if focus.wrappedValue == field { model.editorChanged() }
-                        }
+        let editing = editingSide == field && !model.readOnly
+        let emphasized = field == .front
+        let content = RenderedCardText(text: text.wrappedValue, size: size, emphasized: emphasized)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title).eyebrow()
+                if editing {
+                    Spacer()
+                    Button("Done") { editingSide = nil }
+                        .buttonStyle(LinkButtonStyle())
                 }
-                .font(.system(size: size, weight: field == .front ? .semibold : .regular))
-                .lineSpacing(5)
-            MathPreviewView(text: text.wrappedValue)
+            }
+            if editing {
+                CardSourceEditor(
+                    text: Binding(get: { text.wrappedValue }, set: {
+                        text.wrappedValue = $0
+                        model.editorChanged()
+                    }),
+                    label: title, size: size, emphasized: emphasized
+                ) {
+                    if editingSide == field { editingSide = nil }
+                }
+                .id(card.id)
+            } else if model.readOnly {
+                content
+            } else {
+                Button { editingSide = field } label: {
+                    content
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("Edit \(title.lowercased())"))
+                .accessibilityValue(Text(verbatim: text.wrappedValue))
+            }
         }
         .padding(.horizontal, 26).padding(.vertical, 20)
     }

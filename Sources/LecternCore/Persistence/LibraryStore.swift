@@ -343,15 +343,24 @@ public actor LibraryStore {
     } }
     public func loadRules() throws -> String { try locked {
         let url = rootURL.appendingPathComponent("rules.md")
-        if FileManager.default.fileExists(atPath: url.path) { return try String(contentsOf: url, encoding: .utf8) }
+        if FileManager.default.fileExists(atPath: url.path) {
+            let saved = try String(contentsOf: url, encoding: .utf8)
+            // Only replace the original v1 default. User-edited rules take precedence.
+            let v1DefaultHash = "5ec4304f730f073861f07f663660a6a551b02a093069d5dde66245f443180fa1"
+            if Self.rulesHash(Data(saved.utf8)) != v1DefaultHash { return saved }
+        }
         guard let bundled = Bundle.module.url(forResource: "rules", withExtension: "md") else { throw LibraryError.unavailable("Bundled rules are missing.") }
         let rules = try String(contentsOf: bundled, encoding: .utf8)
         try Data(rules.utf8).write(to: url, options: .atomic); return rules
     } }
     @discardableResult public func saveRules(_ rules: String) throws -> String { try locked {
-        try Data(rules.utf8).write(to: rootURL.appendingPathComponent("rules.md"), options: .atomic)
-        return SHA256.hash(data: Data(rules.utf8)).map { String(format: "%02x", $0) }.joined()
+        let data = Data(rules.utf8)
+        try data.write(to: rootURL.appendingPathComponent("rules.md"), options: .atomic)
+        return Self.rulesHash(data)
     } }
+    private static func rulesHash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
     /// Raw source metadata preserves every legacy field, including import warnings and raw malformed lines.
     public func saveLegacyProvenance(_ data: Data, moduleID: UUID, lectureID: UUID) throws { try locked {
         try requireEditable(moduleUnlocked(moduleID))
