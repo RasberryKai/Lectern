@@ -57,6 +57,7 @@ final class AppModel {
     private(set) var dashboard: DashboardSnapshot? = nil
     private(set) var studyCatalog = StudyCatalog()
     private(set) var studyNow = Date()
+    private(set) var studyShuffleSeed = UInt64.random(in: .min ... .max)
     private(set) var studySession: StudySessionModel?
     private(set) var studyError: String?
     private(set) var modules: [Module] = []
@@ -75,6 +76,7 @@ final class AppModel {
     var showStudySettingsOnOpen = false
     var showNewModule = false
     var settingsModuleID: UUID? = nil
+    var showModuleStudySettingsOnOpen = false
     /// Two or more PDFs waiting in the import sheet.
     var pendingImport: PendingPDFImport? = nil
     /// Lecture windows read and clear this to switch mode when "Review"/"Open" targets an open window.
@@ -227,9 +229,11 @@ final class AppModel {
         if let studyError { errorMessage = studyError; return }
         let resolved = options ?? studyCatalog.configuration(moduleID: scope.moduleID).session
         let plan = studyCatalog.plan(scope: scope, options: resolved, includeFuture: includeFuture,
-                                     extraNewPerModule: extraNewPerModule, limitNewInSession: limitNewInSession)
+                                     extraNewPerModule: extraNewPerModule, limitNewInSession: limitNewInSession,
+                                     shuffleSeed: studyShuffleSeed, now: studyNow)
         studySession = StudySessionModel(app: self, scope: scope, options: resolved,
                                          includeFuture: includeFuture, extraNewPerModule: extraNewPerModule, plan: plan)
+        studyShuffleSeed = UInt64.random(in: .min ... .max)
     }
 
     func endStudy() {
@@ -245,13 +249,6 @@ final class AppModel {
     func openStudySettings() {
         showStudySettingsOnOpen = true
         showSettings = true
-    }
-
-    func setStudyNewCardLimit(moduleID: UUID, limit: Int) async {
-        do {
-            try await store.setStudyNewCardLimit(moduleID: moduleID, limit: limit)
-            await refreshStudy()
-        } catch { errorMessage = error.localizedDescription }
     }
 
     func module(_ id: UUID) -> Module? { modules.first { $0.id == id } }

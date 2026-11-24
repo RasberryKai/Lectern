@@ -25,6 +25,10 @@ public enum StudyQueueOrder: String, Codable, CaseIterable, Sendable {
     case dueFirst, mixed
 }
 
+public enum StudyNewCardOrder: String, Codable, CaseIterable, Sendable {
+    case sequential, shuffleWithinLecture, shuffleAcrossSelection
+}
+
 public enum StudyStop: Codable, Equatable, Sendable {
     case complete
     case cards(Int)
@@ -34,10 +38,24 @@ public enum StudyStop: Codable, Equatable, Sendable {
 public struct StudySessionOptions: Codable, Equatable, Sendable {
     public var cardTypes: StudyCardTypes = .all
     public var queueOrder: StudyQueueOrder = .dueFirst
+    public var newCardOrder: StudyNewCardOrder = .sequential
     public var spaceRelatedCards = true
     public var stop: StudyStop = .complete
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case cardTypes, queueOrder, newCardOrder, spaceRelatedCards, stop
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        cardTypes = try values.decode(StudyCardTypes.self, forKey: .cardTypes)
+        queueOrder = try values.decode(StudyQueueOrder.self, forKey: .queueOrder)
+        newCardOrder = try values.decodeIfPresent(StudyNewCardOrder.self, forKey: .newCardOrder) ?? .sequential
+        spaceRelatedCards = try values.decode(Bool.self, forKey: .spaceRelatedCards)
+        stop = try values.decode(StudyStop.self, forKey: .stop)
+    }
 
     func validated() throws {
         switch stop {
@@ -114,6 +132,7 @@ public struct StudyOverrides: Codable, Equatable, Sendable {
     public var spreadReviewDates: Bool?
     public var cardTypes: StudyCardTypes?
     public var queueOrder: StudyQueueOrder?
+    public var newCardOrder: StudyNewCardOrder?
     public var spaceRelatedCards: Bool?
     public var stop: StudyStop?
 
@@ -132,6 +151,7 @@ public struct StudyOverrides: Codable, Equatable, Sendable {
         result.spreadReviewDates = spreadReviewDates ?? defaults.spreadReviewDates
         result.session.cardTypes = cardTypes ?? defaults.session.cardTypes
         result.session.queueOrder = queueOrder ?? defaults.session.queueOrder
+        result.session.newCardOrder = newCardOrder ?? defaults.session.newCardOrder
         result.session.spaceRelatedCards = spaceRelatedCards ?? defaults.session.spaceRelatedCards
         result.session.stop = stop ?? defaults.session.stop
         return result

@@ -33,7 +33,7 @@ import SwiftUI
         let document = PDFDocument()
         let colors: [NSColor] = [.white, .yellow, .cyan, .magenta, .green, .orange]
         for (index, color) in colors.enumerated() {
-            let size = index == 1 ? NSSize(width: 540, height: 960) : NSSize(width: 960, height: 540)
+            let size = [1, 2].contains(index) ? NSSize(width: 540, height: 960) : NSSize(width: 960, height: 540)
             let content = CheckPageView(frame: NSRect(origin: .zero, size: size))
             content.color = color
             content.label = "Slide \(index + 1) — zoom check"
@@ -94,6 +94,13 @@ import SwiftUI
                     && abs(actual.greenComponent - expected.greenComponent) < 0.05
                     && abs(actual.blueComponent - expected.blueComponent) < 0.05
             }
+            @MainActor func visiblePageSize() -> CGSize {
+                guard let page = viewer.document?.page(at: 0),
+                      let clip = viewer.documentView?.enclosingScrollView?.contentView else { return .zero }
+                let pageRect = viewer.convert(page.bounds(for: .cropBox), from: page)
+                let viewport = viewer.convert(clip.bounds, from: clip)
+                return pageRect.intersection(viewport).size
+            }
             host.rootView = ZoomableSlideView(sourceURL: source, pageIndex: 0)
             await settle()
             // Fetch the same shared-cache entry: navigation must reuse this exact image,
@@ -112,6 +119,7 @@ import SwiftUI
             check("initial page fits", viewer.scaleFactor > 0 && abs(viewer.scaleFactor - viewer.minScaleFactor) < 0.001)
             check("single page is isolated", viewer.document?.pageCount == 1)
             capture("slide-fit")
+            let landscapeFit = visiblePageSize()
             if let scroll = viewer.documentView?.enclosingScrollView {
                 let fittedScale = viewer.scaleFactor
                 let center = NSPoint(x: scroll.contentView.bounds.midX, y: scroll.contentView.bounds.midY)
@@ -120,6 +128,7 @@ import SwiftUI
                 await settle()
                 check("pinch hides the fitted preview", preview.isHidden)
                 check("pinch updates reported percentage", abs(factor - 1.5) < 0.01)
+                check("landscape zoom uses space above and below the fitted page", visiblePageSize().height > landscapeFit.height + 40)
                 capture("slide-pinch")
                 viewer.zoom(by: 1.25)
                 await settle()
@@ -186,6 +195,15 @@ import SwiftUI
                 viewer.layoutSubtreeIfNeeded()
                 check("immediate navigation to slide \(index + 1)", !preview.isHidden && displaysPage(index))
             }
+            host.rootView = ZoomableSlideView(sourceURL: source, pageIndex: 2)
+            await settle()
+            let portraitFit = visiblePageSize()
+            check("portrait Fit shows the whole page", portraitFit.height > 0 && abs(portraitFit.width / portraitFit.height - 540.0 / 960) < 0.01)
+            capture("slide-portrait-fit")
+            viewer.zoom(by: 1.25)
+            await settle()
+            check("portrait zoom uses space beside the fitted page", visiblePageSize().width > portraitFit.width + 40)
+            capture("slide-portrait-zoom")
             let otherSource = directory.appendingPathComponent("other.pdf")
             let otherDocument = PDFDocument()
             otherDocument.insert(document.page(at: 4)!.copy() as! PDFPage, at: 0)

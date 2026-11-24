@@ -7,6 +7,16 @@ final class StudySessionModel {
     enum Status { case studying, empty, done, limited, ended }
     enum Pane { case slide, ask }
 
+    struct EditDraft {
+        var front: String
+        var back: String
+
+        var canSave: Bool {
+            !front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                !back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     private struct Attempt {
         var entry: StudyCard
         var isRetry = false
@@ -71,7 +81,7 @@ final class StudySessionModel {
     private(set) var toast: String?
     private(set) var canSkipCurrent = false
     var error: String?
-    var editDraft: String?
+    var editDraft: EditDraft?
 
     init(app: AppModel, scope: StudyScope, options: StudySessionOptions, includeFuture: Bool,
          extraNewPerModule: Int, plan: StudyPlan) {
@@ -98,6 +108,10 @@ final class StudySessionModel {
     }
     var hasPendingGrade: Bool { pendingGrade != nil }
     var canUndo: Bool { undo != nil && !isBusy && editDraft == nil && !hasPendingGrade }
+    var canUndoDisable: Bool {
+        if case .disable? = undo?.action { return canUndo }
+        return false
+    }
     var againCount: Int { queue.dropFirst(position).count(where: \.isRetry) }
     var distinctGradeCount: Int { gradedIDs.count }
     var totalCount: Int {
@@ -350,14 +364,17 @@ final class StudySessionModel {
 
     func beginEdit() {
         guard !isBusy, editDraft == nil, !hasPendingGrade, let entry = current else { return }
-        editDraft = entry.card.front
+        editDraft = EditDraft(front: entry.card.front, back: entry.card.back)
     }
 
     func saveEdit() async {
-        guard let entry = current, let editDraft else { return }
+        guard let entry = current, let editDraft, editDraft.canSave else { return }
         await perform {
-            let updated = try await app.store.editStudyCardFront(entry, front: editDraft)
-            queue[position].entry.card = updated
+            let updated = try await app.store.editStudyCard(entry, front: editDraft.front, back: editDraft.back)
+            let key = CardKey(entry)
+            for index in queue.indices where CardKey(queue[index].entry) == key {
+                queue[index].entry.card = updated
+            }
             self.editDraft = nil
             if let chatModel { await chatModel.reloadAfterExternalChange() }
             app.scheduleReload()

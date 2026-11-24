@@ -68,7 +68,7 @@ struct StudySettingsTab: View {
                     }
                     Divider()
                     studyRow("FSRS weights", detail: "Standard FSRS-6 weights") {
-                        Button("Optimize…") {}.buttonStyle(SecondaryButtonStyle()).disabled(true)
+                        EmptyView()
                     }
                     Divider()
                     StudyRescheduleControls(moduleID: nil, recordCount: model.studyCatalog.decks.reduce(0) { $0 + $1.seenCount },
@@ -156,9 +156,10 @@ struct ModuleStudySettings: View {
                 Divider()
                 override("Queue order", \.queueOrder, default: defaults.session.queueOrder, describe: \.title, control: queueOrder)
                 Divider()
-                override("Space related cards apart", \.spaceRelatedCards, default: defaults.session.spaceRelatedCards, describe: { $0 ? "On" : "Off" }) {
-                    Toggle("Space related cards apart", isOn: $0).labelsHidden().toggleStyle(.switch)
-                }
+                override("New card order", \.newCardOrder, default: defaults.session.newCardOrder, describe: \.title, control: newCardOrder)
+                Divider()
+                override("Space related cards apart", \.spaceRelatedCards, default: defaults.session.spaceRelatedCards,
+                         describe: { $0 ? "On" : "Off" }, help: relatedCardsSpacingHelp, control: relatedCardsSpacingToggle)
                 Divider()
                 override("Stop after", \.stop, default: defaults.session.stop, describe: \.summary, control: stopControl)
             }
@@ -186,12 +187,12 @@ struct ModuleStudySettings: View {
 
     private func override<Value: Sendable, Control: View>(
         _ name: String, _ key: WritableKeyPath<StudyOverrides, Value?>, default inherited: Value,
-        describe: (Value) -> String, @ViewBuilder control: (Binding<Value>) -> Control
+        describe: (Value) -> String, help: String? = nil, @ViewBuilder control: (Binding<Value>) -> Control
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(name).font(Theme.body.weight(.semibold))
+                    studySettingLabel(name, help: help)
                     Text(describe(draft[keyPath: key] ?? inherited)).font(Theme.small).foregroundStyle(Theme.quiet)
                 }
                 Spacer()
@@ -235,9 +236,10 @@ struct StudySessionControls: View {
             Divider()
             studyRow("Queue order") { queueOrder($options.queueOrder) }
             Divider()
-            studyRow("Space related cards apart") {
-                Toggle("Space related cards apart", isOn: $options.spaceRelatedCards)
-                    .labelsHidden().toggleStyle(.switch)
+            studyRow("New card order") { newCardOrder($options.newCardOrder) }
+            Divider()
+            studyRow("Space related cards apart", help: relatedCardsSpacingHelp) {
+                relatedCardsSpacingToggle($options.spaceRelatedCards)
             }
             Divider()
             studyRow("Stop after") { stopControl($options.stop) }
@@ -352,14 +354,26 @@ private func studyBlock<Content: View>(_ title: String, @ViewBuilder content: ()
     }.frame(maxWidth: .infinity, alignment: .leading).panel(padding: 16)
 }
 
-private func studyRow<Control: View>(_ title: String, detail: String? = nil, @ViewBuilder control: () -> Control) -> some View {
+private func studyRow<Control: View>(
+    _ title: String, detail: String? = nil, help: String? = nil, @ViewBuilder control: () -> Control
+) -> some View {
     let label = VStack(alignment: .leading, spacing: 3) {
-        Text(title).font(Theme.body.weight(.semibold))
+        studySettingLabel(title, help: help)
         if let detail { Text(detail).font(Theme.small).foregroundStyle(Theme.quiet) }
     }
     return ViewThatFits(in: .horizontal) {
         HStack(spacing: 16) { label; Spacer(minLength: 12); control() }
         VStack(alignment: .leading, spacing: 8) { label; control() }
+    }
+}
+
+@ViewBuilder
+private func studySettingLabel(_ title: String, help: String?) -> some View {
+    let label = Text(title).font(Theme.body.weight(.semibold))
+    if let help {
+        label.help(help)
+    } else {
+        label
     }
 }
 
@@ -422,6 +436,21 @@ private func queueOrder(_ value: Binding<StudyQueueOrder>) -> some View {
     Picker("Queue order", selection: value) {
         ForEach(StudyQueueOrder.allCases, id: \.self) { Text($0.title).tag($0) }
     }.pickerStyle(.segmented).labelsHidden().fixedSize()
+}
+
+private func newCardOrder(_ value: Binding<StudyNewCardOrder>) -> some View {
+    Picker("New card order", selection: value) {
+        ForEach(StudyNewCardOrder.allCases, id: \.self) { Text($0.title).tag($0) }
+    }.pickerStyle(.menu).labelsHidden().fixedSize()
+}
+
+private let relatedCardsSpacingHelp = "Tries to put another card between cards from the same slide or split from the same original card. For new cards shuffled within each lecture, spacing stays within that lecture."
+
+private func relatedCardsSpacingToggle(_ value: Binding<Bool>) -> some View {
+    Toggle("Space related cards apart", isOn: value)
+        .labelsHidden().toggleStyle(.switch)
+        .help(relatedCardsSpacingHelp)
+        .accessibilityHint(relatedCardsSpacingHelp)
 }
 
 private func stopControl(_ value: Binding<StudyStop>) -> some View {
@@ -512,6 +541,16 @@ private extension StudyCardTypes {
 
 private extension StudyQueueOrder {
     var title: String { self == .dueFirst ? "Due first" : "Mix new with due" }
+}
+
+private extension StudyNewCardOrder {
+    var title: String {
+        switch self {
+        case .sequential: "Sequential"
+        case .shuffleWithinLecture: "Shuffle within each lecture"
+        case .shuffleAcrossSelection: "Shuffle across selected lectures"
+        }
+    }
 }
 
 private extension StudyStop {

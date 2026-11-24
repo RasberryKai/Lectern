@@ -3,20 +3,28 @@ import SwiftUI
 
 struct FlashcardsView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("lectern.flashcards.expandedModules") private var savedExpandedModules = ""
     @State private var showingOptions = false
     @State private var sessionOptions: StudySessionOptions?
+
+    private var expandedModules: Set<UUID> {
+        Set(savedExpandedModules.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+    }
 
     var body: some View {
         ScrollView {
             let catalog = model.studyCatalog
             let now = model.studyNow
-            let plan = catalog.plan(now: now)
+            let plan = catalog.plan(shuffleSeed: model.studyShuffleSeed, now: now)
+            let expanded = expandedModules
             VStack(alignment: .leading, spacing: 16) {
                 header(catalog, plan: plan)
                 if let error = model.studyError { ErrorBanner(message: error) }
                 overallPace(catalog, now: now)
                 ForEach(catalog.decks, id: \.module.id) { deck in
-                    FlashcardsDeckView(deck: deck, now: now, expandByDefault: deck.module.id == catalog.decks.first?.module.id)
+                    FlashcardsDeckView(deck: deck, now: now, isExpanded: expanded.contains(deck.id)) {
+                        toggleExpansion(deck.id)
+                    }
                 }
                 if catalog.decks.isEmpty {
                     Text("Approve cards in Review first.")
@@ -28,6 +36,12 @@ struct FlashcardsView: View {
             .padding(.horizontal, 40).padding(.vertical, 36)
             .frame(maxWidth: 1240, alignment: .leading)
         }
+    }
+
+    private func toggleExpansion(_ moduleID: UUID) {
+        var expanded = expandedModules
+        if expanded.remove(moduleID) == nil { expanded.insert(moduleID) }
+        savedExpandedModules = expanded.map(\.uuidString).sorted().joined(separator: ",")
     }
 
     private func header(_ catalog: StudyCatalog, plan: StudyPlan) -> some View {
@@ -110,7 +124,7 @@ struct FlashcardsView: View {
     private var optionsPopover: some View {
         let defaults = model.studyCatalog.preferences.defaults.session
         let options = sessionOptions ?? defaults
-        let plan = model.studyCatalog.plan(options: options, now: model.studyNow)
+        let plan = model.studyCatalog.plan(options: options, shuffleSeed: model.studyShuffleSeed, now: model.studyNow)
         return VStack(alignment: .leading, spacing: 15) {
             HStack {
                 Text("This session").font(Theme.heading(21)).accessibilityAddTraits(.isHeader)
@@ -143,29 +157,36 @@ private struct FlashcardsDeckView: View {
     @Environment(AppModel.self) private var model
     let deck: StudyDeck
     let now: Date
-    @State private var expanded: Bool
+    let isExpanded: Bool
+    let toggleExpansion: () -> Void
     @State private var selectedLectures: Set<UUID> = []
     @State private var includeFuture = false
-    @State private var savingLimit = false
 
-    init(deck: StudyDeck, now: Date, expandByDefault: Bool) {
-        self.deck = deck
-        self.now = now
-        _expanded = State(initialValue: expandByDefault)
-    }
+    private let progressWidth: CGFloat = 130
+    private let todayWidth: CGFloat = 145
 
     var body: some View {
         let module = deck.module
-        let configuration = model.studyCatalog.configuration(moduleID: module.id)
-        let plan = model.studyCatalog.plan(scope: .module(module.id), now: now)
+        let plan = model.studyCatalog.plan(scope: .module(module.id), shuffleSeed: model.studyShuffleSeed, now: now)
+        let limit = model.studyCatalog.configuration(moduleID: module.id).newCardLimit
         let currentNew = plan.cards.count { $0.memory == nil }
         VStack(spacing: 0) {
             deckHeader(module, plan: plan, new: currentNew)
-            Divider()
-            paceRow(configuration.newCardLimit)
-            if expanded {
+            if isExpanded {
                 Divider()
-                lectureTable(plan: plan)
+                if plan.approvedCount > 0 {
+                    paceRow(total: plan.approvedCount, limit: limit)
+                    Divider()
+                    lectureTable(plan: plan)
+                } else {
+                    HStack {
+                        Text("Approve cards in Review first.").font(Theme.small).foregroundStyle(Theme.quiet)
+                        Spacer()
+                        dailyLimitButton(limit)
+                        openModuleButton
+                    }
+                    .padding(.horizontal, 22).padding(.vertical, 13)
+                }
             }
         }
         .panel(padding: 0)
@@ -173,167 +194,122 @@ private struct FlashcardsDeckView: View {
 
     private func deckHeader(_ module: Module, plan: StudyPlan, new: Int) -> some View {
         HStack(spacing: 12) {
-            Button {
-                expanded.toggle()
-            } label: {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right").frame(width: 20, height: 22)
+            Button(action: toggleExpansion) {
+                HStack(spacing: 10) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.quiet)
+                        .frame(width: 30, height: 30)
+                        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
+                        .accessibilityHidden(true)
+                    Text(module.name).font(Theme.heading(23)).lineLimit(1)
+                    Text(Format.examLine(module.examDate, now: now))
+                        .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize()
+                }
+                .padding(.leading, 18)
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain).foregroundStyle(Theme.quiet)
-            .accessibilityLabel(expanded ? "Hide lectures in \(module.name)" : "Show lectures in \(module.name)")
-            Button(module.name) { model.selection = .module(module.id) }
-                .buttonStyle(.plain).font(Theme.heading(23)).lineLimit(1)
-            Text(Format.examLine(module.examDate, now: now))
-                .font(Theme.small).foregroundStyle(Theme.quiet).lineLimit(1)
-            Spacer(minLength: 2)
-            Text("\(plan.dueCount) due · \(new) new")
-                .font(Theme.body.monospacedDigit()).foregroundStyle(Theme.quiet).fixedSize()
+            .buttonStyle(.plain)
+            .accessibilityLabel(isExpanded ? "Hide lectures in \(module.name)" : "Show lectures in \(module.name)")
+            .accessibilityValue(Format.examLine(module.examDate, now: now))
+            if let workload = studyCounts(due: plan.dueCount, new: new) {
+                Text(workload).font(Theme.body.monospacedDigit()).foregroundStyle(Theme.quiet).fixedSize()
+            }
             if plan.startingCount > 0 {
                 Button("Study \(plan.startingCount)") {
                     Task { await model.startStudy(scope: .module(module.id)) }
                 }.buttonStyle(SecondaryButtonStyle())
-            } else if deck.approvedCount == 0 {
+            } else if plan.approvedCount == 0 {
                 Text("No approved cards").font(Theme.small).foregroundStyle(Theme.quiet)
             } else if plan.dueCount == 0 {
                 Text("Done today").font(Theme.small).foregroundStyle(Theme.quiet)
             }
-        }.padding(.horizontal, 19).padding(.vertical, 13)
+        }.padding(.trailing, 19)
     }
 
-    private func paceRow(_ limit: Int) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 20) {
-                seenMeter.frame(minWidth: 120, maxWidth: .infinity)
-                capStepper(limit)
-                paceLabel(limit).frame(minWidth: 204, alignment: .leading)
-            }
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    seenMeter.frame(maxWidth: 260)
-                    Spacer(minLength: 8)
-                    capStepper(limit)
-                }
-                paceLabel(limit)
-            }
+    private func paceRow(total: Int, limit: Int) -> some View {
+        let seen = deck.seenCount
+        return HStack(spacing: 20) {
+            StudyProgressMeter(value: seen, total: total, unit: "seen", tint: Theme.good)
+                .frame(minWidth: 120, maxWidth: .infinity)
+            paceLabel(unseen: total - seen, limit: limit)
+            dailyLimitButton(limit)
+            openModuleButton
         }
         .padding(.horizontal, 22).padding(.vertical, 10)
     }
 
-    private var seenMeter: some View {
-        StudyProgressMeter(value: deck.seenCount, total: deck.approvedCount, unit: "seen", tint: Theme.good)
+    private func dailyLimitButton(_ limit: Int) -> some View {
+        Button("\(limit.formatted()) new cards/day") {
+            model.showModuleStudySettingsOnOpen = true
+            model.settingsModuleID = deck.id
+        }
+        .buttonStyle(LinkButtonStyle(color: Theme.quiet))
+        .accessibilityHint("Opens study settings for this module")
+        .fixedSize()
     }
 
-    private func capStepper(_ limit: Int) -> some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .trailing, spacing: 3) {
-                Text("New a day").font(Theme.small).foregroundStyle(Theme.quiet)
-                let isOverride = deck.overrides.newCardLimit != nil
-                Text(isOverride ? "Module override" : "App default")
-                    .font(Theme.caption).foregroundStyle(isOverride ? Theme.accentText : Theme.quiet)
-            }
-            HStack(spacing: 0) {
-                Button { saveLimit(limit - 1) } label: {
-                    Image(systemName: "minus").frame(width: 27, height: 27)
-                }.buttonStyle(.plain).disabled(limit == 0 || savingLimit)
-                    .accessibilityLabel("Fewer new cards a day")
-                Rectangle().fill(Theme.border).frame(width: 1, height: 27)
-                Text(limit.formatted()).font(Theme.small.weight(.semibold)).monospacedDigit()
-                    .padding(.horizontal, 5).frame(minWidth: 34)
-                    .accessibilityLabel("\(limit) new cards a day")
-                Rectangle().fill(Theme.border).frame(width: 1, height: 27)
-                Button { saveLimit(limit + 1) } label: {
-                    Image(systemName: "plus").frame(width: 27, height: 27)
-                }.buttonStyle(.plain).disabled(limit == .max || savingLimit)
-                    .accessibilityLabel("More new cards a day")
-            }
-            .font(Theme.small)
-            .background(Theme.inset, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.borderStrong).allowsHitTesting(false))
-        }.fixedSize()
+    private var openModuleButton: some View {
+        Button("Open module") { model.selection = .module(deck.id) }
+            .buttonStyle(LinkButtonStyle(color: Theme.quiet)).fixedSize()
     }
 
-    @ViewBuilder private func paceLabel(_ limit: Int) -> some View {
-        if deck.approvedCount > 0 && deck.seenCount == deck.approvedCount {
+    @ViewBuilder private func paceLabel(unseen: Int, limit: Int) -> some View {
+        if unseen == 0 {
             Text("Every card seen").font(Theme.small).foregroundStyle(Theme.good)
         } else if let exam = deck.module.examDate, let needed = deck.neededPerDay(now: now), needed > 0 {
-            let examDay = exam.date()
-            let completion = completionDate(limit: limit)
-            if completion == nil || completion.map({ Calendar.current.startOfDay(for: $0) > examDay }) == true {
-                let target = limitToFinish(by: exam)
-                HStack(spacing: 8) {
-                    Text("Needs \(needed) a day by \(Format.dayMonth(exam.date()))")
-                        .font(Theme.small.weight(.semibold)).foregroundStyle(Theme.amber)
-                    Button("Set to \(target)") { saveLimit(target) }
-                        .buttonStyle(LinkButtonStyle(color: Theme.amber)).disabled(savingLimit).fixedSize()
-                }
-            } else if let date = completion {
+            if let date = completionDate(unseen: unseen, limit: limit), Calendar.current.startOfDay(for: date) <= exam.date() {
                 Text("Needs \(needed) a day · every card seen by \(Format.dayMonth(date))")
                     .font(Theme.small).foregroundStyle(Theme.good)
+            } else {
+                Text("Needs \(needed) a day by \(Format.dayMonth(exam.date()))")
+                    .font(Theme.small.weight(.semibold)).foregroundStyle(Theme.amber)
             }
         } else if deck.module.examDate == nil {
             Text("Set an exam date to see the pace you need").font(Theme.small).foregroundStyle(Theme.quiet)
         }
     }
 
-    private func limitToFinish(by exam: ExamDate) -> Int {
-        let unseen = deck.approvedCount - deck.seenCount
-        let laterDays = max(0, exam.daysRemaining(from: now))
-        let spentToday = deck.introducedToday
-        if laterDays > 0 {
-            let limitWithoutToday = ceil(Double(unseen) / Double(laterDays))
-            if limitWithoutToday <= Double(spentToday) { return Int(limitWithoutToday) }
-        }
-        return Int(ceil((Double(unseen) + Double(spentToday)) / Double(laterDays + 1)))
-    }
-
-    private func completionDate(limit: Int) -> Date? {
+    private func completionDate(unseen: Int, limit: Int) -> Date? {
         guard limit > 0 else { return nil }
-        let unseen = deck.approvedCount - deck.seenCount
         let availableToday = max(0, limit - deck.introducedToday)
         let later = max(0, unseen - availableToday)
         let (days, remainder) = later.quotientAndRemainder(dividingBy: limit)
         return Calendar.current.date(byAdding: .day, value: days + (remainder == 0 ? 0 : 1), to: now)
     }
 
-    private func saveLimit(_ limit: Int) {
-        guard !savingLimit else { return }
-        savingLimit = true
-        Task {
-            await model.setStudyNewCardLimit(moduleID: deck.module.id, limit: limit)
-            savingLimit = false
-        }
+    private func studyCounts(due: Int, new: Int) -> String? {
+        let counts = [due > 0 ? "\(due.formatted()) due" : nil, new > 0 ? "\(new.formatted()) new" : nil]
+            .compactMap { $0 }
+        return counts.isEmpty ? nil : counts.joined(separator: " · ")
     }
 
     @ViewBuilder private func lectureTable(plan: StudyPlan) -> some View {
         let assets = Dictionary(grouping: deck.approvedCards, by: \.lectureID)
         let lectures = deck.lectures.filter { assets[$0.id] != nil }
         let newByLecture = Dictionary(grouping: plan.cards.filter { $0.memory == nil }, by: \.lectureID)
-        if lectures.isEmpty {
-            Text("Approve cards in Review first.").font(Theme.small).foregroundStyle(Theme.quiet)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.vertical, 13)
-        } else {
-            HStack(spacing: 13) {
-                Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
-                Text("Lecture").frame(maxWidth: .infinity, alignment: .leading)
-                Text("Cards").frame(width: 48, alignment: .trailing)
-                Text("Seen").frame(width: 90, alignment: .trailing)
-                Text("Due today").frame(width: 77, alignment: .trailing)
-                Text("New").frame(width: 48, alignment: .trailing)
-            }.eyebrow().padding(.horizontal, 22).padding(.vertical, 9)
-            ForEach(lectures) { lecture in
-                Divider()
-                lectureRow(lecture, cards: assets[lecture.id, default: []], new: newByLecture[lecture.id]?.count ?? 0)
-            }
-            let selected = lectures.filter { selectedLectures.contains($0.id) }
-            if !selected.isEmpty {
-                Divider()
-                selectedBar(selected)
-            }
+        HStack(spacing: 13) {
+            Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
+            Text("Lecture").frame(maxWidth: .infinity, alignment: .leading)
+            Text("Progress").frame(width: progressWidth, alignment: .leading)
+            Text("Today").frame(width: todayWidth, alignment: .leading)
+        }.eyebrow().padding(.horizontal, 22).padding(.vertical, 9)
+        ForEach(lectures) { lecture in
+            Divider()
+            lectureRow(lecture, cards: assets[lecture.id, default: []], new: newByLecture[lecture.id]?.count ?? 0)
+        }
+        let selected = lectures.filter { selectedLectures.contains($0.id) }
+        if !selected.isEmpty {
+            Divider()
+            selectedBar(selected)
         }
     }
 
     private func lectureRow(_ lecture: Lecture, cards: [StudyCard], new: Int) -> some View {
         let seen = cards.count { $0.memory != nil }
-        let due = cards.count { ($0.memory?.due ?? .distantFuture) <= now }
+        let due = cards.count { $0.memory.map { $0.due <= now } ?? false }
+        let workload = studyCounts(due: due, new: new)
         let checked = selectedLectures.contains(lecture.id)
         let title = lectureTitle(lecture)
         return Button {
@@ -346,14 +322,13 @@ private struct FlashcardsDeckView: View {
                     .frame(width: 18)
                 Text(title).font(Theme.body.weight(.medium)).lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text(cards.count.formatted()).frame(width: 48, alignment: .trailing)
-                HStack(spacing: 5) {
-                    ProgressView(value: Double(seen), total: Double(max(1, cards.count)))
-                        .progressViewStyle(.linear).tint(Theme.good).accessibilityHidden(true)
-                    Text(seen.formatted())
-                }.frame(width: 90, alignment: .trailing)
-                Text(due.formatted()).frame(width: 77, alignment: .trailing)
-                Text(new.formatted()).frame(width: 48, alignment: .trailing)
+                Text("\(seen.formatted()) of \(cards.count.formatted()) seen")
+                    .foregroundStyle(Theme.quiet)
+                    .frame(width: progressWidth, alignment: .leading)
+                Text(workload ?? "—")
+                    .fontWeight(workload == nil ? .regular : .medium)
+                    .foregroundStyle(workload == nil ? Theme.quiet : Theme.ink)
+                    .frame(width: todayWidth, alignment: .leading)
             }
             .font(Theme.small.monospacedDigit()).foregroundStyle(Theme.ink)
             .padding(.horizontal, 22).padding(.vertical, 10)
@@ -362,7 +337,7 @@ private struct FlashcardsDeckView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
-        .accessibilityValue("\(Format.count(cards.count, "card")), \(seen) seen, \(due) due, \(new) new")
+        .accessibilityValue("\(seen) of \(cards.count) cards seen. \(workload ?? "No cards queued today")")
         .accessibilityAddTraits(checked ? .isSelected : [])
     }
 
@@ -373,7 +348,8 @@ private struct FlashcardsDeckView: View {
 
     private func selectedBar(_ selected: [Lecture]) -> some View {
         let scope = StudyScope.lectures(moduleID: deck.module.id, lectureIDs: Set(selected.map(\.id)))
-        let plan = model.studyCatalog.plan(scope: scope, includeFuture: includeFuture, now: now)
+        let plan = model.studyCatalog.plan(scope: scope, includeFuture: includeFuture,
+                                          shuffleSeed: model.studyShuffleSeed, now: now)
         return HStack(spacing: 12) {
             Text(selected.count == 1 ? lectureTitle(selected[0]) : Format.count(selected.count, "lecture"))
                 .font(Theme.body.weight(.semibold)).lineLimit(1)

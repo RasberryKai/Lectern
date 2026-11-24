@@ -50,10 +50,8 @@ struct KeyboardShortcutsTab: View {
                         section("Study", [
                             ("Show answer / enlarge source", "Space"),
                             ("Got it / Missed", "1  2"),
-                            ("Open or cycle source slides", "S"),
                             ("Jump to slide in Prepare", "G"),
-                            ("Open Ask AI", "A"),
-                            ("Edit front / Disable / Undo", "E  D  U"),
+                            ("Edit card / Disable / Undo", "E  D  U"),
                             ("End session", "Esc"),
                             ("Toggle AI chat / source", "⌘ ⇧ A  /  ⌘ ⇧ S"),
                             ("Toggle right pane", "⌘ ⌥ B")

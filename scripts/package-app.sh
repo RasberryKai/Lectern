@@ -4,7 +4,6 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 APP_DIR="$ROOT_DIR/.build/Lectern.app"
-CONTENTS_DIR="$APP_DIR/Contents"
 
 cd "$ROOT_DIR"
 swift build -c release --product LecternApp
@@ -15,7 +14,10 @@ if [ ! -x "$EXECUTABLE" ]; then
   exit 1
 fi
 
-rm -rf "$APP_DIR"
+STAGING_DIR=$(mktemp -d "$ROOT_DIR/.build/.lectern-package.XXXXXX")
+trap 'rm -rf "$STAGING_DIR"' EXIT
+STAGED_APP="$STAGING_DIR/Lectern.app"
+CONTENTS_DIR="$STAGED_APP/Contents"
 mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources"
 cp "$EXECUTABLE" "$CONTENTS_DIR/MacOS/LecternApp"
 cp "$ROOT_DIR/Assets/Brand/Lectern.icns" "$CONTENTS_DIR/Resources/Lectern.icns"
@@ -46,4 +48,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+codesign --force --sign - "$STAGED_APP"
+codesign --verify --deep --strict "$STAGED_APP"
+
+rm -rf "$APP_DIR"
+mv "$STAGED_APP" "$ROOT_DIR/.build/"
 printf 'Created %s\n' "$APP_DIR"

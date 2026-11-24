@@ -12,6 +12,7 @@ struct ZoomableSlideView: View {
     var body: some View {
         VStack(spacing: 8) {
             SlidePDFView(sourceURL: sourceURL, pageIndex: pageIndex, controller: zoom)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
                 .overlay {
                     if zoom.failed {
@@ -75,18 +76,6 @@ private struct SlidePDFView: NSViewRepresentable {
 
     func updateNSView(_ view: ZoomablePDFView, context: Context) {
         view.load(sourceURL: sourceURL, pageIndex: pageIndex)
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ZoomablePDFView, context: Context) -> CGSize? {
-        guard let width = proposal.width, let height = proposal.height,
-              width.isFinite, height.isFinite,
-              let page = nsView.document?.page(at: 0) else { return nil }
-        let crop = page.bounds(for: .cropBox).size
-        let rotated = page.rotation % 180 != 0
-        let size = rotated ? CGSize(width: crop.height, height: crop.width) : crop
-        guard size.width > 0, size.height > 0 else { return nil }
-        let scale = min(width / size.width, height / size.height)
-        return CGSize(width: size.width * scale, height: size.height * scale)
     }
 }
 
@@ -158,7 +147,7 @@ private struct SlidePDFView: NSViewRepresentable {
 
     override func layout() {
         super.layout()
-        observeMagnification()
+        configureScrollView()
         if fittedScale > 0 { updatePreview() }
         else { fittedPreview.frame = bounds }
         guard !adjustingScale, document != nil, bounds.width > 0, bounds.height > 0,
@@ -195,10 +184,12 @@ private struct SlidePDFView: NSViewRepresentable {
         reportZoom()
     }
 
-    private func observeMagnification() {
+    private func configureScrollView() {
         let scrollView = documentView?.enclosingScrollView
         guard observedScrollView !== scrollView else { return }
         observedScrollView = scrollView
+        // Let the canvas show through the space around the page.
+        scrollView?.drawsBackground = false
         // Native pinch/smart zoom can change the scroll view's magnification
         // without PDFKit posting PDFViewScaleChanged. Both paths use the same scale.
         magnificationObservation = scrollView?.observe(\.magnification) { [weak self] _, _ in

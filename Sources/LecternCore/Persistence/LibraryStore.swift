@@ -225,12 +225,41 @@ public actor LibraryStore {
             try requireEditable(moduleUnlocked(moduleID))
             var lecture = try readLecture(moduleID, lectureID)
             guard !lecture.isArchived else { throw LibraryError.invalid("Restore this lecture before editing it.") }
+            let previous = lecture
             let result = try mutation(&lecture)
             guard !lecture.isArchived else { throw LibraryError.invalid("Use setLectureArchived to archive a lecture.") }
             guard lecture.id == lectureID, lecture.moduleID == moduleID else { throw LibraryError.invalid("Lecture identity cannot change.") }
-            lecture.updatedAt = Date(); try validate(lecture)
+            let now = Date()
+            reconcileCardMakingCompletion(from: previous, to: &lecture, at: now)
+            lecture.updatedAt = now; try validate(lecture)
             try write(lecture, to: lectureDirectory(moduleID, lectureID).appendingPathComponent("lecture.json"))
             return (lecture, result)
+        }
+    }
+    /// Timestamp only real effective-status transitions. Old complete records remain undated
+    /// until they are reopened and completed again; `updatedAt` cannot identify completion.
+    private func reconcileCardMakingCompletion(from previous: Lecture, to updated: inout Lecture, at date: Date) {
+        // Chat, notes, preferences, and job-only writes do not affect card-making completion.
+        // Avoid reparsing card math and coverage under the library lock for those common writes.
+        guard previous.cards == updated.cards,
+              previous.progressOverride == updated.progressOverride,
+              previous.pageCount == updated.pageCount,
+              previous.slides.map(\.isSelected) == updated.slides.map(\.isSelected) else {
+            reconcileChangedCardMakingCompletion(from: previous, to: &updated, at: date)
+            return
+        }
+        updated.cardMakingCompletedAt = previous.cardMakingCompletedAt
+    }
+
+    private func reconcileChangedCardMakingCompletion(from previous: Lecture, to updated: inout Lecture, at date: Date) {
+        let wasComplete = DashboardBuilder.cardMakingCompletionStatus(for: previous) == .done
+        let isComplete = DashboardBuilder.cardMakingCompletionStatus(for: updated) == .done
+        switch (wasComplete, isComplete) {
+        // Library JSON uses ISO 8601 at whole-second precision; canonicalize before returning
+        // the in-memory lecture so a reload does not appear to change the event time.
+        case (false, true): updated.cardMakingCompletedAt = Date(timeIntervalSince1970: date.timeIntervalSince1970.rounded(.down))
+        case (true, true): updated.cardMakingCompletedAt = previous.cardMakingCompletedAt
+        case (_, false): updated.cardMakingCompletedAt = nil
         }
     }
     public nonisolated func assertExternalDestination(_ url: URL) throws {
@@ -326,6 +355,7 @@ public actor LibraryStore {
             throw LibraryError.invalid("This lecture has no slides to add to. Import the PDFs as a new lecture instead.")
         }
         let added = try urls.reduce(0) { $0 + (try PDFMerge.pageCount(of: $1)) }
+        let previous = lecture
         let temp = lectureDirectory(moduleID, lectureID).appendingPathComponent("source-append-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: temp) }
         let total = try PDFMerge.merge([source] + urls, to: temp)
@@ -334,7 +364,9 @@ public actor LibraryStore {
         lecture.pageCount = total
         lecture.slides += (old..<total).map { SlideState(pageIndex: $0) }
         lecture.viewPreferences.focusedPageIndex = old
-        lecture.updatedAt = Date()
+        let now = Date()
+        reconcileCardMakingCompletion(from: previous, to: &lecture, at: now)
+        lecture.updatedAt = now
         try validate(lecture)
         // PDF first: if writing the metadata then fails, the extra pages are simply not part of the lecture yet.
         _ = try FileManager.default.replaceItemAt(source, withItemAt: temp)

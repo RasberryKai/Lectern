@@ -54,48 +54,21 @@ struct PrepareView: View {
     // MARK: Focused slide
 
     @ViewBuilder private var center: some View {
-        if let index = model.focusedPageIndex, let slide = model.slide(index),
-           let position = model.filteredSlides.firstIndex(where: { $0.pageIndex == index }) {
+        if let index = model.focusedPageIndex, model.slide(index) != nil,
+           model.filteredSlides.contains(where: { $0.pageIndex == index }) {
             let page = index + 1
-            let cards = model.cards(from: page)
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
                 if let landed = model.landedGenerate { LandingBanner(model: model, job: landed) }
                 ForEach(Array(model.lecture.skippedSlides.filter { $0.slide == page }.suffix(1).enumerated()), id: \.offset) { _, skipped in
                     Label("AI skipped this slide: \(skipped.reason)", systemImage: "arrow.uturn.right")
                         .font(Theme.small).foregroundStyle(Theme.amber)
                 }
-                HStack {
-                    Text("Slide \(page)").eyebrow()
-                    Spacer()
-                    slideNavigation("chevron.left", delta: -1)
-                    Text("\(position + 1) / \(model.filteredSlides.count)")
-                        .font(Theme.caption).foregroundStyle(Theme.quiet).monospacedDigit()
-                    slideNavigation("chevron.right", delta: 1)
-                }
                 ZoomableSlideView(sourceURL: sourceURL, pageIndex: index)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .layoutPriority(1)
-                HStack(spacing: 8) {
-                    Button { Task { await model.toggleSelection(index) } } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: slide.isSelected ? "checkmark.square.fill" : "square")
-                                .foregroundStyle(slide.isSelected ? Theme.accentText : Theme.faint)
-                            Text(slide.isSelected ? "Used for cards" : "Use for cards").fontWeight(.medium)
-                            ShortcutKey(text: "Space")
-                        }
-                    }
-                    .buttonStyle(.plain).disabled(model.readOnly)
-                    Spacer(minLength: 4)
-                    Button(cards.isEmpty ? "No cards from this slide" : "\(Format.count(cards.count, "card")) from this slide") {
-                        model.askVisible = true
-                        model.panes.setTab(.content, for: .prepare)
-                    }
-                    .buttonStyle(LinkButtonStyle(color: Theme.quiet))
-                }
-                .font(Theme.body)
                 if model.notesVisible { notes(index: index, page: page) }
             }
-            .padding(.horizontal, 40).padding(.vertical, 24)
+            .padding(8)
         } else {
             VStack(spacing: 8) {
                 Text(model.lecture.pageCount == 0 ? "This lecture has no slides." : model.filteredSlides.isEmpty ? "No slides match this filter." : "Choose a slide on the left.")
@@ -103,18 +76,6 @@ struct PrepareView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-    }
-
-    private func slideNavigation(_ icon: String, delta: Int) -> some View {
-        Button { model.moveFocus(delta) } label: {
-            Image(systemName: icon).font(.system(size: 13))
-                .frame(width: 24, height: 24)
-                .background(Theme.surface, in: Circle())
-                .overlay(Circle().strokeBorder(Theme.borderStrong))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(delta < 0 ? "Previous slide" : "Next slide")
-        .disabled(delta < 0 ? model.focusedPageIndex == model.filteredSlides.first?.pageIndex : model.focusedPageIndex == model.filteredSlides.last?.pageIndex)
     }
 
     private func notes(index: Int, page: Int) -> some View {

@@ -2,6 +2,9 @@ import Foundation
 
 public enum LectureProgressStatus: String, Codable, CaseIterable, Equatable, Sendable {
     case notImported, preparing, toReview, toExport, done
+
+    /// Export is a separate action after card making has been completed.
+    public var cardMakingStatus: Self { self == .toExport ? .done : self }
 }
 
 public enum PreparationReason: Equatable, Sendable {
@@ -18,6 +21,7 @@ public struct LectureProgress: Equatable, Identifiable, Sendable {
     public let automaticStatus: LectureProgressStatus
     public let statusOverride: LectureProgressStatus?
     public var status: LectureProgressStatus { statusOverride ?? automaticStatus }
+    public let cardMakingCompletedAt: Date?
     public let reviewCardCount: Int
     public let proposalCount: Int
     public let readyExportCount: Int
@@ -81,6 +85,8 @@ public struct ModuleProgress: Equatable, Identifiable, Sendable {
     public let totals: ProgressTotals
     public let nextUp: [NextUpAction]
     public let pace: ModulePace
+    /// Completed imported lectures and manually completed empty slots, using the same slot semantics as the Overview.
+    public var cardMakingDoneCount: Int { slots.count { $0.status.cardMakingStatus == .done } }
     public var id: UUID { module.id }
 }
 
@@ -114,7 +120,17 @@ public enum DashboardBuilder {
         return DashboardSnapshot(modules: active, archivedModules: modules.filter(\.isArchived), totals: totals)
     }
 
-    private static func lectureProgress(_ lecture: Lecture) -> LectureProgress {
+    static func lectureProgress(_ lecture: Lecture) -> LectureProgress {
+        progress(lecture, includeWaitingForJobs: true)
+    }
+
+    /// A running job temporarily adds a dashboard preparation reason, but does not undo
+    /// completed card making unless its eventual result changes cards or lecture coverage.
+    static func cardMakingCompletionStatus(for lecture: Lecture) -> LectureProgressStatus {
+        progress(lecture, includeWaitingForJobs: false).status.cardMakingStatus
+    }
+
+    private static func progress(_ lecture: Lecture, includeWaitingForJobs: Bool) -> LectureProgress {
         let cards = lecture.cards.filter { !$0.isSuperseded }
         var review = 0, proposals = 0, ready = 0, changed = 0
         for card in cards {
@@ -138,10 +154,11 @@ public enum DashboardBuilder {
         } else if cards.isEmpty {
             reasons.append(.addCards)
         }
-        if !running.isEmpty { reasons.append(.waitingForJobs(jobIDs: running)) }
+        if includeWaitingForJobs && !running.isEmpty { reasons.append(.waitingForJobs(jobIDs: running)) }
         let status: LectureProgressStatus = review > 0 ? .toReview : !reasons.isEmpty ? .preparing : ready > 0 ? .toExport : .done
         return LectureProgress(lectureID: lecture.id, name: lecture.name, automaticStatus: status,
-                               statusOverride: lecture.progressOverride, reviewCardCount: review,
+                               statusOverride: lecture.progressOverride, cardMakingCompletedAt: lecture.cardMakingCompletedAt,
+                               reviewCardCount: review,
                                proposalCount: proposals, readyExportCount: ready, changedExportCount: changed,
                                selectedPageCount: selected.count, coveredSelectedPageCount: selected.count - missing.count,
                                preparationReasons: reasons)

@@ -24,9 +24,15 @@ struct ModuleSettingsSheet: View {
     @State private var saving = false
     @State private var runningJobCount = 0
     @State private var confirmCancelJobs = false
-    @State private var section = Section.general
+    @State private var section: Section
     @State private var studyDraft = StudyOverrides()
     @State private var savedStudy = StudyOverrides()
+
+    init(moduleID: UUID, opensToStudy: Bool = false, onClose: (() -> Void)? = nil) {
+        self.moduleID = moduleID
+        self.onClose = onClose
+        _section = State(initialValue: opensToStudy ? .study : .general)
+    }
 
     var body: some View {
         ScrollView {

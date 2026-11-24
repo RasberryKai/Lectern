@@ -13,7 +13,10 @@ struct LibraryWindow: View {
             if model.showNewModule {
                 ModuleCreationForm(onClose: { model.showNewModule = false })
             } else if let moduleID = model.settingsModuleID {
-                ModuleSettingsSheet(moduleID: moduleID) { model.settingsModuleID = nil }
+                ModuleSettingsSheet(moduleID: moduleID, opensToStudy: model.showModuleStudySettingsOnOpen) {
+                    model.settingsModuleID = nil
+                    model.showModuleStudySettingsOnOpen = false
+                }
                     .background(Theme.canvasGrid.ignoresSafeArea(edges: .top))
             } else if let ref = model.activeLecture {
                 LectureWindow(ref: ref).id(ref)
@@ -111,7 +114,8 @@ private struct Sidebar: View {
                 .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 6).launchEntrance(row: 2)
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array((model.dashboard?.modules ?? []).enumerated()), id: \.element.id) { index, progress in
+                    let active = (model.dashboard?.modules ?? []).filter { !examHasPassed($0.module) }
+                    ForEach(Array(active.enumerated()), id: \.element.id) { index, progress in
                         SidebarRow(title: progress.module.name,
                                    detail: "\(progress.cardMakingDoneCount) / \(progress.totals.plannedLectureCount)",
                                    isSelected: isSelected(progress.module.id)) {
@@ -185,8 +189,13 @@ private struct Sidebar: View {
         }
     }
 
+    private func examHasPassed(_ module: Module) -> Bool {
+        (module.examDate?.daysRemaining(from: model.studyNow) ?? 0) < 0
+    }
+
     @ViewBuilder private var archived: some View {
-        let archived = model.archivedModules
+        // An exam date changes navigation, while manual archiving controls editability.
+        let archived = model.archivedModules + model.activeModules.filter(examHasPassed)
         if !archived.isEmpty {
             Button { withAnimation(.easeOut(duration: 0.15)) { archivedExpanded.toggle() } } label: {
                 HStack {

@@ -150,18 +150,24 @@ struct StudySessionView: View {
                             .lineLimit(1)
                     }
                     .buttonStyle(SecondaryButtonStyle())
-                    .help("Show source slide · S")
+                    .help("Show source slide")
                     .disabled(session.editDraft != nil)
                 }
             }
-            if session.editDraft != nil { editor }
+            if session.editDraft != nil {
+                editor("Front", field: .front, text: draftText(\.front))
+                    .onAppear { focus = .front }
+            }
             else {
                 RenderedCardText(text: entry.card.front, size: 26, emphasized: true)
                     .accessibilityLabel("Front, \(entry.card.front)")
             }
             Divider()
 
-            if session.revealed {
+            if session.editDraft != nil {
+                editor("Back", field: .back, text: draftText(\.back))
+                editActions
+            } else if session.revealed {
                 RenderedCardText(text: entry.card.back, size: 17, emphasized: false)
                     .accessibilityLabel("Back, \(entry.card.back)")
                 Divider()
@@ -187,25 +193,32 @@ struct StudySessionView: View {
         .accessibilityLabel("Flashcard")
     }
 
-    private var editor: some View {
+    private func draftText(_ side: WritableKeyPath<StudySessionModel.EditDraft, String>) -> Binding<String> {
+        Binding(get: { session.editDraft?[keyPath: side] ?? "" }, set: { session.editDraft?[keyPath: side] = $0 })
+    }
+
+    private func editor(_ side: String, field: EditorField, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextEditor(text: Binding(get: { session.editDraft ?? "" }, set: { session.editDraft = $0 }))
-                .font(.system(size: 22, weight: .semibold))
+            Text(side).eyebrow().accessibilityHidden(true)
+            TextEditor(text: text)
+                .font(field == .front ? .system(size: 22, weight: .semibold) : .system(size: 17))
                 .scrollContentBackground(.hidden)
                 .foregroundStyle(Theme.ink)
                 .frame(minHeight: 90, idealHeight: 112, maxHeight: 160)
                 .padding(4)
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong, style: StrokeStyle(dash: [4, 3])))
-                .focused($focus, equals: .front)
-                .accessibilityLabel("Card front")
-                .onAppear { focus = .front }
+                .focused($focus, equals: field)
+                .accessibilityLabel("Card \(side.lowercased())")
+        }
+        .disabled(session.isBusy)
+    }
 
-            HStack {
-                Button("Save front") { Task { await session.saveEdit() } }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(session.editDraft?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-                Button("Cancel") { cancelEdit() }.buttonStyle(SecondaryButtonStyle())
-            }
+    private var editActions: some View {
+        HStack {
+            Button("Save card") { Task { await session.saveEdit() } }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(session.editDraft?.canSave != true)
+            Button("Cancel") { cancelEdit() }.buttonStyle(SecondaryButtonStyle())
         }
         .disabled(session.isBusy)
     }
@@ -286,18 +299,18 @@ struct StudySessionView: View {
     }
 
     private var recallHints: some View {
-        Text("Space show · 1 Got it · 2 Missed · S slide · G Prepare")
+        Text("Space show · 1 Got it · 2 Missed · G Prepare")
     }
 
     private var navigationHints: some View {
-        Text("A Ask AI · E edit · D disable · U undo · Esc end")
+        Text("E edit · D disable · Esc end")
     }
 
     private func toast(_ message: String) -> some View {
         HStack(spacing: 10) {
             Text(message).font(Theme.small)
                 .accessibilityAddTraits(.updatesFrequently)
-            if session.canUndo {
+            if session.canUndoDisable {
                 toolButton("Undo", key: "U") { Task { await session.undoLast() } }
             }
         }
@@ -427,7 +440,7 @@ struct StudySessionView: View {
             }
             Button("Back to \(session.backLabel)") { Task { await session.back() } }
                 .buttonStyle(SecondaryButtonStyle())
-            if session.canUndo {
+            if session.canUndoDisable {
                 toolButton("Undo", key: "U") { Task { await session.undoLast() } }
             }
         }
@@ -656,11 +669,9 @@ struct StudySessionView: View {
         switch letter {
         case "1": Task { await session.grade(.good) }; return true
         case "2": Task { await session.grade(.again) }; return true
-        case "s": session.showSlide(cycle: true); focus = nil; return true
         case "g":
             if session.revealed, let page = session.sourcePage { Task { await session.openPrepare(page: page) } }
             return true
-        case "a": openAsk(); return true
         case "e": session.beginEdit(); return true
         case "d": Task { await session.disable() }; return true
         default: return false

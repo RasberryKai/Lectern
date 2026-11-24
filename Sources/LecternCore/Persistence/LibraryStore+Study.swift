@@ -130,16 +130,20 @@ extension LibraryStore {
     }
 
     public func editStudyCardFront(_ entry: StudyCard, front: String) throws -> Card {
+        try editStudyCard(entry, front: front, back: entry.card.back)
+    }
+
+    public func editStudyCard(_ entry: StudyCard, front: String, back: String) throws -> Card {
         try transaction(moduleID: entry.moduleID, lectureID: entry.lectureID) { lecture in
             let index = try Self.studyCardIndex(entry, in: lecture, verdict: .good)
             let old = lecture.cards[index]
-            guard front != old.front else { return old }
+            guard front != old.front || back != old.back else { return old }
             let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
             try LectureReducer.reduce(&lecture, action: .commitEdit(
-                cardID: old.id, front: front, back: old.back, sourcePages: old.sourcePages
+                cardID: old.id, front: front, back: back, sourcePages: old.sourcePages
             ), now: now)
-            // Keep choices for the exact math spans that still occur, including the untouched back.
-            let spans = Set([front, old.back].flatMap(FlashcardMathAnalyzer.analyze).map(\.source))
+            // Keep math choices for spans that still occur on either side.
+            let spans = Set([front, back].flatMap(FlashcardMathAnalyzer.analyze).map(\.source))
             lecture.cards[index].mathInterpretations = old.mathInterpretations.filter { spans.contains($0.key) }
             if let issue = lecture.issues(for: lecture.cards[index]).first {
                 throw LibraryError.invalid(issue.message)

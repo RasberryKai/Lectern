@@ -127,7 +127,11 @@ struct StudyPersistenceTests {
         let entry = try await firstCard(in: module.id, store: store)
         let first = try await grade(.good, entry, in: store)
         var current = try await firstCard(in: module.id, store: store)
-        current.card = try await store.editStudyCardFront(current, front: "Reworded question")
+        await #expect(throws: LibraryError.self) {
+            try await store.editStudyCard(current, front: "Reworded question", back: " ")
+        }
+        #expect(try await firstCard(in: module.id, store: store).card == current.card)
+        current.card = try await store.editStudyCard(current, front: "Reworded question", back: "Reworded answer")
         #expect(current.card.verdict == .good)
         #expect(current.card.currentRevisionID != entry.card.currentRevisionID)
         #expect(current.card.history.count == 2)
@@ -148,6 +152,7 @@ struct StudyPersistenceTests {
         #expect(deck.overrides.newCardLimit == 7)
         #expect(deck.introducedToday == 1)
         #expect(deck.approvedCards.first?.card.front == "Reworded question")
+        #expect(deck.approvedCards.first?.card.back == "Reworded answer")
         #expect(deck.approvedCards.first?.memory == first)
     }
 

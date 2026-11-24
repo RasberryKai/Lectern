@@ -386,7 +386,7 @@ public struct SkippedSlide: Codable, Equatable, Sendable {
     public init(slide: Int, reason: String) { self.slide = slide; self.reason = reason }
 }
 public struct Lecture: Codable, Equatable, Identifiable, Sendable {
-    private enum CodingKeys: String, CodingKey { case schemaVersion,id,moduleID,name,sourceFilename,pageCount,createdAt,updatedAt,slides,cards,threads,currentChat,archivedChats,learningPoints,jobs,skippedSlides,archivedAt,progressOverride,viewPreferences }
+    private enum CodingKeys: String, CodingKey { case schemaVersion,id,moduleID,name,sourceFilename,pageCount,createdAt,updatedAt,slides,cards,threads,currentChat,archivedChats,learningPoints,jobs,skippedSlides,archivedAt,progressOverride,cardMakingCompletedAt,viewPreferences }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try c.decode(Int.self, forKey: .schemaVersion); id = try c.decode(UUID.self, forKey: .id); moduleID = try c.decode(UUID.self, forKey: .moduleID); name = try c.decode(String.self, forKey: .name)
@@ -396,7 +396,7 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
         if !c.contains(.currentChat) { currentChat.id = threads.first?.id ?? id }
         archivedChats = try c.decodeIfPresent([LectureChat].self, forKey: .archivedChats) ?? []
         learningPoints = try c.decodeIfPresent([LearningPoint].self, forKey: .learningPoints) ?? threads.flatMap(\.learningPoints)
-        jobs = try c.decode([Job].self, forKey: .jobs); skippedSlides = try c.decode([SkippedSlide].self, forKey: .skippedSlides); archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt); progressOverride = try c.decodeIfPresent(LectureProgressStatus.self, forKey: .progressOverride)
+        jobs = try c.decode([Job].self, forKey: .jobs); skippedSlides = try c.decode([SkippedSlide].self, forKey: .skippedSlides); archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt); progressOverride = try c.decodeIfPresent(LectureProgressStatus.self, forKey: .progressOverride); cardMakingCompletedAt = try c.decodeIfPresent(Date.self, forKey: .cardMakingCompletedAt)
         viewPreferences = try c.decode(ViewPreferences.self, forKey: .viewPreferences)
     }
 
@@ -420,8 +420,10 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
     public var archivedAt: Date?
     public var isArchived: Bool { archivedAt != nil }
     public var progressOverride: LectureProgressStatus?
+    /// The first time this lecture became complete for card making. Legacy records have no reliable event time.
+    public var cardMakingCompletedAt: Date?
     public var viewPreferences: ViewPreferences
-    public init(id: UUID = UUID(), moduleID: UUID, name: String, sourceFilename: String = "", pageCount: Int = 0, createdAt: Date = Date(), updatedAt: Date? = nil, slides: [SlideState]? = nil, cards: [Card] = [], threads: [SlideThread] = [], jobs: [Job] = [], skippedSlides: [SkippedSlide] = [], viewPreferences: ViewPreferences = .default, schemaVersion: Int = 1) {
-        self.schemaVersion = schemaVersion; self.id = id; self.moduleID = moduleID; self.name = name; self.sourceFilename = sourceFilename; self.pageCount = pageCount; self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt; self.slides = slides ?? (0..<max(0, pageCount)).map { SlideState(pageIndex: $0) }; self.cards = cards; self.threads = threads; self.currentChat = LectureChat.migrating(threads); self.archivedChats = []; self.learningPoints = threads.flatMap(\.learningPoints); self.jobs = jobs; self.skippedSlides = skippedSlides; self.viewPreferences = viewPreferences
+    public init(id: UUID = UUID(), moduleID: UUID, name: String, sourceFilename: String = "", pageCount: Int = 0, createdAt: Date = Date(), updatedAt: Date? = nil, slides: [SlideState]? = nil, cards: [Card] = [], threads: [SlideThread] = [], jobs: [Job] = [], skippedSlides: [SkippedSlide] = [], cardMakingCompletedAt: Date? = nil, viewPreferences: ViewPreferences = .default, schemaVersion: Int = 1) {
+        self.schemaVersion = schemaVersion; self.id = id; self.moduleID = moduleID; self.name = name; self.sourceFilename = sourceFilename; self.pageCount = pageCount; self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt; self.slides = slides ?? (0..<max(0, pageCount)).map { SlideState(pageIndex: $0) }; self.cards = cards; self.threads = threads; self.currentChat = LectureChat.migrating(threads); self.archivedChats = []; self.learningPoints = threads.flatMap(\.learningPoints); self.jobs = jobs; self.skippedSlides = skippedSlides; self.cardMakingCompletedAt = cardMakingCompletedAt; self.viewPreferences = viewPreferences
     }
 }
