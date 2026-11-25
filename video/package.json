@@ -1,0 +1,21 @@
+{
+  "name": "lectern-launch-video",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "node scripts/render.mjs",
+    "render:cloud": "node scripts/render.mjs --browser-executable=/opt/pw-browsers/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.547",
+    "@remotion/fonts": "4.0.547",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.547"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.6.3"
+  }
+}
