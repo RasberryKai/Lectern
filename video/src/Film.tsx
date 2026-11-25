@@ -61,9 +61,8 @@ const cuesFor = (s: (typeof SCENES)[number]): Cue[] => {
 };
 
 export const Film: React.FC = () => {
-  const trim = Math.round(MUSIC.offsetSeconds * FPS);
-  const filtered = curve(MUSIC.filteredCurve);
-  const full = curve(MUSIC.fullCurve);
+  const start = beats(MUSIC.dropAtBeat) - Math.round(MUSIC.dropInFileSeconds * FPS);
+  const vol = curve(MUSIC.volumeCurve);
   return (
     <AbsoluteFill style={{background: '#000'}}>
       {sceneStarts.map(({id, from, duration}, i) => {
@@ -77,8 +76,14 @@ export const Film: React.FC = () => {
           </Sequence>
         );
       })}
-      <Audio src={staticFile(MUSIC.filtered)} trimBefore={trim} volume={(f) => filtered(f) * endFade(f)} />
-      <Audio src={staticFile(MUSIC.full)} trimBefore={trim} volume={(f) => full(f) * endFade(f)} />
+      {/* Music: delayed (or trimmed) so its drop lands on MUSIC.dropAtBeat */}
+      <Sequence from={Math.max(0, start)} layout="none" name="Music">
+        <Audio
+          src={staticFile(MUSIC.file)}
+          trimBefore={Math.max(0, -start)}
+          volume={(f) => vol(f + Math.max(0, start)) * endFade(f + Math.max(0, start))}
+        />
+      </Sequence>
     </AbsoluteFill>
   );
 };

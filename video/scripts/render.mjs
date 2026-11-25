@@ -3,7 +3,7 @@
 import {execFileSync} from 'node:child_process';
 import {mkdirSync, rmSync} from 'node:fs';
 
-const out = 'out/lectern-launch-s1-3.mp4';
+const out = 'out/lectern-launch-s1-6.mp4';
 const raw = 'out/_raw.mp4';
 const extra = process.argv.slice(2);
 mkdirSync('out', {recursive: true});
