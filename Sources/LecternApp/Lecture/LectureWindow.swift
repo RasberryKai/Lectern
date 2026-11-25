@@ -354,7 +354,7 @@ struct LectureTopBar: View {
                 case .coverage: coverageTrailing
                 case .review: reviewTrailing
                 }
-                if model.mode != .coverage { workspaceOptions }
+                if model.mode != .coverage { paneToggles }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -364,30 +364,29 @@ struct LectureTopBar: View {
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
-    private var workspaceOptions: some View {
-        Menu {
-            if model.mode == .prepare {
-                Picker("Show slides", selection: $model.prepareFilter) {
-                    Text("All").tag(PrepareFilter.all)
-                    Text("Selected").tag(PrepareFilter.selected)
-                }
-                Button("Select all slides") { Task { await model.setAllSelected(true) } }.disabled(model.readOnly)
-                Button("Deselect all slides") { Task { await model.setAllSelected(false) } }.disabled(model.readOnly)
-                Divider()
-                Picker("Thumbnail size", selection: $model.thumbnailSize) {
-                    Text("Compact").tag(ThumbnailSize.compact)
-                    Text("Regular").tag(ThumbnailSize.regular)
-                    Text("Large").tag(ThumbnailSize.large)
-                }
-                Toggle("Show thumbnails  ⌘B", isOn: $model.thumbnailsVisible)
-                Toggle("Show notes  ⌘J", isOn: $model.notesVisible)
-            } else {
-                Toggle("Show card list", isOn: $model.panes.reviewLeftVisible)
+    /// Same icon buttons as the Study header: one per side pane.
+    private var paneToggles: some View {
+        let leftVisible = model.mode == .prepare ? model.thumbnailsVisible : model.panes.reviewLeftVisible
+        let leftName = model.mode == .prepare ? "slides" : "card list"
+        return HStack(spacing: 6) {
+            Button {
+                if model.mode == .prepare { model.thumbnailsVisible.toggle() } else { model.panes.reviewLeftVisible.toggle() }
+            } label: {
+                Image(systemName: "sidebar.left").frame(width: 14, height: 16)
             }
-            Toggle("Show right pane  ⌘⌥B", isOn: $model.askVisible)
-        } label: { Image(systemName: "ellipsis.circle") }
-        .menuStyle(.borderlessButton).fixedSize()
-        .accessibilityLabel("Workspace options")
+            .buttonStyle(SecondaryButtonStyle())
+            .accessibilityLabel(leftVisible ? "Hide \(leftName)" : "Show \(leftName)")
+            .help(model.mode == .prepare ? "Toggle slides · ⌘B" : "Toggle card list")
+            Button {
+                model.askVisible.toggle()
+                if !model.askVisible, focus.wrappedValue == .ask { focus.wrappedValue = nil }
+            } label: {
+                Image(systemName: "sidebar.right").frame(width: 14, height: 16)
+            }
+            .buttonStyle(SecondaryButtonStyle())
+            .accessibilityLabel(model.askVisible ? "Hide right pane" : "Show right pane")
+            .help("Toggle right pane · ⌘⌥B")
+        }
     }
 
     @ViewBuilder private var presentationTitle: some View {
@@ -435,7 +434,7 @@ struct LectureTopBar: View {
     }
 
     @ViewBuilder private var prepareTrailing: some View {
-        coverageSummary
+        slidePosition
         if let running = model.runningGenerate {
             Button("Generating…") {}.buttonStyle(SecondaryButtonStyle(foreground: Theme.quiet, fill: Theme.inset)).disabled(true)
                 .help("Writing cards from \(Format.count(running.pages.count, "slide"))")
@@ -452,6 +451,20 @@ struct LectureTopBar: View {
         SegmentedControl(options: [(false, "Front"), (true, "Front + back")],
                          selection: $model.coverageShowsBacks, activeFill: Theme.inset, activeText: Theme.ink)
             .help("Show each card's back under its front")
+    }
+
+    /// Where the focused slide sits in the sidebar's current All / Selected list.
+    @ViewBuilder private var slidePosition: some View {
+        let slides = model.filteredSlides
+        if !slides.isEmpty {
+            let position = slides.firstIndex { $0.pageIndex == model.focusedPageIndex }.map { "\($0 + 1)" } ?? "–"
+            let scope = model.prepareFilter == .selected ? "selected slides" : "slides"
+            Text("\(Text(position).foregroundStyle(Theme.ink).fontWeight(.semibold)) / \(slides.count)")
+                .font(Theme.body).foregroundStyle(Theme.quiet).monospacedDigit()
+                .fixedSize()
+                .help("Slide \(position) of \(slides.count) \(scope)")
+                .accessibilityLabel("Slide \(position) of \(slides.count) \(scope)")
+        }
     }
 
     private var coverageSummary: some View {

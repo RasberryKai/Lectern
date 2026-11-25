@@ -16,6 +16,7 @@ struct PrepareView: View {
                 Divider().overlay(Theme.border)
                 thumbnails
             }
+            .contextMenu { sidebarOptions }
         } stage: {
             center
         } right: {
@@ -27,6 +28,19 @@ struct PrepareView: View {
     }
 
     // MARK: Thumbnails
+
+    /// Former header ⋯ menu items that aren't pane toggles; right-click the slide list.
+    @ViewBuilder private var sidebarOptions: some View {
+        Button("Select all slides") { Task { await model.setAllSelected(true) } }.disabled(model.readOnly)
+        Button("Deselect all slides") { Task { await model.setAllSelected(false) } }.disabled(model.readOnly)
+        Divider()
+        Picker("Thumbnail size", selection: $model.thumbnailSize) {
+            Text("Compact").tag(ThumbnailSize.compact)
+            Text("Regular").tag(ThumbnailSize.regular)
+            Text("Large").tag(ThumbnailSize.large)
+        }
+        Toggle("Show notes  ⌘J", isOn: $model.notesVisible)
+    }
 
     private var thumbnails: some View {
         CenteredThumbnailList(pageIndices: model.filteredSlides.map(\.pageIndex), focusedPageIndex: model.focusedPageIndex) { pageIndex in
