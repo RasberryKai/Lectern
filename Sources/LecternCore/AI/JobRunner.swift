@@ -305,6 +305,7 @@ public actor JobRunner {
             "purpose": kind.rawValue
         ]
         job.inputHash = try Self.inputHash(request)
+        job.pdfLayoutRevision = initial.pdfLayoutRevision
         var persistedRequest = request; persistedRequest.pdf = nil
         try JSONEncoder().encode(Snapshot(request: persistedRequest, learningPointIDs: pointIDs, generationDrafts: generationDrafts)).write(to: directory.appendingPathComponent("snapshot.json"), options: .atomic)
         let frozenJob = job
@@ -312,6 +313,7 @@ public actor JobRunner {
         try Task.checkCancellation()
         _ = try await store.updateLecture(moduleID: moduleID, lectureID: lectureID) { lecture in
             try Task.checkCancellation()
+            guard lecture.pdfLayoutRevision == frozenJob.pdfLayoutRevision else { throw LectureError.staleSnapshot }
             if lecture.jobs.contains(where: { existing in
                 existing.state == .running && (kind == .generate ? existing.kind == .generate :
                     (cardID != nil && kind == .revise ? existing.kind == .revise && existing.targetCardID == cardID :
@@ -713,6 +715,9 @@ public actor JobRunner {
         guard active[jobID] == nil, !pending.contains(where: { $0.job.id == jobID }) else { throw AIError.configuration("Job is still active.") }
         let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
         guard var job = lecture.jobs.first(where: { $0.id == jobID }), [.failed, .cancelled, .interrupted].contains(job.state) else { throw AIError.configuration("Only failed, cancelled or interrupted jobs can be retried.") }
+        guard job.pdfLayoutRevision == lecture.pdfLayoutRevision else {
+            throw AIError.configuration("The slide order changed since this job. Start a new request.")
+        }
         if job.kind == .chat, let versions = job.chatCardVersions,
            !versions.allSatisfy({ version in lecture.cards.contains { version.matches($0) } }) {
             throw AIError.configuration("These flashcards changed since this chat request. Send your message again to use the current cards.")
@@ -731,6 +736,7 @@ public actor JobRunner {
         try Task.checkCancellation()
         _ = try await store.updateLecture(moduleID: moduleID, lectureID: lectureID) { lecture in
             try Task.checkCancellation()
+            guard lecture.pdfLayoutRevision == frozen.pdfLayoutRevision else { throw LectureError.staleSnapshot }
             guard let i = lecture.jobs.firstIndex(where: { $0.id == jobID }), [.failed, .cancelled, .interrupted].contains(lecture.jobs[i].state) else { throw AIError.configuration("This job has already landed.") }
             if frozen.kind == .chat, let versions = frozen.chatCardVersions,
                !versions.allSatisfy({ version in lecture.cards.contains { version.matches($0) } }) {

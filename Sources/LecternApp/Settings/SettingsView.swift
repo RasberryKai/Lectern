@@ -553,6 +553,31 @@ private struct LibraryTab: View {
                 }
                 .panel()
                 VStack(alignment: .leading, spacing: 12) {
+                    Text("Backup").font(.headline)
+                    Text("Save your entire library, study history, and app preferences in one ZIP file. AI sign-ins and API keys stay in their credential stores.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                    HStack(spacing: 10) {
+                        Button("Download backup…") { saveBackup() }
+                            .buttonStyle(PrimaryButtonStyle()).disabled(model.backupStatus == .saving)
+                        if model.backupStatus == .saving {
+                            ProgressView().controlSize(.small)
+                            Text("Creating backup…").font(Theme.small).foregroundStyle(Theme.quiet)
+                        }
+                    }
+                    if case .saved(let url) = model.backupStatus {
+                        HStack {
+                            Label("Saved \(url.lastPathComponent)", systemImage: "checkmark.circle")
+                                .font(Theme.small).foregroundStyle(Theme.good).textSelection(.enabled)
+                            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                                .buttonStyle(LinkButtonStyle())
+                        }
+                    }
+                    if case .failed(let message) = model.backupStatus {
+                        ErrorBanner(message: message)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).panel()
+                VStack(alignment: .leading, spacing: 12) {
                     Text("Import from the earlier apps").font(.headline)
                     Text("Import a Slide Learning folder or Flashcard Reviewer backup. Lectern reads the originals and skips items already imported from the same path.")
                         .font(Theme.small).foregroundStyle(Theme.quiet)
@@ -570,6 +595,16 @@ private struct LibraryTab: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 40).padding(.vertical, 32)
         }
+    }
+
+    private func saveBackup() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        let date = Date.now.formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day())
+        panel.nameFieldStringValue = "Lectern Backup \(date).zip"
+        panel.prompt = "Save Backup"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await model.exportLibraryBackup(to: url) }
     }
 
     private func importSlides() async {

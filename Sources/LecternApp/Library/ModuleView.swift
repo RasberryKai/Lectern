@@ -234,7 +234,7 @@ struct ModuleView: View {
                                                           lectureAt: lectureAccepting, slotAt: { point in
             emptyRowFrames.first { $0.value.contains(point) }?.key
         }) { urls, lectureID, slot in
-            if let lectureID { Task { await model.appendPDFs(urls, to: LectureRef(moduleID: moduleID, lectureID: lectureID)) } }
+            if let lectureID { Task { await model.openPDFEditor(for: LectureRef(moduleID: moduleID, lectureID: lectureID), adding: urls) } }
             else { Task { await model.importPDFs(urls, into: moduleID, slot: slot) } }
         })
     }
@@ -402,7 +402,7 @@ private struct LectureRow: View {
                 model.renamingLecture = LectureRef(moduleID: lecture.moduleID, lectureID: lecture.id)
             }.disabled(archived)
             Button("Move lecture…") { model.movingLecture = ref }.disabled(archived)
-            Button("Add PDFs…") { Task { await model.chooseAndAppendPDFs(to: ref) } }
+            Button("Edit PDFs…") { Task { await model.openPDFEditor(for: ref) } }
                 .disabled(archived || lecture.pageCount == 0)
             if !archived, let progress {
                 Menu("Lecture status") {
@@ -421,7 +421,7 @@ private struct LectureRow: View {
     private var dropTarget: some View {
         HStack(spacing: 12) {
             Image(systemName: "plus.rectangle.on.rectangle").font(.system(size: 15, weight: .medium))
-            Text("Drop to add \(Format.count(dropCount, "PDF")) to \(Format.lectureTitle(index: index, name: lecture.name)) after slide \(lecture.pageCount)")
+            Text("Drop to add \(Format.count(dropCount, "PDF")) to \(Format.lectureTitle(index: index, name: lecture.name))")
                 .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text("You set the order next").font(Theme.small)

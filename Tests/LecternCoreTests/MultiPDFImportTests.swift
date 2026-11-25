@@ -41,6 +41,8 @@ struct MultiPDFImportTests {
         #expect(lecture.pageCount == 5)
         #expect(lecture.slides.count == 5 && lecture.slides.allSatisfy(\.isSelected))
         #expect(lecture.sourceFilename == "Part2.pdf")
+        #expect(lecture.pdfParts?.map(\.filename) == ["Part2.pdf", "Part1.pdf"])
+        #expect(lecture.pdfParts?.map(\.pageCount) == [2, 3])
         #expect(widths(store.sourceURL(moduleID: module.id, lectureID: lecture.id)) == [200, 201, 300, 301, 302])
         #expect(try await store.lectures(in: module.id).map(\.id) == [lecture.id])
     }
@@ -187,5 +189,78 @@ struct MultiPDFImportTests {
         try await store.setLectureArchived(moduleID: module.id, lectureID: withSlides.id, archived: false)
         try await store.setModuleArchived(moduleID: module.id, archived: true)
         await #expect(throws: LibraryError.self) { try await store.appendPDFs([extra], moduleID: module.id, lectureID: withSlides.id) }
+    }
+
+    @Test func editReordersAndInsertsFilesWithoutDetachingSlideContent() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let first = try writePDF("First.pdf", pages: 2, width: 100, in: root)
+        let second = try writePDF("Second.pdf", pages: 1, width: 200, in: root)
+        let extra = try writePDF("Extra.pdf", pages: 1, width: 300, in: root)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let lecture = try await store.importPDFs([first, second], name: "Lecture", moduleID: module.id)
+        let parts = lecture.editablePDFParts
+        try FileManager.default.removeItem(at: first)
+        try FileManager.default.removeItem(at: second)
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.slides[1].note = "Keep this on the second page of First.pdf"
+            $0.slides[1].isSelected = false
+            $0.viewPreferences.focusedPageIndex = 1
+            $0.cards = [Card(sourcePages: [1, 3], front: "Q", back: "A", allowedSourcePages: [1, 2, 3])]
+            $0.learningPoints = [LearningPoint(text: "Point", pages: [3])]
+            $0.threads = [SlideThread(anchorPage: 2)]
+            $0.skippedSlides = [SkippedSlide(slide: 1, reason: "Title")]
+            var message = ChatMessage(role: .assistant, text: "See [S1–3, C2] and `[S1]`.", citedPages: [1, 2, 3])
+            message.context = [.slide(2), .allSlides]
+            message.quiz = [QuizItem(question: "Where?", answer: "[S3]")]
+            $0.currentChat.messages = [message]
+        }
+
+        let edits: [LecturePDFEdit] = [.existing(parts[1], pages: 2..<3), .add(extra), .existing(parts[0], pages: 0..<2)]
+        let edited = try await store.editPDFs(edits, basedOn: parts, moduleID: module.id, lectureID: lecture.id)
+        #expect(widths(store.sourceURL(moduleID: module.id, lectureID: lecture.id)) == [200, 300, 100, 101])
+        #expect(edited.pdfParts?.map(\.filename) == ["Second.pdf", "Extra.pdf", "First.pdf"])
+        #expect(edited.slides.map(\.pageIndex) == [0, 1, 2, 3])
+        #expect(edited.slides.map(\.isSelected) == [true, true, true, false])
+        #expect(edited.slides[3].note == "Keep this on the second page of First.pdf")
+        #expect(edited.viewPreferences.focusedPageIndex == 3)
+        #expect(edited.cards[0].sourcePages == [1, 3])
+        #expect(edited.cards[0].allowedSourcePages == [1, 3, 4])
+        #expect(edited.learningPoints[0].pages == [1])
+        #expect(edited.threads[0].anchorPage == 4)
+        #expect(edited.skippedSlides[0].slide == 3)
+        #expect(edited.currentChat.messages[0].text == "See [S3, S4, S1, C2] and `[S1]`.")
+        #expect(edited.currentChat.messages[0].context == [.slide(4), .allSlides])
+        #expect(edited.currentChat.messages[0].quiz[0].answer == "[S1]")
+        #expect(try await store.loadLecture(moduleID: module.id, lectureID: lecture.id).pdfParts == edited.pdfParts)
+        await #expect(throws: LibraryError.self) {
+            try await store.editPDFs(edits, basedOn: parts, moduleID: module.id, lectureID: lecture.id)
+        }
+    }
+
+    @Test func legacyMergedPDFCanBeSplitAndReordered() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let merged = try writePDF("Merged.pdf", pages: 4, width: 100, in: root)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let legacy = try await store.createLecture(
+            Lecture(moduleID: module.id, name: "Legacy", sourceFilename: "Merged.pdf", pageCount: 4),
+            sourceURL: merged
+        )
+        let parts = legacy.editablePDFParts
+        #expect(parts.count == 1 && parts[0].canSplit)
+        let first = LecturePDFPart(filename: "First part", pageCount: 2, canSplit: true)
+        let second = LecturePDFPart(filename: "Second part", pageCount: 2, canSplit: true)
+        let edits: [LecturePDFEdit] = [.existing(second, pages: 2..<4), .existing(first, pages: 0..<2)]
+        let edited = try await store.editPDFs(edits, basedOn: parts, moduleID: module.id, lectureID: legacy.id)
+        #expect(edited.pdfParts == [second, first])
+        #expect(widths(store.sourceURL(moduleID: module.id, lectureID: legacy.id)) == [102, 103, 100, 101])
+
+        let backup = root.appendingPathComponent("lecture.json")
+        try await store.exportBackup(moduleID: module.id, lectureID: legacy.id, to: backup)
+        let restoredStore = LibraryStore(rootURL: root.appendingPathComponent("restored"))
+        let restored = try await restoredStore.restoreBackup(from: backup)
+        #expect(restored.pdfParts == [second, first])
+        #expect(widths(restoredStore.sourceURL(moduleID: module.id, lectureID: legacy.id)) == [102, 103, 100, 101])
     }
 }

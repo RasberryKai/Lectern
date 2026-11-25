@@ -20,17 +20,21 @@ nonisolated enum SidebarItem: Hashable {
 /// Files picked or dropped together, shown in the import sheet before they are merged into one lecture.
 nonisolated struct PendingPDFImport: Identifiable, Sendable {
     nonisolated struct File: Identifiable, Sendable {
-        var id: URL { url }
-        let url: URL
+        let id = UUID()
+        let edit: LecturePDFEdit
         let pageCount: Int
-        /// Why the file can't be imported (locked, unreadable). It must be left out to continue.
         let problem: String?
+
+        var filename: String {
+            switch edit {
+            case .existing(let part, _): part.filename
+            case .add(let url): url.lastPathComponent
+            }
+        }
     }
     enum Target: Sendable {
-        /// A new lecture with this number.
         case newLecture(slot: Int)
-        /// Appended after the last slide of an existing lecture.
-        case append(lectureID: UUID, title: String, existingPages: Int)
+        case edit(lectureID: UUID, title: String, existingParts: [LecturePDFPart])
     }
     let id = UUID()
     let moduleID: UUID
@@ -45,6 +49,7 @@ final class AppModel {
     static let shared = AppModel()
 
     enum Phase: Equatable { case loading, ready, failed(String) }
+    enum BackupStatus: Equatable { case saving, saved(URL), failed(String) }
 
     let store: LibraryStore
     let runner: JobRunner
@@ -63,6 +68,7 @@ final class AppModel {
     private(set) var modules: [Module] = []
     private(set) var settings: AISettings = .default
     private(set) var settingsLoaded = false
+    private(set) var backupStatus: BackupStatus?
     private(set) var apiKeySaved = false
     private(set) var bootstrapReport: BootstrapReport? = nil
     var showBootstrapReport = false
@@ -77,7 +83,7 @@ final class AppModel {
     var showNewModule = false
     var settingsModuleID: UUID? = nil
     var showModuleStudySettingsOnOpen = false
-    /// Two or more PDFs waiting in the import sheet.
+    /// A new import or existing lecture open in the PDF sheet.
     var pendingImport: PendingPDFImport? = nil
     /// Lecture windows read and clear this to switch mode when "Review"/"Open" targets an open window.
     var requestedModes: [UUID: LectureMode] = [:]
@@ -359,7 +365,7 @@ final class AppModel {
 
     private func openImportSheet(_ urls: [URL], into moduleID: UUID, slot: Int?) async {
         let ordered = PDFMerge.naturalOrder(urls)
-        let files = await inspect(ordered)
+        let files = await inspectPDFs(ordered)
         do {
             let target = try await importSlot(in: moduleID, preferred: slot)
             pendingImport = PendingPDFImport(moduleID: moduleID, target: .newLecture(slot: target), files: files,
@@ -367,54 +373,47 @@ final class AppModel {
         } catch { errorMessage = error.localizedDescription }
     }
 
-    private func inspect(_ urls: [URL]) async -> [PendingPDFImport.File] {
+    func inspectPDFs(_ urls: [URL]) async -> [PendingPDFImport.File] {
         await Task.detached(priority: .userInitiated) {
             urls.map { url -> PendingPDFImport.File in
-                do { return .init(url: url, pageCount: try PDFMerge.pageCount(of: url), problem: nil) }
-                catch { return .init(url: url, pageCount: 0, problem: error.localizedDescription) }
+                do { return .init(edit: .add(url), pageCount: try PDFMerge.pageCount(of: url), problem: nil) }
+                catch { return .init(edit: .add(url), pageCount: 0, problem: error.localizedDescription) }
             }
         }.value
     }
 
-    /// Adding to an existing lecture always goes through the sheet, even for one PDF: pages can't be removed again.
-    func appendPDFs(_ urls: [URL], to ref: LectureRef) async {
+    func openPDFEditor(for ref: LectureRef, adding urls: [URL] = []) async {
         let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
-        guard !pdfs.isEmpty else { errorMessage = "Only PDF files can be added."; return }
+        guard urls.isEmpty || !pdfs.isEmpty else { errorMessage = "Only PDF files can be added."; return }
         do {
             let lecture = try await store.loadLecture(moduleID: ref.moduleID, lectureID: ref.lectureID)
-            guard lecture.pageCount > 0 else {
-                errorMessage = "\(lecture.name) has no slides to add to. Import the PDFs as a new lecture instead."
-                return
+            guard lecture.pageCount > 0 else { return }
+            let parts = lecture.editablePDFParts
+            var offset = 0
+            let existing = parts.map { part in
+                let start = offset
+                offset += part.pageCount
+                return PendingPDFImport.File(edit: .existing(part, pages: start..<offset), pageCount: part.pageCount, problem: nil)
             }
-            let index = (modules.first { $0.id == ref.moduleID }?.lectureSlots[ref.lectureID] ?? 1) - 1
-            let ordered = PDFMerge.naturalOrder(pdfs)
+            let additions = await inspectPDFs(PDFMerge.naturalOrder(pdfs))
+            let index = (module(ref.moduleID)?.lectureSlots[ref.lectureID] ?? 1) - 1
             pendingImport = PendingPDFImport(moduleID: ref.moduleID,
-                                             target: .append(lectureID: ref.lectureID, title: Format.lectureTitle(index: index, name: lecture.name), existingPages: lecture.pageCount),
-                                             files: await inspect(ordered), name: lecture.name)
+                                            target: .edit(lectureID: ref.lectureID, title: Format.lectureTitle(index: index, name: lecture.name), existingParts: parts),
+                                            files: existing + additions, name: lecture.name)
             if pdfs.count < urls.count { errorMessage = "Only PDF files can be added; \(Format.count(urls.count - pdfs.count, "other file")) left out." }
         } catch { errorMessage = error.localizedDescription }
     }
 
-    func chooseAndAppendPDFs(to ref: LectureRef) async {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.message = "Choose PDFs to add after the lecture's last slide."
-        panel.prompt = "Add"
-        guard panel.runModal() == .OK else { return }
-        await appendPDFs(panel.urls, to: ref)
-    }
-
-    /// Appends the sheet's files and opens the lecture in Prepare on the first new slide.
-    func appendConfirmed(_ urls: [URL], to ref: LectureRef) async throws {
+    func savePDFEdits(_ edits: [LecturePDFEdit], basedOn parts: [LecturePDFPart], for ref: LectureRef) async throws {
         let workspace = lectureWindows[ref.lectureID]
         try await workspace?.flushAllThrowing()
-        _ = try await store.appendPDFs(urls, moduleID: ref.moduleID, lectureID: ref.lectureID)
-        if let workspace { await workspace.reloadAfterExternalChange() }
+        let lecture = try await store.editPDFs(edits, basedOn: parts, moduleID: ref.moduleID, lectureID: ref.lectureID)
+        await workspace?.reloadAfterExternalChange()
         try? await reloadNow()
-        selection = .module(ref.moduleID)
-        openLecture(ref, mode: .prepare)
+        if lecture.pageCount > parts.reduce(0, { $0 + $1.pageCount }) {
+            selection = .module(ref.moduleID)
+            openLecture(ref, mode: .prepare)
+        }
     }
 
     /// Merges the sheet's files in order into one lecture and opens it in Prepare.
@@ -456,6 +455,26 @@ final class AppModel {
     }
 
     // MARK: Settings
+
+    func exportLibraryBackup(to url: URL) async {
+        guard backupStatus != .saving else { return }
+        backupStatus = .saving
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            for window in Array(lectureWindows.values) {
+                try await window.flushAllThrowing()
+            }
+            try await settingsSaveTask?.value
+            let domain = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+            let preferences = UserDefaults.standard.persistentDomain(forName: domain) ?? [:]
+            let plist = try PropertyListSerialization.data(fromPropertyList: preferences, format: .xml, options: 0)
+            try await store.exportLibraryBackup(to: url, preferences: plist)
+            backupStatus = .saved(url)
+        } catch {
+            backupStatus = .failed(error.localizedDescription)
+        }
+    }
 
     func updateSettings(_ new: AISettings) async throws {
         try Task.checkCancellation()

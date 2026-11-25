@@ -28,6 +28,16 @@ public extension Lecture {
         }
         guard schemaVersion == Self.currentSchemaVersion else { throw LectureError.unsupportedSchema(schemaVersion) }
         guard pageCount >= 0, slides.count == pageCount, slides.enumerated().allSatisfy({ $0.offset == $0.element.pageIndex }) else { throw LectureError.invalidMetadata("Slide state does not match page count") }
+        if let pdfParts {
+            var remaining = pageCount
+            for part in pdfParts {
+                guard part.pageCount > 0, part.pageCount <= remaining else { throw LectureError.invalidMetadata("PDF parts do not match the slide count") }
+                remaining -= part.pageCount
+            }
+            guard remaining == 0, Set(pdfParts.map(\.id)).count == pdfParts.count else {
+                throw LectureError.invalidMetadata("PDF parts do not match the slide count")
+            }
+        }
         for ids in [cards.map(\.id), jobs.map(\.id), threads.map(\.id)] {
             var seen = Set<UUID>()
             for id in ids where !seen.insert(id).inserted { throw LectureError.duplicateID(id) }
@@ -381,6 +391,7 @@ public struct LectureController: Sendable {
             guard Set(current.history.map(\.id)).isSubset(of: Set(incoming.history.map(\.id))) else { throw LectureError.staleSnapshot }
         }
         _ = try latest.validated()
+        if latest.pdfLayoutRevision != lecture.pdfLayoutRevision { undoStack.removeAll() }
         lecture = latest
     }
     public mutating func dispatch(_ action: LectureAction, now: Date = Date()) throws {

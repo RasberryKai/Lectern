@@ -23,6 +23,7 @@ extension JobRunner {
         }
         var job = Job(kind: .chat, pages: lecture.slides.map { $0.pageIndex + 1 }, backend: backend, threadID: lecture.currentChat.id, model: resolvedModel)
         job.isLectureChat = true
+        job.pdfLayoutRevision = lecture.pdfLayoutRevision
         job.allowsCardCreation = allowsCardCreation ? true : nil
         let directory = store.jobDirectory(moduleID: moduleID, lectureID: lectureID, jobID: job.id)
         var committed = false
@@ -64,6 +65,7 @@ extension JobRunner {
         let frozen = job
         let frozenUserMessage = userMessage
         _ = try await store.updateLecture(moduleID: moduleID, lectureID: lectureID) { latest in
+            guard latest.pdfLayoutRevision == frozen.pdfLayoutRevision else { throw LectureError.staleSnapshot }
             guard latest.currentChat.id == frozen.threadID, !latest.jobs.contains(where: { ($0.kind == .chat || $0.kind == .ask) && $0.state == .running }) else { throw AIError.configuration("The chat changed while preparing this answer.") }
             if latest.currentChat.pointCursor == nil, !allowsCardCreation, !ChatDistillationRules.isCardContext(contextRefs) {
                 latest.currentChat.pointCursor = latest.currentChat.messages.count
@@ -241,6 +243,9 @@ extension JobRunner {
         guard active[jobID] == nil, !pending.contains(where: { $0.job.id == jobID }) else { throw AIError.configuration("The original answer is still stopping. Try again shortly.") }
         let lecture = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
         guard let job = lecture.jobs.first(where: { $0.id == jobID }), job.kind == .chat, job.threadID == lecture.currentChat.id else { throw AIError.configuration("The original chat is unavailable.") }
+        guard job.pdfLayoutRevision == lecture.pdfLayoutRevision else {
+            throw AIError.configuration("The slide order changed since this answer. Send a new message.")
+        }
         guard !lecture.jobs.contains(where: { ($0.kind == .chat || $0.kind == .ask) && $0.state == .running }) else { throw AIError.configuration("An answer is already running.") }
         let directory = store.jobDirectory(moduleID: moduleID, lectureID: lectureID, jobID: jobID)
         let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: directory.appendingPathComponent("snapshot.json")))
@@ -250,6 +255,7 @@ extension JobRunner {
         }
         try ChatProviderContext(request: snapshot.request, snapshot: chatSnapshot).verifyAssets()
         let retry = try await store.transaction(moduleID: moduleID, lectureID: lectureID) { latest in
+            guard latest.pdfLayoutRevision == job.pdfLayoutRevision else { throw LectureError.staleSnapshot }
             guard latest.currentChat.id == job.threadID, let j = latest.jobs.firstIndex(where: { $0.id == jobID }) else {
                 throw AIError.configuration("The original chat is unavailable.")
             }

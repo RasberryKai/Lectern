@@ -1,8 +1,7 @@
 import Foundation
 import PDFKit
 
-/// Helpers for importing several PDFs as one lecture. The files are merged into one
-/// `source.pdf` at import; afterwards the lecture is indistinguishable from a single-file one.
+/// Helpers for assembling a lecture's source PDF.
 public enum PDFMerge {
     /// Validates one file and returns its page count. The error names the file.
     public static func pageCount(of url: URL) throws -> Int {
@@ -35,21 +34,34 @@ public enum PDFMerge {
     /// Fails without writing anything if any file is locked, empty or unreadable.
     @discardableResult
     public static func merge(_ urls: [URL], to destination: URL) throws -> Int {
-        guard !urls.isEmpty else { throw LibraryError.invalid("Choose at least one PDF.") }
-        let scoped = urls.map { $0.startAccessingSecurityScopedResource() }
-        defer { for (url, didStart) in zip(urls, scoped) where didStart { url.stopAccessingSecurityScopedResource() } }
-        let sources = try urls.map(open)
+        try assemble(urls.map { ($0, nil) }, to: destination).reduce(0, +)
+    }
+
+    /// Returns the page count of each piece. A nil range includes the entire file.
+    static func assemble(_ pieces: [(url: URL, range: Range<Int>?)], to destination: URL) throws -> [Int] {
+        guard !pieces.isEmpty else { throw LibraryError.invalid("Choose at least one PDF.") }
+        let urls = Set(pieces.map(\.url))
+        let scoped = urls.filter { $0.startAccessingSecurityScopedResource() }
+        defer { for url in scoped { url.stopAccessingSecurityScopedResource() } }
+        let sources = try Dictionary(uniqueKeysWithValues: urls.map { ($0, try open($0)) })
         let merged = PDFDocument()
-        for source in sources {
-            for index in 0..<source.pageCount {
+        var counts: [Int] = []
+        for piece in pieces {
+            guard let source = sources[piece.url] else { throw LibraryError.invalid("The source PDF is unavailable.") }
+            let range = piece.range ?? 0..<source.pageCount
+            guard !range.isEmpty, range.lowerBound >= 0, range.upperBound <= source.pageCount else {
+                throw LibraryError.invalid("The lecture's PDF doesn't match its slide count.")
+            }
+            for index in range {
                 guard let page = source.page(at: index)?.copy() as? PDFPage else {
                     throw LibraryError.invalid("Page \(index + 1) of \(source.documentURL?.lastPathComponent ?? "a PDF") can't be read.")
                 }
                 merged.insert(page, at: merged.pageCount)
             }
+            counts.append(range.count)
         }
         guard merged.write(to: destination) else { throw LibraryError.invalid("Couldn't write the merged PDF.") }
-        return merged.pageCount
+        return counts
     }
 
     private static func open(_ url: URL) throws -> PDFDocument {

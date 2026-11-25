@@ -1,4 +1,5 @@
 import AppKit
+import LecternCore
 import SwiftUI
 import WebKit
 
@@ -149,9 +150,6 @@ private final class ChatResponseWebView: WKWebView {
 }
 
 nonisolated enum ChatMarkdown {
-    // Keep TeX, code and image source out of Markdown emphasis and table splitting.
-    private static let literalPattern = #"`([^`]+)`|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]|\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|!\[[^\]]*\]\([^)]*\)"#
-
     static func finishedBlocks(_ text: String) -> String {
         guard let range = text.range(of: "\n\n", options: .backwards) else { return "" }
         let prefix = String(text[..<range.lowerBound])
@@ -173,14 +171,14 @@ nonisolated enum ChatMarkdown {
     static func inline(_ source: String) -> String {
         var tokens: [String] = []
         func token(_ value: String) -> String { tokens.append(value); return "\u{E000}\(tokens.count - 1)\u{E001}" }
-        var result = replacing(source, literalPattern) { m, s in
+        var result = replacing(source, ChatCitationMarkup.literalPattern) { m, s in
             let raw = s.substring(with: m.range)
             if raw.hasPrefix("`") { return token("<code>\(escape(String(raw.dropFirst().dropLast())))</code>") }
             return token(escape(raw))
         }
         result = escape(result)
         result = replacing(result, #"\[([^\]]+)\]\((https?://[^\s)]+|mailto:[^\s)]+)\)"#) { m,s in token("<a href=\"\(s.substring(with:m.range(at:2)))\">\(s.substring(with:m.range(at:1)))</a>") }
-        result = replacing(result, #"\[([SC]\d+(?:\s*[,;–—-]\s*[SC]?\d+)*)\]"#) { m,s in
+        result = replacing(result, ChatCitationMarkup.citationPattern) { m,s in
             guard let buttons = citationButtons(s.substring(with: m.range(at: 1))) else { return s.substring(with: m.range) }
             return token(buttons)
         }
@@ -191,26 +189,7 @@ nonisolated enum ChatMarkdown {
     }
 
     private static func citationButtons(_ source: String) -> String? {
-        let pattern = #"^\s*([SC])?(\d+)(?:\s*[–—-]\s*([SC])?(\d+))?\s*$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        var kind = "S", targets: [(String, Int)] = []
-        for group in source.split(whereSeparator: { $0 == "," || $0 == ";" }) {
-            let text = String(group) as NSString
-            guard let match = regex.firstMatch(in: text as String, range: NSRange(location: 0, length: text.length)) else { return nil }
-            if match.range(at: 1).location != NSNotFound { kind = text.substring(with: match.range(at: 1)) }
-            if match.range(at: 3).location != NSNotFound,
-               text.substring(with: match.range(at: 3)) != kind { return nil }
-            guard let start = Int(text.substring(with: match.range(at: 2))), start > 0 else { return nil }
-            let end: Int
-            if match.range(at: 4).location == NSNotFound { end = start }
-            else if let number = Int(text.substring(with: match.range(at: 4))) { end = number }
-            else { return nil }
-            guard end >= start, end - start < 100, targets.count + (end - start + 1) <= 100 else { return nil }
-            for number in start...end where !targets.contains(where: { $0.0 == kind && $0.1 == number }) {
-                targets.append((kind, number))
-            }
-        }
-        return targets.map { kind, number in
+        ChatCitationMarkup.targets(in: source)?.map { kind, number in
             "<button class=\"cite\" data-type=\"\(kind)\" data-n=\"\(number)\">\(kind == "S" ? "Slide" : "Card") \(number)</button>"
         }.joined()
     }
@@ -220,7 +199,7 @@ nonisolated enum ChatMarkdown {
         var index = 0, blocks: [String] = []
         func cells(_ line: String) -> [String] {
             var literals: [String] = []
-            let protected = replacing(line, literalPattern) { match, text in
+            let protected = replacing(line, ChatCitationMarkup.literalPattern) { match, text in
                 literals.append(text.substring(with: match.range))
                 return "\u{E000}\(literals.count - 1)\u{E001}"
             }

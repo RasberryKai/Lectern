@@ -376,6 +376,8 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var chatCardVersions: [ChatCardVersion]? = nil
     public var chatEditUndo: [ChatEditUndo]? = nil
     public var chatEditsUndoneAt: Date? = nil
+    /// Page numbering used by the immutable request snapshot.
+    var pdfLayoutRevision: UUID? = nil
     public init(id: UUID = UUID(), kind: JobKind, pages: [Int], inputHash: String = "", rulesVersion: String = "1", backend: AIBackend = .claudeCLI, state: JobState = .running, error: String? = nil, usage: AIUsage? = nil, startedAt: Date = Date(), finishedAt: Date? = nil, targetCardID: UUID? = nil, threadID: UUID? = nil, baseRevisionID: UUID? = nil, prompt: String = "", model: String = "opus") {
         self.id = id; self.kind = kind; self.pages = pages; self.inputHash = inputHash; self.rulesVersion = rulesVersion; self.backend = backend; self.state = state; self.error = error; self.usage = usage; self.startedAt = startedAt; self.finishedAt = finishedAt; self.targetCardID = targetCardID; self.threadID = threadID; self.baseRevisionID = baseRevisionID; self.prompt = prompt; self.model = model
     }
@@ -386,7 +388,7 @@ public struct SkippedSlide: Codable, Equatable, Sendable {
     public init(slide: Int, reason: String) { self.slide = slide; self.reason = reason }
 }
 public struct Lecture: Codable, Equatable, Identifiable, Sendable {
-    private enum CodingKeys: String, CodingKey { case schemaVersion,id,moduleID,name,sourceFilename,pageCount,createdAt,updatedAt,slides,cards,threads,currentChat,archivedChats,learningPoints,jobs,skippedSlides,archivedAt,progressOverride,cardMakingCompletedAt,viewPreferences }
+    private enum CodingKeys: String, CodingKey { case schemaVersion,id,moduleID,name,sourceFilename,pageCount,createdAt,updatedAt,slides,cards,threads,currentChat,archivedChats,learningPoints,jobs,skippedSlides,archivedAt,progressOverride,cardMakingCompletedAt,viewPreferences,pdfParts,pdfLayoutRevision }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try c.decode(Int.self, forKey: .schemaVersion); id = try c.decode(UUID.self, forKey: .id); moduleID = try c.decode(UUID.self, forKey: .moduleID); name = try c.decode(String.self, forKey: .name)
@@ -398,6 +400,8 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
         learningPoints = try c.decodeIfPresent([LearningPoint].self, forKey: .learningPoints) ?? threads.flatMap(\.learningPoints)
         jobs = try c.decode([Job].self, forKey: .jobs); skippedSlides = try c.decode([SkippedSlide].self, forKey: .skippedSlides); archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt); progressOverride = try c.decodeIfPresent(LectureProgressStatus.self, forKey: .progressOverride); cardMakingCompletedAt = try c.decodeIfPresent(Date.self, forKey: .cardMakingCompletedAt)
         viewPreferences = try c.decode(ViewPreferences.self, forKey: .viewPreferences)
+        pdfParts = try c.decodeIfPresent([LecturePDFPart].self, forKey: .pdfParts)
+        pdfLayoutRevision = try c.decodeIfPresent(UUID.self, forKey: .pdfLayoutRevision)
     }
 
     public static let currentSchemaVersion = 1
@@ -407,6 +411,9 @@ public struct Lecture: Codable, Equatable, Identifiable, Sendable {
     public var name: String
     public var sourceFilename: String
     public var pageCount: Int
+    /// Nil for lectures imported before file boundaries were recorded.
+    public internal(set) var pdfParts: [LecturePDFPart]? = nil
+    public internal(set) var pdfLayoutRevision: UUID? = nil
     public var createdAt: Date
     public var updatedAt: Date
     public var slides: [SlideState]

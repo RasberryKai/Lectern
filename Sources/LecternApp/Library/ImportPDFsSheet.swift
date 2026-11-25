@@ -1,9 +1,8 @@
 import LecternCore
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// Several PDFs, one lecture: name it, put the files in order, press Import.
-/// The order is final once imported; afterwards it is a normal lecture.
-/// The same sheet adds PDFs after the last slide of an existing lecture.
+/// Orders the PDF files for a new or existing lecture.
 struct ImportPDFsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -13,24 +12,38 @@ struct ImportPDFsSheet: View {
     @State private var name = ""
     @State private var error: String?
     @State private var importing = false
-    @State private var loaded = false
+    @State private var choosingFiles = false
+    @State private var inspectingFiles = false
+    @State private var splitFileID: UUID?
+    @State private var splitSlide = ""
+
+    init(pending: PendingPDFImport) {
+        self.pending = pending
+        _files = State(initialValue: pending.files)
+        _name = State(initialValue: pending.name)
+    }
 
     private static let rowHeight: CGFloat = 52
 
     private var totalPages: Int { files.reduce(0) { $0 + $1.pageCount } }
     private var blocked: Bool { files.isEmpty || files.contains { $0.problem != nil } }
     private var module: Module? { model.module(pending.moduleID) }
-    /// Pages already in the lecture: 0 for a new one.
-    private var existingPages: Int {
-        if case .append(_, _, let pages) = pending.target { return pages }
-        return 0
+    private var isEditing: Bool {
+        if case .edit = pending.target { return true }
+        return false
     }
-    private var isAppend: Bool { existingPages > 0 }
-
+    private var hasEdits: Bool {
+        guard case .edit(_, _, let existingParts) = pending.target else { return true }
+        let currentParts = files.compactMap { file -> LecturePDFPart? in
+            if case .existing(let part, _) = file.edit { return part }
+            return nil
+        }
+        return files.count != currentParts.count || currentParts != existingParts
+    }
     private var title: String {
         switch pending.target {
         case .newLecture: files.count == 1 ? "Import 1 PDF as a lecture" : "Import \(files.count) PDFs as one lecture"
-        case .append(_, let title, _): "Add \(Format.count(files.count, "PDF")) to \(title)"
+        case .edit: "Edit PDFs"
         }
     }
 
@@ -41,7 +54,7 @@ struct ImportPDFsSheet: View {
                 Text(subtitle).font(Theme.small).foregroundStyle(Theme.quiet)
             }
 
-            if !isAppend {
+            if !isEditing {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Lecture name").font(.system(size: 13, weight: .semibold))
                     TextField("Lecture name", text: $name)
@@ -52,12 +65,23 @@ struct ImportPDFsSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Order").font(.system(size: 13, weight: .semibold))
+                HStack(spacing: 10) {
+                    Text(isEditing ? "PDF order" : "Order").font(.system(size: 13, weight: .semibold))
                     Spacer()
-                    Text("Sorted by file name. Drag to change.").font(Theme.small).foregroundStyle(Theme.quiet)
+                    Text(isEditing ? "Drag to reorder" : "Sorted by file name. Drag to change.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
+                    if isEditing {
+                        if inspectingFiles { ProgressView().controlSize(.small) }
+                        Button("Add PDFs…") { choosingFiles = true }
+                            .buttonStyle(SecondaryButtonStyle())
+                            .disabled(inspectingFiles)
+                    }
                 }
                 fileList
+                if let splitFileID, let file = files.first(where: { $0.id == splitFileID }),
+                   case .existing(_, let pages) = file.edit {
+                    splitControls(file, pages: pages)
+                }
             }
 
             if let error { ErrorBanner(message: error) }
@@ -69,10 +93,10 @@ struct ImportPDFsSheet: View {
                 Button("Cancel") { dismiss() }
                     .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
                 Button(action: save) {
-                    if importing { ProgressView().controlSize(.small).tint(Theme.onAccent) } else { Text(isAppend ? "Add" : "Import") }
+                    if importing { ProgressView().controlSize(.small).tint(Theme.onAccent) } else { Text(isEditing ? "Save Changes" : "Import") }
                 }
                 .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
-                .disabled(blocked || importing)
+                .disabled(blocked || importing || inspectingFiles || !hasEdits || splitFileID != nil)
             }
         }
         .padding(28)
@@ -80,9 +104,17 @@ struct ImportPDFsSheet: View {
         .background(Theme.surface)
         .disabled(importing)
         .interactiveDismissDisabled(importing)
-        .onAppear {
-            guard !loaded else { return }
-            files = pending.files; name = pending.name; loaded = true
+        .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls):
+                inspectingFiles = true
+                error = nil
+                Task {
+                    files += await model.inspectPDFs(PDFMerge.naturalOrder(urls))
+                    inspectingFiles = false
+                }
+            case .failure(let failure): error = failure.localizedDescription
+            }
         }
     }
 
@@ -93,17 +125,17 @@ struct ImportPDFsSheet: View {
             let slot = String(format: "%02d", number)
             let planned = module?.plannedLectureCount ?? 0
             return number <= planned ? "\(moduleName) · fills planned slot \(slot)" : "\(moduleName) · becomes lecture \(slot)"
-        case .append(_, _, let pages):
-            return "Added after slide \(pages). Existing slides, notes and cards keep their numbers."
+        case .edit(_, let title, _):
+            return title
         }
     }
 
     private var summary: String {
-        if let bad = files.first(where: { $0.problem != nil }) { return "Leave out \(bad.url.lastPathComponent) to continue." }
-        if files.isEmpty { return isAppend ? "No files left to add." : "No files left to import." }
-        if isAppend { return "The lecture grows from \(existingPages) to \(existingPages + totalPages) slides. This can't be undone." }
+        if let bad = files.first(where: { $0.problem != nil }) { return "Leave out \(bad.filename) to continue." }
+        if files.isEmpty { return "No files left to import." }
+        if isEditing { return "\(Format.count(files.count, "PDF")) · \(Format.count(totalPages, "slide"))" }
         if files.count == 1 { return "Imported as one \(totalPages)-slide lecture." }
-        return "Merged into one \(totalPages)-slide lecture. From here it is a normal lecture."
+        return "Merged into one \(totalPages)-slide lecture."
     }
 
     private var fileList: some View {
@@ -126,7 +158,9 @@ struct ImportPDFsSheet: View {
     }
 
     private func row(index: Int, file: PendingPDFImport.File) -> some View {
-        HStack(spacing: 10) {
+        let canSplit = isSplittable(file)
+        let canRemove = if case .add = file.edit { true } else { false }
+        return HStack(spacing: 10) {
             Image(systemName: "line.3.horizontal")
                 .foregroundStyle(Theme.faint)
                 .frame(width: 24, height: 36)
@@ -144,50 +178,104 @@ struct ImportPDFsSheet: View {
                 .frame(width: 22, height: 22)
                 .background(Theme.inset, in: Circle())
             VStack(alignment: .leading, spacing: 2) {
-                Text(file.url.lastPathComponent).font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                Text(file.filename).font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                 if let problem = file.problem {
                     Text(problem).font(Theme.small).foregroundStyle(Theme.bad).lineLimit(1)
                 } else {
-                    Text("\(Format.count(file.pageCount, "page")) · becomes \(range(for: index))")
+                    Text("\(Format.count(file.pageCount, "page")) · \(range(for: index))")
                         .font(Theme.small).foregroundStyle(Theme.quiet)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                files.removeAll { $0.id == file.id }
-            } label: {
-                Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).frame(width: 28, height: 28).contentShape(Rectangle())
+            if canSplit {
+                Button("Split…") { beginSplit(file) }
+                    .buttonStyle(LinkButtonStyle())
+                    .help("Set a file boundary in a previously merged PDF")
+                    .padding(.trailing, 6)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.quiet)
-            .help("Leave this file out")
-            .accessibilityLabel("Leave \(file.url.lastPathComponent) out")
+            if canRemove {
+                Button {
+                    files.removeAll { $0.id == file.id }
+                } label: {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).frame(width: 28, height: 28).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.quiet)
+                .help("Leave this file out")
+                .accessibilityLabel("Leave \(file.filename) out")
+            }
         }
         .frame(height: Self.rowHeight)
         .contentShape(Rectangle())
         .contextMenu {
             Button("Move Up") { files.swapAt(index, index - 1) }.disabled(index == 0)
             Button("Move Down") { files.swapAt(index, index + 1) }.disabled(index == files.count - 1)
-            Divider()
-            Button("Leave Out") { files.removeAll { $0.id == file.id } }
+            if canSplit { Button("Split…") { beginSplit(file) } }
+            if canRemove {
+                Divider()
+                Button("Leave Out") { files.removeAll { $0.id == file.id } }
+            }
         }
     }
 
     private func range(for index: Int) -> String {
-        let start = existingPages + files.prefix(index).reduce(0) { $0 + $1.pageCount } + 1
+        let start = files.prefix(index).reduce(0) { $0 + $1.pageCount } + 1
         let end = start + files[index].pageCount - 1
         return start == end ? "slide \(start)" : "slides \(start)–\(end)"
     }
 
+    private func isSplittable(_ file: PendingPDFImport.File) -> Bool {
+        if case .existing(let part, let pages) = file.edit { return part.canSplit && pages.count > 1 }
+        return false
+    }
+
+    private func beginSplit(_ file: PendingPDFImport.File) {
+        splitFileID = file.id
+        splitSlide = ""
+    }
+
+    private func splitControls(_ file: PendingPDFImport.File, pages: Range<Int>) -> some View {
+        let allowedSlides = (pages.lowerBound + 2)...pages.upperBound
+        let slide = Int(splitSlide.trimmingCharacters(in: .whitespacesAndNewlines))
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("This older import has no saved file boundaries. Enter the first slide of the next file using its number in the saved lecture.")
+                .font(Theme.small).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Text("Split before slide").font(Theme.body)
+                TextField("\(allowedSlides.lowerBound)–\(allowedSlides.upperBound)", text: $splitSlide)
+                    .textFieldStyle(.roundedBorder).frame(width: 85)
+                    .accessibilityLabel("First slide of the next file")
+                Button("Split") {
+                    if let slide, allowedSlides.contains(slide) { split(file, pages: pages, at: slide - 1) }
+                }
+                .disabled(slide.map { !allowedSlides.contains($0) } ?? true)
+                Button("Cancel Split") { splitFileID = nil }
+            }
+        }
+    }
+
+    private func split(_ file: PendingPDFImport.File, pages: Range<Int>, at index: Int) {
+        guard let position = files.firstIndex(where: { $0.id == file.id }) else { return }
+        let first = LecturePDFPart(filename: file.filename, pageCount: index - pages.lowerBound, canSplit: true)
+        let second = LecturePDFPart(filename: "Split before slide \(index + 1)", pageCount: pages.upperBound - index, canSplit: true)
+        files.replaceSubrange(position...position, with: [
+            .init(edit: .existing(first, pages: pages.lowerBound..<index), pageCount: first.pageCount, problem: nil),
+            .init(edit: .existing(second, pages: index..<pages.upperBound), pageCount: second.pageCount, problem: nil)
+        ])
+        splitFileID = nil
+    }
+
     private func save() {
-        guard !blocked, !importing else { return }
+        guard !blocked, !importing, !inspectingFiles, hasEdits, splitFileID == nil else { return }
         importing = true; error = nil
-        let urls = files.map(\.url)
         Task {
             do {
                 switch pending.target {
-                case .newLecture(let slot): try await model.importMerged(urls, name: name, into: pending.moduleID, slot: slot)
-                case .append(let lectureID, _, _): try await model.appendConfirmed(urls, to: LectureRef(moduleID: pending.moduleID, lectureID: lectureID))
+                case .newLecture(let slot):
+                    let urls = files.compactMap { if case .add(let url) = $0.edit { url } else { nil } }
+                    try await model.importMerged(urls, name: name, into: pending.moduleID, slot: slot)
+                case .edit(let lectureID, _, let parts):
+                    try await model.savePDFEdits(files.map(\.edit), basedOn: parts, for: LectureRef(moduleID: pending.moduleID, lectureID: lectureID))
                 }
                 dismiss()
             } catch {

@@ -238,7 +238,7 @@ public actor LibraryStore {
     }
     /// Timestamp only real effective-status transitions. Old complete records remain undated
     /// until they are reopened and completed again; `updatedAt` cannot identify completion.
-    private func reconcileCardMakingCompletion(from previous: Lecture, to updated: inout Lecture, at date: Date) {
+    func reconcileCardMakingCompletion(from previous: Lecture, to updated: inout Lecture, at date: Date) {
         // Chat, notes, preferences, and job-only writes do not affect card-making completion.
         // Avoid reparsing card math and coverage under the library lock for those common writes.
         guard previous.cards == updated.cards,
@@ -323,7 +323,9 @@ public actor LibraryStore {
     public func importPDF(from url: URL, moduleID: UUID, slot: Int? = nil) throws -> Lecture {
         let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         guard let pdf = PDFDocument(url: url), !pdf.isLocked, pdf.pageCount > 0 else { throw LibraryError.invalid("The selected PDF is empty, locked or unreadable.") }
-        return try createLecture(Lecture(moduleID: moduleID, name: url.deletingPathExtension().lastPathComponent, sourceFilename: url.lastPathComponent, pageCount: pdf.pageCount), sourceURL: url, slot: slot)
+        var lecture = Lecture(moduleID: moduleID, name: url.deletingPathExtension().lastPathComponent, sourceFilename: url.lastPathComponent, pageCount: pdf.pageCount)
+        lecture.pdfParts = [LecturePDFPart(filename: url.lastPathComponent, pageCount: pdf.pageCount)]
+        return try createLecture(lecture, sourceURL: url, slot: slot)
     }
     /// Imports several PDFs, in the given order, as ONE lecture whose `source.pdf` is their merge.
     /// A locked or unreadable file is named in the error, and nothing is imported.
@@ -335,12 +337,16 @@ public actor LibraryStore {
             // Left with one file in the sheet: keep the original bytes instead of a re-written copy.
             let scoped = first.startAccessingSecurityScopedResource(); defer { if scoped { first.stopAccessingSecurityScopedResource() } }
             let pageCount = try PDFMerge.pageCount(of: first)
-            return try createLecture(Lecture(moduleID: moduleID, name: lectureName, sourceFilename: first.lastPathComponent, pageCount: pageCount), sourceURL: first, slot: slot)
+            var lecture = Lecture(moduleID: moduleID, name: lectureName, sourceFilename: first.lastPathComponent, pageCount: pageCount)
+            lecture.pdfParts = [LecturePDFPart(filename: first.lastPathComponent, pageCount: pageCount)]
+            return try createLecture(lecture, sourceURL: first, slot: slot)
         }
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-merge-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: temp) }
-        let pageCount = try PDFMerge.merge(urls, to: temp)
-        return try createLecture(Lecture(moduleID: moduleID, name: lectureName, sourceFilename: first.lastPathComponent, pageCount: pageCount), sourceURL: temp, slot: slot)
+        let counts = try PDFMerge.assemble(urls.map { ($0, nil) }, to: temp)
+        var lecture = Lecture(moduleID: moduleID, name: lectureName, sourceFilename: first.lastPathComponent, pageCount: counts.reduce(0, +))
+        lecture.pdfParts = zip(urls, counts).map { LecturePDFPart(filename: $0.lastPathComponent, pageCount: $1) }
+        return try createLecture(lecture, sourceURL: temp, slot: slot)
     }
     /// Appends PDFs, in the given order, after the lecture's last slide. Existing page numbers don't move,
     /// so cards, notes, chats and jobs stay valid. A locked or unreadable file is named in the error, and
@@ -348,30 +354,14 @@ public actor LibraryStore {
     public func appendPDFs(_ urls: [URL], moduleID: UUID, lectureID: UUID) throws -> Lecture { try locked {
         guard !urls.isEmpty else { throw LibraryError.invalid("Choose at least one PDF.") }
         try requireEditable(moduleUnlocked(moduleID))
-        var lecture = try readLecture(moduleID, lectureID)
-        guard !lecture.isArchived else { throw LibraryError.invalid("Restore this lecture before adding PDFs to it.") }
-        let source = sourceURL(moduleID: moduleID, lectureID: lectureID)
-        guard lecture.pageCount > 0, FileManager.default.fileExists(atPath: source.path) else {
-            throw LibraryError.invalid("This lecture has no slides to add to. Import the PDFs as a new lecture instead.")
+        let lecture = try readLecture(moduleID, lectureID)
+        var offset = 0
+        let existing = lecture.editablePDFParts.map { part in
+            let start = offset
+            offset += part.pageCount
+            return LecturePDFEdit.existing(part, pages: start..<offset)
         }
-        let added = try urls.reduce(0) { $0 + (try PDFMerge.pageCount(of: $1)) }
-        let previous = lecture
-        let temp = lectureDirectory(moduleID, lectureID).appendingPathComponent("source-append-\(UUID().uuidString).pdf")
-        defer { try? FileManager.default.removeItem(at: temp) }
-        let total = try PDFMerge.merge([source] + urls, to: temp)
-        let old = lecture.pageCount
-        guard total == old + added else { throw LibraryError.invalid("The lecture's PDF doesn't match its slide count, so nothing was added.") }
-        lecture.pageCount = total
-        lecture.slides += (old..<total).map { SlideState(pageIndex: $0) }
-        lecture.viewPreferences.focusedPageIndex = old
-        let now = Date()
-        reconcileCardMakingCompletion(from: previous, to: &lecture, at: now)
-        lecture.updatedAt = now
-        try validate(lecture)
-        // PDF first: if writing the metadata then fails, the extra pages are simply not part of the lecture yet.
-        _ = try FileManager.default.replaceItemAt(source, withItemAt: temp)
-        try write(lecture, to: lectureDirectory(moduleID, lectureID).appendingPathComponent("lecture.json"))
-        return lecture
+        return try editPDFsUnlocked(lecture, edits: existing + urls.map(LecturePDFEdit.add))
     } }
     public func loadRules() throws -> String { try locked {
         let url = rootURL.appendingPathComponent("rules.md")
@@ -577,12 +567,13 @@ public actor LibraryStore {
         }
     }
     func readLecture(_ module: UUID, _ id: UUID) throws -> Lecture {
+        try finishPDFEdit(in: lectureDirectory(module, id))
         let lecture: Lecture = try read(lectureDirectory(module, id).appendingPathComponent("lecture.json"))
         try validate(lecture)
         guard lecture.id == id, lecture.moduleID == module else { throw LibraryError.invalid("Lecture identity does not match its directory.") }
         return lecture
     }
-    private func validate(_ lecture: Lecture) throws {
+    func validate(_ lecture: Lecture) throws {
         guard lecture.schemaVersion == Lecture.currentSchemaVersion else { throw LibraryError.unsupportedSchema(lecture.schemaVersion) }
         guard !lecture.isArchived || !lecture.jobs.contains(where: { $0.state == .running }) else {
             throw LibraryError.invalid("An archived lecture cannot contain running jobs.")

@@ -449,6 +449,7 @@ extension JobRunner {
             }
             var distilJob = Job(id: distilID, kind: .distil, pages: jobPages, backend: input.backend, threadID: input.chatID, prompt: request.prompt, model: request.model)
             distilJob.inputHash = try Self.inputHash(request)
+            distilJob.pdfLayoutRevision = lecture.pdfLayoutRevision
             let frozenDistilJob = distilJob
             let frozenPlan = plan
             let windowCount: Int = switch plan {
@@ -465,7 +466,10 @@ extension JobRunner {
                 do {
                     trace.phase("snapshot_persistence")
                     try JSONEncoder().encode(Snapshot(request: request, learningPointIDs: [])).write(to: directory.appendingPathComponent("snapshot.json"), options: .atomic)
-                    _ = try await store.updateLecture(moduleID: input.moduleID, lectureID: input.lectureID) { $0.jobs.append(frozenDistilJob) }
+                    _ = try await store.updateLecture(moduleID: input.moduleID, lectureID: input.lectureID) {
+                        guard $0.pdfLayoutRevision == frozenDistilJob.pdfLayoutRevision else { throw LectureError.staleSnapshot }
+                        $0.jobs.append(frozenDistilJob)
+                    }
 
                     trace.phase("provider_execution")
                     guard let provider = providers[input.backend] else { throw AIError.configuration("Provider unavailable.") }
