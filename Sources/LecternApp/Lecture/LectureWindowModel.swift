@@ -67,6 +67,7 @@ final class LectureWindowModel {
     var sourceIndex = 0
     var dismissedJobIDs: Set<UUID> = []
     var proposeResult: String? = nil
+    var studySolveContext: String? = nil
 
     // Note buffer (zero-based page index).
     private(set) var noteDraftPage: Int? = nil
@@ -454,7 +455,8 @@ final class LectureWindowModel {
 
     /// "Edit first": take the proposal into the editors without accepting it.
     func editProposalFirst() async {
-        guard let card = selectedCard, let draft = card.proposal?.cards.first, card.proposal?.cards.count == 1 else { return }
+        guard let card = selectedCard, card.solve == nil, let draft = card.proposal?.cards.first,
+              draft.solve == nil, card.proposal?.cards.count == 1 else { return }
         editorFront = draft.front
         editorBack = draft.back
         editorSources = draft.sourcePages.map(String.init).joined(separator: ", ")
@@ -481,6 +483,44 @@ final class LectureWindowModel {
 
     private var backend: AIBackend { settings.backend }
     private var model: String { settings.selectedModel }
+
+    private var selectedSolveEntry: StudyCard? {
+        guard let card = selectedCard, card.solve != nil, card.verdict == .good else { return nil }
+        return StudyCard(moduleID: ref.moduleID, lectureID: ref.lectureID, lectureName: lecture.name,
+                         moduleName: moduleName, card: card, memory: nil)
+    }
+
+    var solveRefillError: String? {
+        selectedSolveEntry.flatMap { app.solveRefillStatus(for: $0).error }
+    }
+
+    var isRefillingSolveCases: Bool {
+        selectedSolveEntry.map { app.solveRefillStatus(for: $0).running } ?? false
+    }
+
+    func refillSolveCases() {
+        guard !readOnly, let entry = selectedSolveEntry else { return }
+        app.prepareSolveCases(for: entry, requested: true)
+    }
+
+    func retireSolveCase(_ id: UUID) async {
+        guard !readOnly, let entry = selectedSolveEntry else { return }
+        await run {
+            _ = try await app.store.retireSolveCase(entry, caseID: id)
+            try await session.refresh()
+        }
+        app.scheduleReload()
+    }
+
+    func requestSolveRevision(_ feedback: String) async {
+        guard !readOnly, let card = selectedCard, !feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        await run {
+            try await flushNoteNow()
+            _ = try await session.revise(cardID: card.id, feedback: feedback, backend: backend, model: model)
+            try await session.refresh()
+        }
+        app.scheduleReload()
+    }
 
     func generate(additionalInstructions: String) async {
         guard !readOnly else { return }

@@ -12,6 +12,7 @@ public struct StudyReschedulePreview: Equatable, Sendable {
 struct StudyRescheduleBatch: Equatable, Sendable {
     let configuration: StudyConfiguration
     let changes: [UUID: StudyRescheduleChange]
+    let solveIDs: Set<UUID>
 }
 
 struct StudyRescheduleChange: Equatable, Sendable {
@@ -20,11 +21,12 @@ struct StudyRescheduleChange: Equatable, Sendable {
 }
 
 struct StudyJournalEvent: Codable {
-    enum Source: String, Codable { case study, undo, reschedule }
+    enum Source: String, Codable { case study, undo, reschedule, presentation }
     enum Payload: Codable {
         case grade(rating: StudyRating, answeringTime: TimeInterval, configuration: StudyConfiguration)
         case undo(gradeID: UUID)
-        case reschedule(configuration: StudyConfiguration, cardIDs: [UUID])
+        case reschedule(configuration: StudyConfiguration, cardIDs: [UUID], solveIDs: Set<UUID>? = nil)
+        case present(caseID: UUID)
     }
 
     static let modelVersion = "FSRS-6/Py-FSRS-6.3.2"
@@ -38,9 +40,15 @@ struct StudyJournalEvent: Codable {
     let studyDay: String
     let source: Source
     let payload: Payload
+    var solveResponse: StudySolveResponse? = nil
 }
 
 struct StudyJournalState: Codable {
+    struct Presentation: Codable {
+        let cardID: UUID
+        let caseID: UUID
+    }
+
     struct Grade: Codable {
         let cardID: UUID
         let rating: StudyRating
@@ -48,6 +56,7 @@ struct StudyJournalState: Codable {
         let before: StudyMemoryState?
         let after: StudyMemoryState
         let previousChangeID: UUID?
+        var solveResponse: StudySolveResponse? = nil
     }
 
     private(set) var memory: [UUID: StudyMemoryState] = [:]
@@ -56,6 +65,9 @@ struct StudyJournalState: Codable {
     private(set) var undoneGrades: Set<UUID> = []
     private(set) var latestChanges: [UUID: UUID] = [:]
     private var eventIDs: Set<UUID> = []
+    private(set) var presentations: [UUID: Presentation]? = nil
+    private(set) var seenSolveCases: [UUID: Set<UUID>]? = nil
+    private var gradedPresentations: Set<UUID>? = nil
 
     mutating func apply(_ event: StudyJournalEvent) throws {
         guard event.schemaVersion == 1 else { throw LibraryError.unsupportedSchema(event.schemaVersion) }
@@ -66,15 +78,32 @@ struct StudyJournalState: Codable {
             throw LibraryError.invalid("A study event ID was used more than once.")
         }
         switch (event.source, event.payload) {
+        case (.presentation, .present(let caseID)):
+            guard let cardID = event.cardID, seenSolveCases?[cardID]?.contains(caseID) != true else {
+                throw LibraryError.invalid("This solve case has already been presented.")
+            }
+            if presentations == nil { presentations = [:]; seenSolveCases = [:] }
+            presentations?[event.id] = Presentation(cardID: cardID, caseID: caseID)
+            seenSolveCases?[cardID, default: []].insert(caseID)
         case (.study, .grade(let rating, let answeringTime, let configuration)):
             guard let cardID = event.cardID, answeringTime.isFinite, answeringTime >= 0 else {
                 throw LibraryError.invalid("A study grade is missing a card or has an invalid answering time.")
             }
+            if let response = event.solveResponse {
+                guard let presentation = presentations?[response.presentationID],
+                      presentation.cardID == cardID, presentation.caseID == response.caseID,
+                      gradedPresentations?.contains(response.presentationID) != true else {
+                    throw LibraryError.invalid("The solve attempt was not presented or has already been rated.")
+                }
+                if gradedPresentations == nil { gradedPresentations = [] }
+                gradedPresentations?.insert(response.presentationID)
+            }
             try configuration.validated()
             let previous = memory[cardID]
-            let next = try StudyScheduler.review(previous, rating: rating, at: event.at, configuration: configuration, cardID: cardID)
+            let next = try StudyScheduler.review(previous, rating: rating, at: event.at, configuration: configuration,
+                                                 cardID: cardID, isSolve: event.solveResponse != nil)
             grades[event.id] = Grade(cardID: cardID, rating: rating, studyDay: event.studyDay, before: previous,
-                                     after: next, previousChangeID: latestChanges[cardID])
+                                     after: next, previousChangeID: latestChanges[cardID], solveResponse: event.solveResponse)
             if previous == nil { introductions[event.studyDay, default: 0] += 1 }
             memory[cardID] = next
             latestChanges[cardID] = event.id
@@ -85,11 +114,12 @@ struct StudyJournalState: Codable {
             }
             memory[grade.cardID] = grade.before
             latestChanges[grade.cardID] = grade.previousChangeID
+            if let response = grade.solveResponse { gradedPresentations?.remove(response.presentationID) }
             if grade.before == nil {
                 let count = introductions[grade.studyDay, default: 0]
                 introductions[grade.studyDay] = count > 1 ? count - 1 : nil
             }
-        case (.reschedule, .reschedule(let configuration, let cardIDs)):
+        case (.reschedule, .reschedule(let configuration, let cardIDs, let solveIDs)):
             try configuration.validated()
             guard event.cardID == nil, !cardIDs.isEmpty, Set(cardIDs).count == cardIDs.count else {
                 throw LibraryError.invalid("Invalid study reschedule event.")
@@ -98,7 +128,8 @@ struct StudyJournalState: Codable {
                 guard let previous = memory[cardID] else {
                     throw LibraryError.invalid("A rescheduled card is missing prior study memory.")
                 }
-                memory[cardID] = StudyScheduler.reschedule(previous, configuration: configuration, cardID: cardID)
+                memory[cardID] = StudyScheduler.reschedule(previous, configuration: configuration, cardID: cardID,
+                                                           isSolve: solveIDs?.contains(cardID) == true)
                 latestChanges[cardID] = event.id
             }
         default:

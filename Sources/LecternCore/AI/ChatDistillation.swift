@@ -584,7 +584,7 @@ extension JobRunner {
         let reason = wire.reason.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !front.isEmpty, !back.isEmpty, !reason.isEmpty else { return nil }
         if let raw = wire.cardID {
-            guard let id = UUID(uuidString: raw), let card = discussed.first(where: { $0.id == id }),
+            guard let id = UUID(uuidString: raw), let card = discussed.first(where: { $0.id == id && $0.solve == nil }),
                   wire.baseRevisionID.flatMap(UUID.init(uuidString:)) == card.currentRevisionID,
                   card.front != front || card.back != back else { return nil }
             let pages = wire.sourceSlides.isEmpty ? card.sourcePages : wire.sourceSlides
@@ -644,7 +644,7 @@ extension JobRunner {
                 evidence.append(LearningPointEvidence(messageID: id, quote: item.quote))
             }
             guard evidenceValid, fromStudentOrClick else { decision.rejected += 1; continue }
-            let replaces = wire.replacesCardID.flatMap(UUID.init(uuidString:)).flatMap { id in activeCards.first { $0.id == id }?.id }
+            let replaces = wire.replacesCardID.flatMap(UUID.init(uuidString:)).flatMap { id in activeCards.first { $0.id == id && $0.solve == nil }?.id }
             let draft = LearningPointDraft(front: front, back: back, replacesCardID: replaces)
             if let mergeID = wire.mergesPointID.flatMap(UUID.init(uuidString:)),
                var target = decision.added.first(where: { $0.id == mergeID }) ?? decision.merged.first(where: { $0.id == mergeID }) ?? mergeable[mergeID] {

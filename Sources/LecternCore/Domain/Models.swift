@@ -112,6 +112,7 @@ public struct CardRevision: Codable, Equatable, Identifiable, Sendable {
     public var back: String
     public var author: RevisionAuthor
     public var reason: String?
+    public var solve: SolveDraft? = nil
     public var at: Date
     public init(id: UUID = UUID(), front: String, back: String, author: RevisionAuthor = .user, reason: String? = nil, at: Date = Date()) { self.id = id; self.front = front; self.back = back; self.author = author; self.reason = reason; self.at = at }
 }
@@ -121,7 +122,7 @@ public struct ExportMark: Codable, Equatable, Sendable {
     public var date: Date
     public init(revisionID: UUID, date: Date = Date()) { self.revisionID = revisionID; self.date = date }
 }
-public enum CardIssueKind: String, Codable, Sendable { case importSyntax, emptySide, invalidSource, unresolvedMath }
+public enum CardIssueKind: String, Codable, Sendable { case importSyntax, emptySide, invalidSource, unresolvedMath, invalidSolve }
 public struct CardIssue: Codable, Equatable, Sendable {
     public var kind: CardIssueKind
     public var message: String
@@ -133,7 +134,10 @@ public struct CardDraft: Codable, Equatable, Sendable {
     public var sourcePages: [Int]
     public var flag: String?
     public var learningPointID: UUID? = nil
-    public init(front: String, back: String, sourcePages: [Int] = [], flag: String? = nil, learningPointID: UUID? = nil) { self.front = front; self.back = back; self.sourcePages = sourcePages; self.flag = flag; self.learningPointID = learningPointID }
+    public var solve: SolveDraft? = nil
+    public init(front: String, back: String, sourcePages: [Int] = [], flag: String? = nil, learningPointID: UUID? = nil, solve: SolveDraft? = nil) {
+        self.front = front; self.back = back; self.sourcePages = sourcePages; self.flag = flag; self.learningPointID = learningPointID; self.solve = solve
+    }
 }
 public enum ProposalState: String, Codable, Sendable { case pending, ready, failed }
 public struct Proposal: Codable, Equatable, Identifiable, Sendable {
@@ -165,6 +169,8 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
     public var allowedSourcePages: [Int]?
     /// The chat learning point this card was written from.
     public var learningPointID: UUID? = nil
+    public var solve: SolveCard? = nil
+    var hasApprovedSolve: Bool? = nil
     public init(id: UUID = UUID(), sourcePages: [Int] = [], front: String, back: String, verdict: CardVerdict = .unreviewed, feedback: String = "", flag: String? = nil, issue: CardIssue? = nil, mathInterpretations: [String: MathInterpretation] = [:], history: [CardRevision]? = nil, proposal: Proposal? = nil, origin: CardOrigin = .manual, supersededBy: [UUID]? = nil, exported: ExportMark? = nil, allowedSourcePages: [Int]? = nil) {
         self.id = id; self.sourcePages = sourcePages; self.front = front; self.back = back; self.verdict = verdict; self.feedback = feedback; self.flag = flag; self.issue = issue; self.mathInterpretations = mathInterpretations; self.history = history ?? [CardRevision(front: front, back: back, author: origin == .manual ? .user : .ai)]; self.proposal = proposal; self.origin = origin; self.supersededBy = supersededBy; self.exported = exported; self.allowedSourcePages = allowedSourcePages
     }
@@ -179,7 +185,41 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
         case .splitFrom: allowedSourcePages?.isEmpty != true
         }
     }
-    public var canBeApproved: Bool { (!requiresSourcePages || !sourcePages.isEmpty) && sourcePages.allSatisfy { $0 > 0 && (allowedSourcePages?.contains($0) ?? true) } && issue == nil && !front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && [front, back].allSatisfy { (try? FlashcardMathFormatter.formatForAnki($0, interpretations: mathInterpretations)) != nil } }
+    public var canBeApproved: Bool {
+        guard issue == nil, (!(requiresSourcePages || solve != nil) || !sourcePages.isEmpty),
+              sourcePages.allSatisfy({ $0 > 0 && (allowedSourcePages?.contains($0) ?? true) }),
+              !front.solveTrimmed.isEmpty, !back.solveTrimmed.isEmpty else { return false }
+        if let solve { return solve.draft.validated != nil }
+        return [front, back].allSatisfy { (try? FlashcardMathFormatter.formatForAnki($0, interpretations: mathInterpretations)) != nil }
+    }
+
+    var verifiedSolveExample: SolveCase? {
+        solve?.cases.first { !$0.retired && $0.content.checkedContent != nil }
+    }
+
+    mutating func setSolveDraft(_ draft: SolveDraft?) throws {
+        guard let draft else { solve = nil; return }
+        guard let validated = draft.validated else {
+            throw LectureError.invalidMetadata("The solve exercise is missing a valid question, answer key, or explanation.")
+        }
+        front = validated.sample.prompt
+        back = validated.sample.explanation
+        guard solve?.draft != validated else { return }
+        var replacement = SolveCard(draft: validated)
+        for var former in solve?.cases ?? [] {
+            if former.content.signature == validated.sample.signature {
+                // A revised key or explanation does not make the same exercise unseen.
+                var sample = replacement.cases[0]
+                sample.id = former.id
+                sample.retired = former.retired && former.content == sample.content
+                replacement.cases[0] = sample
+            } else {
+                former.retired = true
+                replacement.cases.append(former)
+            }
+        }
+        solve = replacement
+    }
 }
 public enum ThreadContext: Codable, Equatable, Hashable, Sendable { case none, slide, neighbours(Int), lecture }
 public enum FlashcardContext: String, Codable, CaseIterable, Sendable { case none, all, current }

@@ -56,11 +56,15 @@ public extension Lecture {
     }
     func issues(for card: Card) -> [CardIssue] {
         var result = card.issue.map { [$0] } ?? []
-        if (card.requiresSourcePages || card.origin != .manual && pageCount > 0) && card.sourcePages.isEmpty { result.append(CardIssue(kind: .invalidSource, message: "AI cards need a source page.")) }
+        if (card.solve != nil || card.requiresSourcePages || card.origin != .manual && pageCount > 0) && card.sourcePages.isEmpty { result.append(CardIssue(kind: .invalidSource, message: "This card needs a source page.")) }
         if card.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || card.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { result.append(CardIssue(kind: .emptySide, message: "Both sides need text.")) }
         if card.sourcePages.contains(where: { $0 < 1 || $0 > pageCount }) { result.append(CardIssue(kind: .invalidSource, message: "Source pages must belong to the document and job scope.")) }
         if let allowed = card.allowedSourcePages, card.sourcePages.contains(where: { !allowed.contains($0) }), !result.contains(where: { $0.kind == .invalidSource }) { result.append(CardIssue(kind: .invalidSource, message: "Source pages are outside the job scope.")) }
-        if ![card.front, card.back].allSatisfy({ (try? FlashcardMathFormatter.formatForAnki($0, interpretations: card.mathInterpretations)) != nil }) { result.append(CardIssue(kind: .unresolvedMath, message: "Choose how to interpret ambiguous or unbalanced math.")) }
+        if let solve = card.solve {
+            if solve.draft.validated == nil || Set(solve.cases.map(\.id)).count != solve.cases.count {
+                result.append(CardIssue(kind: .invalidSolve, message: "Request a revision with a complete and valid solve exercise."))
+            }
+        } else if ![card.front, card.back].allSatisfy({ (try? FlashcardMathFormatter.formatForAnki($0, interpretations: card.mathInterpretations)) != nil }) { result.append(CardIssue(kind: .unresolvedMath, message: "Choose how to interpret ambiguous or unbalanced math.")) }
         return result
     }
     func coverage(page: Int) -> Int { cards.filter { !$0.isSuperseded && $0.verdict != .bad && $0.sourcePages.contains(page) }.count }
@@ -128,16 +132,27 @@ public enum LectureReducer {
         guard let i = lecture.jobs.firstIndex(where: { $0.id == id }) else { throw LectureError.missingJob(id) }; return i
     }
     private static func appendRevision(_ card: inout Card, author: RevisionAuthor, reason: String?, now: Date) {
-        card.history.append(CardRevision(front: card.front, back: card.back, author: author, reason: reason, at: now))
+        var revision = CardRevision(front: card.front, back: card.back, author: author, reason: reason, at: now)
+        revision.solve = card.solve?.draft
+        card.history.append(revision)
+    }
+    private static func setVerdict(_ verdict: CardVerdict, at index: Int, in lecture: inout Lecture) throws {
+        if verdict == .good {
+            guard lecture.issues(for: lecture.cards[index]).isEmpty else { throw LectureError.invalidApproval(lecture.cards[index].id) }
+            if lecture.cards[index].solve != nil { lecture.cards[index].hasApprovedSolve = true }
+        }
+        lecture.cards[index].verdict = verdict
     }
     private static func apply(_ lecture: inout Lecture, action: LectureAction, now: Date) throws {
         switch action {
         case .setVerdict(let id, let verdict):
             let i = try index(id, in: lecture)
-            if verdict == .good && !lecture.issues(for: lecture.cards[i]).isEmpty { throw LectureError.invalidApproval(id) }
-            lecture.cards[i].verdict = verdict
+            try setVerdict(verdict, at: i, in: &lecture)
         case .commitEdit(let id, let front, let back, let pages):
             let i = try index(id, in: lecture)
+            if lecture.cards[i].solve != nil, front != lecture.cards[i].front || back != lecture.cards[i].back {
+                throw LectureError.invalidMetadata("Use Request change to revise the checked exercise and its answer key together.")
+            }
             guard lecture.cards[i].front != front || lecture.cards[i].back != back || lecture.cards[i].sourcePages != pages else { return }
             if lecture.cards[i].front != front || lecture.cards[i].back != back { lecture.cards[i].mathInterpretations = [:] }
             lecture.cards[i].front = front; lecture.cards[i].back = back; lecture.cards[i].sourcePages = pages
@@ -149,37 +164,66 @@ public enum LectureReducer {
         case .restoreOriginal(let id):
             let i = try index(id, in: lecture)
             guard let original = lecture.cards[i].history.first else { return }
+            guard (lecture.cards[i].solve == nil) == (original.solve == nil) else {
+                throw LectureError.invalidMetadata("Request a new proposal to change the card type.")
+            }
             if lecture.cards[i].front != original.front || lecture.cards[i].back != original.back { lecture.cards[i].mathInterpretations = [:] }
             lecture.cards[i].front = original.front; lecture.cards[i].back = original.back; lecture.cards[i].verdict = .unreviewed
+            try lecture.cards[i].setSolveDraft(original.solve)
             appendRevision(&lecture.cards[i], author: .user, reason: "Restore original", now: now)
         case .discardProposal(let id): lecture.cards[try index(id, in: lecture)].proposal = nil
         case .acceptProposal(let id, let approve):
             let i = try index(id, in: lecture)
             guard let proposal = lecture.cards[i].proposal, proposal.state == .ready, (1...3).contains(proposal.cards.count) else { throw LectureError.invalidProposal(id) }
+            if lecture.cards[i].solve != nil || proposal.cards.contains(where: { $0.solve != nil }) {
+                guard proposal.baseRevisionID == lecture.cards[i].currentRevisionID else { throw LectureError.invalidProposal(id) }
+            }
             if proposal.cards.count > 1 {
+                guard lecture.cards[i].solve == nil else { throw LectureError.invalidProposal(id) }
                 let rootPointID = lecture.cards[i].learningPointID ?? lecture.learningPoints.first(where: { ($0.cardIDs ?? []).contains(id) })?.id
-                let children = proposal.cards.map { draft -> Card in
+                let children = try proposal.cards.map { draft -> Card in
                     var child = Card(sourcePages: draft.sourcePages, front: draft.front, back: draft.back, flag: draft.flag,
                                      history: [CardRevision(front: draft.front, back: draft.back, author: .ai, reason: proposal.rationale, at: now)],
                                      origin: .splitFrom(cardID: id), allowedSourcePages: proposal.allowedSourcePages ?? lecture.cards[i].allowedSourcePages)
                     child.learningPointID = rootPointID
+                    try child.setSolveDraft(draft.solve)
+                    child.history = []
+                    appendRevision(&child, author: .ai, reason: proposal.rationale, now: now)
                     return child
                 }
-                lecture.cards[i].supersededBy = children.map(\.id); lecture.cards[i].proposal = nil; lecture.cards.append(contentsOf: children)
+                let keepsOriginal = proposal.cards.contains { $0.solve != nil }
+                if !keepsOriginal { lecture.cards[i].supersededBy = children.map(\.id) }
+                lecture.cards[i].proposal = nil
+                lecture.cards.append(contentsOf: children)
                 if let rootPointID, let p = lecture.learningPoints.firstIndex(where: { $0.id == rootPointID }) {
                     var seen = Set<UUID>()
                     let activeLinks = (lecture.learningPoints[p].cardIDs ?? []).filter { linkedID in
-                        linkedID != id && lecture.cards.contains { $0.id == linkedID && !$0.isSuperseded }
+                        (keepsOriginal || linkedID != id) && lecture.cards.contains { $0.id == linkedID && !$0.isSuperseded }
                     }
                     lecture.learningPoints[p].cardIDs = (activeLinks + children.map(\.id)).filter { seen.insert($0).inserted }
                 }
             } else {
                 let draft = proposal.cards[0]
+                let originalIsSolve = lecture.cards[i].solve != nil
+                if originalIsSolve != (draft.solve != nil),
+                   !originalIsSolve || lecture.cards[i].hasApprovedSolve == true || lecture.cards[i].verdict == .good {
+                    var sibling = Card(sourcePages: draft.sourcePages, front: draft.front, back: draft.back, flag: draft.flag,
+                                       history: [], origin: .splitFrom(cardID: id),
+                                       allowedSourcePages: proposal.allowedSourcePages ?? lecture.cards[i].allowedSourcePages)
+                    try sibling.setSolveDraft(draft.solve)
+                    appendRevision(&sibling, author: .ai, reason: proposal.rationale, now: now)
+                    lecture.cards[i].proposal = nil
+                    lecture.cards.append(sibling)
+                    let siblingIndex = lecture.cards.count - 1
+                    if approve { try setVerdict(.good, at: siblingIndex, in: &lecture) }
+                    return
+                }
                 if lecture.cards[i].front != draft.front || lecture.cards[i].back != draft.back { lecture.cards[i].mathInterpretations = [:] }
                 lecture.cards[i].front = draft.front; lecture.cards[i].back = draft.back; lecture.cards[i].sourcePages = draft.sourcePages; lecture.cards[i].flag = draft.flag; lecture.cards[i].allowedSourcePages = proposal.allowedSourcePages ?? lecture.cards[i].allowedSourcePages; lecture.cards[i].proposal = nil; lecture.cards[i].verdict = .unreviewed
                 if let issue = lecture.cards[i].issue, issue.kind == .importSyntax || issue.kind == .emptySide { lecture.cards[i].issue = nil }
+                try lecture.cards[i].setSolveDraft(draft.solve)
                 appendRevision(&lecture.cards[i], author: .ai, reason: proposal.rationale, now: now)
-                if approve { guard lecture.issues(for: lecture.cards[i]).isEmpty else { throw LectureError.invalidApproval(id) }; lecture.cards[i].verdict = .good }
+                if approve { try setVerdict(.good, at: i, in: &lecture) }
             }
         case .addCards(let cards): lecture.cards.append(contentsOf: cards)
         case .startJob(let job):
@@ -203,9 +247,14 @@ public enum LectureReducer {
                     if lecture.learningPoints[p].draft != nil && lecture.learningPoints[p].included { lecture.learningPoints[p].reviewed = false }
                 }
             }
-            let generated = drafts.map { draft in
+            let generated = try drafts.map { draft in
                 var card = Card(sourcePages: draft.sourcePages, front: draft.front, back: draft.back, flag: draft.flag, history: [CardRevision(front: draft.front, back: draft.back, author: .ai, reason: draft.learningPointID == nil ? nil : "From your chat", at: now)], origin: .generated(jobID: id), allowedSourcePages: pages)
                 card.learningPointID = draft.learningPointID
+                try card.setSolveDraft(draft.solve)
+                if draft.solve != nil {
+                    card.history = []
+                    appendRevision(&card, author: .ai, reason: draft.learningPointID == nil ? nil : "From your chat", now: now)
+                }
                 return card
             }
             lecture.cards.append(contentsOf: generated)
@@ -241,6 +290,9 @@ public enum LectureReducer {
                     throw LectureError.invalidMetadata("Chat tried to edit a card outside its selected context.")
                 }
                 let i = try index(edit.cardID, in: lecture)
+                guard lecture.cards[i].solve == nil else {
+                    throw LectureError.invalidMetadata("Use Request change to revise a solve exercise.")
+                }
                 guard version.matches(lecture.cards[i]) else {
                     throw LectureError.invalidMetadata("A flashcard changed while chat was working. Your changes were kept; send the request again.")
                 }
@@ -293,6 +345,7 @@ public enum LectureReducer {
             for entry in entries where entry.lectureID == lecture.id {
                 let i = try index(entry.cardID, in: lecture)
                 guard lecture.cards[i].history.contains(where: { $0.id == entry.revisionID }) else { throw LectureError.invalidMetadata("Export revision is missing") }
+                if let solveCaseID = entry.solveCaseID, lecture.cards[i].verifiedSolveExample?.id != solveCaseID { continue }
                 lecture.cards[i].exported = ExportMark(revisionID: entry.revisionID, date: now)
             }
         case .acceptLearningPointDraft(let id, let front, let back):
@@ -302,7 +355,7 @@ public enum LectureReducer {
             guard !front.isEmpty, !back.isEmpty else { throw LectureError.invalidMetadata("Both sides need text.") }
             let point = lecture.learningPoints[p]
             let cardID: UUID
-            if let target = draft.replacesCardID, let i = lecture.cards.firstIndex(where: { $0.id == target && !$0.isSuperseded }) {
+            if let target = draft.replacesCardID, let i = lecture.cards.firstIndex(where: { $0.id == target && !$0.isSuperseded && $0.solve == nil }) {
                 if lecture.cards[i].front != front || lecture.cards[i].back != back { lecture.cards[i].mathInterpretations = [:] }
                 lecture.cards[i].front = front; lecture.cards[i].back = back
                 lecture.cards[i].sourcePages = Array(Set(lecture.cards[i].sourcePages + point.pages)).sorted()
@@ -329,6 +382,9 @@ public enum LectureReducer {
                 guard apply else { suggestion.state = .dismissed; return }
                 if let target = suggestion.cardID {
                     let i = try index(target, in: lecture)
+                    guard lecture.cards[i].solve == nil else {
+                        throw LectureError.invalidMetadata("Use Request change to revise a solve exercise.")
+                    }
                     guard !lecture.cards[i].isSuperseded, lecture.cards[i].currentRevisionID == suggestion.baseRevisionID else {
                         throw LectureError.invalidMetadata("This card changed after the suggestion was made. Dismiss it, or ask again.")
                     }
@@ -452,10 +508,22 @@ public struct LectureController: Sendable {
         for old in entry.before.cards {
             guard let changed = entry.after.cards.first(where: { $0.id == old.id }), old != changed, let i = lecture.cards.firstIndex(where: { $0.id == old.id }) else { continue }
             var current = lecture.cards[i]
-            if (old.front != changed.front || old.back != changed.back || old.sourcePages != changed.sourcePages)
-                && current.front == changed.front && current.back == changed.back && current.sourcePages == changed.sourcePages {
+            if (old.front != changed.front || old.back != changed.back || old.sourcePages != changed.sourcePages || old.solve?.draft != changed.solve?.draft)
+                && current.front == changed.front && current.back == changed.back && current.sourcePages == changed.sourcePages
+                && current.solve?.draft == changed.solve?.draft {
+                if old.solve?.draft != changed.solve?.draft {
+                    var previous = old.solve
+                    let known = Set(previous?.cases.map(\.id) ?? [])
+                    for var former in current.solve?.cases ?? [] where !known.contains(former.id) {
+                        former.retired = true
+                        previous?.cases.append(former)
+                    }
+                    current.solve = previous
+                }
                 current.front = old.front; current.back = old.back; current.sourcePages = old.sourcePages
-                current.history.append(CardRevision(front: old.front, back: old.back, reason: "Undo", at: now))
+                var revision = CardRevision(front: old.front, back: old.back, reason: "Undo", at: now)
+                revision.solve = current.solve?.draft
+                current.history.append(revision)
             }
             if old.allowedSourcePages != changed.allowedSourcePages && current.allowedSourcePages == changed.allowedSourcePages { current.allowedSourcePages = old.allowedSourcePages }
             if old.verdict != changed.verdict && current.verdict == changed.verdict {

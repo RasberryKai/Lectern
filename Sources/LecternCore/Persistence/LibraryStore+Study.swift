@@ -24,7 +24,8 @@ extension LibraryStore {
                 try overrides.applying(to: preferences.defaults).validated()
                 decks.append(StudyDeck(
                     module: module, lectures: try lectureListUnlocked(in: module).filter { !$0.isArchived },
-                    memory: journal.state.memory, overrides: overrides, introducedToday: count
+                    memory: journal.state.memory, overrides: overrides, introducedToday: count,
+                    seenSolveCases: journal.state.seenSolveCases ?? [:]
                 ))
             }
             return StudyCatalog(decks: decks, preferences: preferences, introducedToday: introducedToday)
@@ -56,12 +57,14 @@ extension LibraryStore {
 
     public func gradeStudyCard(
         _ entry: StudyCard, rating: StudyRating, eventID: UUID, now: Date,
-        answeringTime: TimeInterval, permitEarly: Bool, extraNewPerModule: Int, timeZone: TimeZone = .current
+        answeringTime: TimeInterval, permitEarly: Bool, extraNewPerModule: Int, timeZone: TimeZone = .current,
+        solveResponse: StudySolveResponse? = nil
     ) throws -> StudyMemoryState {
         try locked {
             var journal = try StudyJournal(directory: moduleDirectory(entry.moduleID))
             if let saved = journal.state.grades[eventID] {
-                guard saved.cardID == entry.id, saved.rating == rating, !journal.state.undoneGrades.contains(eventID) else {
+                guard saved.cardID == entry.id, saved.rating == rating, saved.solveResponse == solveResponse,
+                      !journal.state.undoneGrades.contains(eventID) else {
                     throw LibraryError.invalid("This study grade conflicts with a recorded event.")
                 }
                 try journal.synchronize()
@@ -69,7 +72,15 @@ extension LibraryStore {
             }
             try requireEditable(moduleUnlocked(entry.moduleID))
             let lecture = try readLecture(entry.moduleID, entry.lectureID)
-            _ = try Self.studyCardIndex(entry, in: lecture, verdict: .good)
+            let card = lecture.cards[try Self.studyCardIndex(entry, in: lecture, verdict: .good)]
+            if let solve = card.solve {
+                guard let solveResponse, let exercise = solve.activeCases.first(where: { $0.id == solveResponse.caseID })?.content.checkedContent,
+                      !SolveChecker.check(exercise, answers: solveResponse.answers).hasInvalidInput else {
+                    throw LibraryError.invalid("Check a valid solve response before rating this card.")
+                }
+            } else if solveResponse != nil {
+                throw LibraryError.invalid("This card no longer contains the solve exercise.")
+            }
             let previous = journal.state.memory[entry.id]
             guard previous == entry.memory else {
                 throw LibraryError.invalid("This card's schedule changed. Restart the session to use its latest schedule.")
@@ -90,11 +101,80 @@ extension LibraryStore {
             }
             try journal.append(StudyJournalEvent(
                 id: eventID, cardID: entry.id, at: now, studyDay: today, source: .study,
-                payload: .grade(rating: rating, answeringTime: answeringTime, configuration: configuration)
+                payload: .grade(rating: rating, answeringTime: answeringTime, configuration: configuration),
+                solveResponse: solveResponse
             ))
             // Applying a valid grade always stores the resulting state.
             return journal.state.grades[eventID]!.after
         }
+    }
+
+    /// A case is spent once shown, even when the learner leaves without a grade.
+    public func presentSolveCase(_ entry: StudyCard, presentationID: UUID, now: Date = Date(),
+                                 timeZone: TimeZone = .current) throws -> SolveCase? {
+        try locked {
+            try requireEditable(moduleUnlocked(entry.moduleID))
+            let lecture = try readLecture(entry.moduleID, entry.lectureID)
+            let card = lecture.cards[try Self.studyCardIndex(entry, in: lecture, verdict: .good)]
+            guard let solve = card.solve else { return nil }
+            var journal = try StudyJournal(directory: moduleDirectory(entry.moduleID))
+            if let saved = journal.state.presentations?[presentationID] {
+                guard saved.cardID == entry.id else { throw LibraryError.invalid("This presentation ID belongs to another card.") }
+                try journal.synchronize()
+                return solve.activeCases.first { $0.id == saved.caseID && $0.content.checkedContent != nil }
+            }
+            guard journal.state.memory[entry.id] == entry.memory else {
+                throw LibraryError.invalid("This card's schedule changed. Refresh the session before studying it.")
+            }
+            let seen = journal.state.seenSolveCases?[entry.id] ?? []
+            guard let exercise = solve.activeCases.first(where: {
+                !seen.contains($0.id) && $0.content.checkedContent != nil
+            }) else { return nil }
+            try journal.append(StudyJournalEvent(
+                id: presentationID, cardID: entry.id, at: now, studyDay: StudyCatalog.studyDay(at: now, timeZone: timeZone),
+                source: .presentation, payload: .present(caseID: exercise.id)
+            ))
+            return exercise
+        }
+    }
+
+    public func retireSolveCase(_ entry: StudyCard, caseID: UUID) throws -> Card {
+        try transaction(moduleID: entry.moduleID, lectureID: entry.lectureID) { lecture in
+            let index = try Self.studyCardIndex(entry, in: lecture, verdict: .good)
+            guard let caseIndex = lecture.cards[index].solve?.cases.firstIndex(where: { $0.id == caseID }) else {
+                throw LibraryError.invalid("This solve case is no longer available.")
+            }
+            if lecture.cards[index].verifiedSolveExample?.id == caseID { lecture.cards[index].exported = nil }
+            lecture.cards[index].solve?.cases[caseIndex].retired = true
+            return lecture.cards[index]
+        }.result
+    }
+
+    /// Recheck the stored revision, approval, and unseen count before spending on variants.
+    public func solveRefillCandidate(_ entry: StudyCard) throws -> StudyCard? {
+        try locked {
+            let module = try moduleUnlocked(entry.moduleID)
+            guard !module.isArchived else { return nil }
+            let lecture = try readLecture(entry.moduleID, entry.lectureID)
+            guard let index = try? Self.studyCardIndex(entry, in: lecture, verdict: .good) else { return nil }
+            let card = lecture.cards[index]
+            guard card.solve?.draft.validated != nil else { return nil }
+            let journal = try StudyJournal(directory: moduleDirectory(entry.moduleID))
+            return StudyCard(moduleID: entry.moduleID, lectureID: entry.lectureID, lectureName: lecture.name,
+                             moduleName: module.name, card: card, memory: journal.state.memory[entry.id],
+                             seenSolveCaseIDs: journal.state.seenSolveCases?[entry.id] ?? [])
+        }
+    }
+
+    @discardableResult
+    public func appendSolveCases(_ contents: [SolveCaseContent], to entry: StudyCard) throws -> Int {
+        try transaction(moduleID: entry.moduleID, lectureID: entry.lectureID) { lecture in
+            guard let index = try? Self.studyCardIndex(entry, in: lecture, verdict: .good),
+                  var solve = lecture.cards[index].solve else { return 0 }
+            let added = solve.append(contents)
+            lecture.cards[index].solve = solve
+            return added
+        }.result
     }
 
     public func undoStudyGrade(moduleID: UUID, eventID: UUID) throws {
@@ -121,6 +201,9 @@ extension LibraryStore {
             let index = try Self.studyCardIndex(entry, in: lecture, verdict: disabled ? .good : .unreviewed)
             var expected = entry.card
             expected.verdict = lecture.cards[index].verdict
+            // Background refill and approval history do not edit the exercise.
+            expected.solve = lecture.cards[index].solve
+            expected.hasApprovedSolve = lecture.cards[index].hasApprovedSolve
             guard lecture.cards[index] == expected else {
                 throw LibraryError.invalid("This card was edited. Study cannot change its review status.")
             }
@@ -137,6 +220,7 @@ extension LibraryStore {
         try transaction(moduleID: entry.moduleID, lectureID: entry.lectureID) { lecture in
             let index = try Self.studyCardIndex(entry, in: lecture, verdict: .good)
             let old = lecture.cards[index]
+            guard old.solve == nil else { throw LibraryError.invalid("Revise the solve exercise in Review.") }
             guard front != old.front || back != old.back else { return old }
             let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
             try LectureReducer.reduce(&lecture, action: .commitEdit(
@@ -170,7 +254,8 @@ extension LibraryStore {
                 try journal.append(StudyJournalEvent(
                     id: UUID(), cardID: nil, at: now, studyDay: today, source: .reschedule,
                     payload: .reschedule(configuration: batch.configuration,
-                                         cardIDs: batch.changes.keys.sorted { $0.uuidString < $1.uuidString })
+                                         cardIDs: batch.changes.keys.sorted { $0.uuidString < $1.uuidString },
+                                         solveIDs: batch.solveIDs.isEmpty ? nil : batch.solveIDs)
                 ))
             }
         }
@@ -220,17 +305,20 @@ extension LibraryStore {
             let configuration = try studyOverridesUnlocked(in: module.id).applying(to: preferences.defaults)
             try configuration.validated()
             var changes: [UUID: StudyRescheduleChange] = [:]
+            var solveIDs: Set<UUID> = []
             for lecture in try lectureListUnlocked(in: module) where !lecture.isArchived {
                 for card in lecture.cards where card.verdict == .good && !card.isSuperseded {
                     guard let previous = journal.state.memory[card.id] else { continue }
-                    let next = StudyScheduler.reschedule(previous, configuration: configuration, cardID: card.id)
+                    let next = StudyScheduler.reschedule(previous, configuration: configuration, cardID: card.id,
+                                                         isSolve: card.solve != nil)
                     if previous.due != next.due {
                         changes[card.id] = StudyRescheduleChange(before: previous, after: next)
+                        if card.solve != nil { solveIDs.insert(card.id) }
                     }
                 }
             }
             if !changes.isEmpty {
-                batches[module.id] = StudyRescheduleBatch(configuration: configuration, changes: changes)
+                batches[module.id] = StudyRescheduleBatch(configuration: configuration, changes: changes, solveIDs: solveIDs)
             }
         }
         return StudyReschedulePreview(moduleID: moduleID, batches: batches)

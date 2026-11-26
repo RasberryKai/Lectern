@@ -50,6 +50,7 @@ final class AppModel {
 
     enum Phase: Equatable { case loading, ready, failed(String) }
     enum BackupStatus: Equatable { case saving, saved(URL), failed(String) }
+    enum BackupImportStatus: Equatable { case preparing, readyToRestore, restored(URL), failed(String) }
 
     let store: LibraryStore
     let runner: JobRunner
@@ -69,6 +70,7 @@ final class AppModel {
     private(set) var settings: AISettings = .default
     private(set) var settingsLoaded = false
     private(set) var backupStatus: BackupStatus?
+    private(set) var backupImportStatus: BackupImportStatus?
     private(set) var apiKeySaved = false
     private(set) var bootstrapReport: BootstrapReport? = nil
     var showBootstrapReport = false
@@ -80,6 +82,7 @@ final class AppModel {
     var errorMessage: String? = nil
     var showSettings = false
     var showStudySettingsOnOpen = false
+    var showLibrarySettingsOnOpen = false
     var showNewModule = false
     var settingsModuleID: UUID? = nil
     var showModuleStudySettingsOnOpen = false
@@ -99,6 +102,20 @@ final class AppModel {
     @ObservationIgnored private var librarySessionLock: LibrarySessionLock?
     @ObservationIgnored private var settingsSaveTask: Task<Void, Error>?
     @ObservationIgnored private var settingsRevision = 0
+    private var solveRefillTasks: [SolveRefillKey: Task<Void, Never>] = [:]
+    private var solveRefillFailures: [SolveRefillKey: (date: Date, message: String)] = [:]
+
+    private nonisolated struct SolveRefillKey: Hashable {
+        let lecture: LectureRef
+        let cardID: UUID
+        let revisionID: UUID?
+
+        init(_ entry: StudyCard) {
+            lecture = LectureRef(moduleID: entry.moduleID, lectureID: entry.lectureID)
+            cardID = entry.id
+            revisionID = entry.card.currentRevisionID
+        }
+    }
 
     private init() {
         let environment = ProcessInfo.processInfo.environment
@@ -124,19 +141,22 @@ final class AppModel {
     func start() async {
         guard !started else { return }
         started = true
+        do {
+            librarySessionLock = try LibrarySessionLock(rootURL: store.rootURL)
+            await applyPendingBackup()
+        } catch {
+            phase = .failed(error.localizedDescription)
+        }
         // Preferences remain available even when the library cannot be opened.
         settings = await settingsStore.load()
         providerConfiguration.update(settings)
         settingsLoaded = true
         refreshAPIKeyState()
+        guard librarySessionLock != nil else { return }
         do {
-            librarySessionLock = try LibrarySessionLock(rootURL: store.rootURL)
-        } catch {
-            phase = .failed(error.localizedDescription)
-            return
-        }
-        do {
-            let skipLegacy = ProcessInfo.processInfo.environment["LECTERN_SKIP_LEGACY_IMPORT"] == "1"
+            let restoredBackup: Bool
+            if case .restored = backupImportStatus { restoredBackup = true } else { restoredBackup = false }
+            let skipLegacy = restoredBackup || ProcessInfo.processInfo.environment["LECTERN_SKIP_LEGACY_IMPORT"] == "1"
             let report = try await library.bootstrap(importLegacy: !skipLegacy)
             bootstrapReport = report
             showBootstrapReport = report.interruptedJobs > 0 || !report.warnings.isEmpty
@@ -209,6 +229,9 @@ final class AppModel {
             studyNow = now
             studyError = nil
             scheduleStudyRefresh()
+            for entry in catalog.decks.lazy.flatMap(\.approvedCards) where entry.card.solve != nil {
+                prepareSolveCases(for: entry)
+            }
         } catch {
             guard revision == studyRefreshRevision else { return }
             studyError = error.localizedDescription
@@ -245,6 +268,57 @@ final class AppModel {
     func endStudy() {
         studySession = nil
         scheduleReload()
+    }
+
+    func solveRefillStatus(for entry: StudyCard) -> (running: Bool, error: String?) {
+        let key = SolveRefillKey(entry)
+        return (solveRefillTasks[key] != nil, solveRefillFailures[key]?.message)
+    }
+
+    func prepareSolveCases(for entry: StudyCard, requested: Bool = false, checkLatest: Bool = false) {
+        let key = SolveRefillKey(entry)
+        guard entry.card.solve != nil, solveRefillTasks[key] == nil else { return }
+        if !requested {
+            guard checkLatest || entry.availableSolveCases.count < SolveCard.refillThreshold,
+                  solveRefillFailures[key].map({ Date().timeIntervalSince($0.date) >= 900 }) != false else { return }
+        }
+        solveRefillFailures[key] = nil
+        solveRefillTasks[key] = Task { [weak self] in
+            guard let self else { return }
+            defer { self.solveRefillTasks[key] = nil }
+            do {
+                guard let latest = try await self.store.solveRefillCandidate(entry), let solve = latest.card.solve else { return }
+                let available = latest.availableSolveCases.count
+                guard requested || available < SolveCard.refillThreshold else { return }
+                let count = SolveCard.poolTarget - available
+                guard count > 0 else { return }
+                let contents: [SolveCaseContent]
+                if solve.draft.sample.variance != nil {
+                    contents = solve.varianceVariants(count: count)
+                } else {
+                    let lecture = try await self.store.loadLecture(moduleID: latest.moduleID, lectureID: latest.lectureID)
+                    let notes = lecture.slides.filter { latest.card.sourcePages.contains($0.pageIndex + 1) }
+                        .map { $0.note }.filter { !$0.isEmpty }
+                    contents = try await self.runner.prepareSolveVariants(
+                        draft: solve.draft, existingCases: solve.cases, count: count,
+                        backend: self.settings.backend, model: self.settings.selectedModel,
+                        sourceContext: notes.joined(separator: "\n\n"), moduleID: latest.moduleID,
+                        lectureID: latest.lectureID, sourcePages: latest.card.sourcePages,
+                        isStillApproved: { [store = self.store] in try await store.solveRefillCandidate(latest) != nil }
+                    )
+                }
+                if contents.isEmpty {
+                    throw LibraryError.unavailable("No new cases with a verified answer key were returned.")
+                }
+                let added = try await self.store.appendSolveCases(contents, to: latest)
+                guard added > 0 else { return }
+                if let window = self.lectureWindows[latest.lectureID] { try? await window.session.refresh() }
+                // Clear the in-flight marker after refreshing so a partial batch does not immediately retry.
+                await self.refreshStudy()
+            } catch {
+                self.solveRefillFailures[key] = (Date(), error.localizedDescription)
+            }
+        }
     }
 
     func openStudySource(_ entry: StudyCard, page: Int) {
@@ -457,7 +531,7 @@ final class AppModel {
     // MARK: Settings
 
     func exportLibraryBackup(to url: URL) async {
-        guard backupStatus != .saving else { return }
+        guard backupStatus != .saving, backupImportStatus != .preparing else { return }
         backupStatus = .saving
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -466,13 +540,56 @@ final class AppModel {
                 try await window.flushAllThrowing()
             }
             try await settingsSaveTask?.value
-            let domain = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
-            let preferences = UserDefaults.standard.persistentDomain(forName: domain) ?? [:]
-            let plist = try PropertyListSerialization.data(fromPropertyList: preferences, format: .xml, options: 0)
-            try await store.exportLibraryBackup(to: url, preferences: plist)
+            try await store.exportLibraryBackup(to: url, preferences: backupPreferences())
             backupStatus = .saved(url)
         } catch {
             backupStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func prepareBackupImport(from url: URL) async {
+        guard backupStatus != .saving, backupImportStatus != .preparing, backupImportStatus != .readyToRestore else { return }
+        guard librarySessionLock != nil else {
+            backupImportStatus = .failed("Open this library in Lectern before importing a backup.")
+            return
+        }
+        backupImportStatus = .preparing
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            try await store.stageLibraryBackupImport(from: url)
+            backupImportStatus = .readyToRestore
+        } catch {
+            backupImportStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    private var preferencesDomain: String {
+        Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+    }
+
+    private func backupPreferences() throws -> Data {
+        let preferences = UserDefaults.standard.persistentDomain(forName: preferencesDomain) ?? [:]
+        return try PropertyListSerialization.data(fromPropertyList: preferences, format: .xml, options: 0)
+    }
+
+    private func applyPendingBackup() async {
+        do {
+            guard let restored = try await store.restorePendingLibraryBackup(previousPreferences: backupPreferences()) else { return }
+            let plist = try PropertyListSerialization.propertyList(from: restored.preferences, options: [], format: nil)
+            guard let preferences = plist as? [String: Any] else {
+                throw LibraryError.invalid("The backup preferences could not be read.")
+            }
+            let defaults = UserDefaults.standard
+            defaults.setPersistentDomain(preferences, forName: preferencesDomain)
+            guard defaults.synchronize() else {
+                throw LibraryError.unavailable("Lectern couldn't save the imported preferences.")
+            }
+            try await store.finishPendingLibraryBackupImport()
+            backupImportStatus = .restored(restored.previousLibrary)
+        } catch {
+            backupImportStatus = .failed(error.localizedDescription)
+            errorMessage = "Lectern couldn't finish importing the backup. \(error.localizedDescription)"
         }
     }
 

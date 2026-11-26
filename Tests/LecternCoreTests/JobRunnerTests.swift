@@ -51,6 +51,57 @@ private actor RetriedAskProvider: AIProvider {
 }
 
 @Suite struct JobRunnerTests {
+    @Test func generateAndReviseCarryASolveDraftThroughNormalReview() async throws {
+        let (store, module, lecture, root) = try await setup()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.slides[0].note = "Practice with discrete probability tables."
+        }
+        let first = SolveDraft(skill: "Variance", reason: "Practice mapping a distribution to its moments.",
+                               variation: "Change outcome weights.", sample: SolveCaseContent(
+                                prompt: "", fields: [], explanation: "",
+                                variance: SolveVariance(outcomes: [0, 1], weights: [1, 3])))
+        var revised = first
+        revised.sample.variance?.weights = [3, 2]
+        var invalid = first
+        invalid.sample.variance?.weights = [0, 2]
+        let generatedCards = GeneratedCards(cards: [
+            WireCard(front: "Variance exercise", back: "Compute all three values.", sourceSlides: [1], solve: first),
+            WireCard(front: "Broken case", back: "Invalid key.", sourceSlides: [1], solve: invalid),
+            WireCard(front: "Define variance.", back: "Expected squared deviation from the mean.", sourceSlides: [2])
+        ])
+        let revision = RevisedCards(cards: [
+            WireCard(front: "Revised variance exercise", back: "Compute all three values.", sourceSlides: [1], solve: revised)
+        ], rationale: "Changed the probability weights.")
+        let provider = try FakeAIProvider(responses: [
+            AIResponse(content: String(decoding: JSONEncoder().encode(generatedCards), as: UTF8.self)),
+            AIResponse(content: String(decoding: JSONEncoder().encode(revision), as: UTF8.self))
+        ])
+        let runner = JobRunner(store: store, providers: [provider])
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id)
+        await runner.waitUntilIdle()
+        let generated = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(generated.cards.count == 2)
+        #expect(generated.cards.contains { $0.solve == nil })
+        let card = try #require(generated.cards.first { $0.solve != nil })
+        #expect(card.verdict == .unreviewed)
+        #expect(card.solve?.cases.count == 1)
+        #expect(card.solve?.draft.sample.fields.count == 3)
+
+        _ = try await runner.revise(moduleID: module.id, lectureID: lecture.id, cardID: card.id, feedback: "Change the probability weights.")
+        await runner.waitUntilIdle()
+        let updated = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        let current = try #require(updated.cards.first { $0.id == card.id })
+        #expect(current.solve == card.solve)
+        #expect(current.proposal?.cards.first?.solve?.sample.variance == revised.sample.variance)
+        let requests = await provider.requests
+        #expect(requests.count == 2)
+        #expect(requests[0].prompt.contains("Practice with discrete probability tables."))
+        #expect(requests[0].pdf != nil)
+        #expect(requests[1].prompt.contains("CURRENT SOLVE DESIGN"))
+        #expect(requests[1].prompt.contains("Change the probability weights."))
+    }
+
     @Test(arguments: [ThreadContext.none, .slide, .lecture], [FlashcardContext.none, .all, .current])
     func chatIncludesOnlySelectedSlideAndFlashcardContext(slides: ThreadContext, cards: FlashcardContext) async throws {
         let (store, module, lecture, root) = try await setup()

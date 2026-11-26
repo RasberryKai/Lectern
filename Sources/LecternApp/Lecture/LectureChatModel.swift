@@ -105,7 +105,8 @@ extension LectureWindowModel {
         let question = failure?.question ?? chatDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let refs = failure?.refs ?? resolvedChatContext
         let attachments = failure?.attachments ?? chatDraftAttachments
-        let allowsCardCreation = failure?.allowsCardCreation ?? (mode == .review)
+        let allowsCardCreation = failure?.allowsCardCreation ?? (mode == .review && studySolveContext == nil)
+        let studyContext = studySolveContext
         let chatID = lecture.currentChat.id
         guard failure == nil || failure?.chatID == chatID else { return }
         guard !question.isEmpty || !attachments.isEmpty else { return }
@@ -125,7 +126,9 @@ extension LectureWindowModel {
         chatDraftAttachments.removeAll { sentIDs.contains($0.id) }
         do {
             try await flushAllThrowing()
-            _ = try await session.chat(question: question, contextRefs: refs, attachments: attachments, messageID: messageID, backend: settings.backend, model: settings.selectedModel, allowsCardCreation: allowsCardCreation)
+            _ = try await session.chat(question: question, contextRefs: refs, attachments: attachments,
+                                       messageID: messageID, backend: settings.backend, model: settings.selectedModel,
+                                       allowsCardCreation: allowsCardCreation, studyExerciseContext: studyContext)
         } catch {
             // A refresh can fail after the job was committed; first check for the saved message.
             try? await session.refresh()

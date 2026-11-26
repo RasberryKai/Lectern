@@ -64,13 +64,15 @@ public actor JobRunner {
         var back: String
         var pages: [Int]
         var kind: String?
+        var solve: SolveDraft?
 
         init(wirePointID: UUID, learningPointID: UUID, sourceCardID: UUID?, sourceCardPages: [Int]?, wasPendingDraft: Bool?,
-             draftReplacesCardID: UUID?, front: String, back: String, pages: [Int], kind: String?) {
+             draftReplacesCardID: UUID?, front: String, back: String, pages: [Int], kind: String?, solve: SolveDraft? = nil) {
             self.wirePointID = wirePointID; self.learningPointID = learningPointID; self.sourceCardID = sourceCardID
             self.sourceCardPages = sourceCardPages
             self.wasPendingDraft = wasPendingDraft; self.draftReplacesCardID = draftReplacesCardID
             self.front = front; self.back = back; self.pages = pages; self.kind = kind
+            self.solve = solve
         }
 
         init(_ draft: PromptBuilder.ChatCardDraft) {
@@ -78,7 +80,7 @@ public actor JobRunner {
                       sourceCardID: draft.sourceCardID, sourceCardPages: draft.sourceCardPages,
                       wasPendingDraft: draft.wasPendingDraft,
                       draftReplacesCardID: draft.draftReplacesCardID, front: draft.front,
-                      back: draft.back, pages: draft.pages, kind: draft.kind)
+                      back: draft.back, pages: draft.pages, kind: draft.kind, solve: draft.solve)
         }
     }
     struct Snapshot: Codable {
@@ -92,6 +94,8 @@ public actor JobRunner {
     let providers: [AIBackend: any AIProvider]
     var pending: [Work] = []
     var active: [UUID: Task<Void, Never>] = [:]
+    var solveVariantSlotBusy = false
+    var solveVariantWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
     var reservations = Set<String>()
     var progress: [UUID: JobProgress] = [:]
     private var subscribers: [UUID: AsyncStream<JobProgress>.Continuation] = [:]
@@ -205,12 +209,7 @@ public actor JobRunner {
             case .messagesAPI: resolvedModel = AISettings.learningPointAPIModel
             case .codexCLI: resolvedModel = Self.codexModel(model)
             }
-        } else if backend == .messagesAPI {
-            resolvedModel = model == "opus" || model.isEmpty ? AISettings.defaultMessagesAPIModel : model
-            guard resolvedModel.hasPrefix("claude-") else { throw AIError.configuration("Messages API needs a full model ID such as claude-opus-5-5.") }
-        } else if backend == .codexCLI {
-            resolvedModel = Self.codexModel(model)
-        } else { resolvedModel = model.isEmpty ? AISettings.defaultCLIModel : model }
+        } else { resolvedModel = try Self.cardModel(model, backend: backend) }
         let modules = try await store.modules()
         guard let module = modules.first(where: { $0.id == moduleID }) else { throw AIError.configuration("Module no longer exists.") }
         let initial = try await store.loadLecture(moduleID: moduleID, lectureID: lectureID)
@@ -279,7 +278,7 @@ public actor JobRunner {
         job.replacesExistingCards = replaceExistingCards ? true : nil
         if kind == .chat {
             let editableCards = thread?.flashcardContext == .current ? card.map { [$0] } ?? [] : contextCards ?? []
-            job.chatCardVersions = editableCards.compactMap { card in
+            job.chatCardVersions = editableCards.filter { $0.solve == nil }.compactMap { card in
                 card.currentRevisionID.map { ChatCardVersion(cardID: card.id, revisionID: $0,
                     verdict: card.verdict, mathInterpretations: card.mathInterpretations) }
             }
@@ -354,12 +353,24 @@ public actor JobRunner {
         model.isEmpty || model == "opus" ? AISettings.defaultCodexModel : model
     }
 
+    static func cardModel(_ model: String, backend: AIBackend) throws -> String {
+        switch backend {
+        case .claudeCLI: return model.isEmpty ? AISettings.defaultCLIModel : model
+        case .codexCLI: return codexModel(model)
+        case .messagesAPI:
+            let resolved = model == "opus" || model.isEmpty ? AISettings.defaultMessagesAPIModel : model
+            guard resolved.hasPrefix("claude-") else { throw AIError.configuration("Messages API needs a full model ID such as claude-opus-5-5.") }
+            return resolved
+        }
+    }
+
     private struct PromptDraftSnapshot: Decodable {
         var point: UUID
         var front: String
         var back: String
         var pages: [Int]
         var kind: String?
+        var solve: SolveDraft?
     }
 
     /// Older immutable job snapshots did not persist draft expectations separately. Their
@@ -374,7 +385,7 @@ public actor JobRunner {
         return drafts.map { draft in
             GenerationDraftSnapshot(wirePointID: draft.point, learningPointID: draft.point, sourceCardID: nil,
                                     sourceCardPages: nil, wasPendingDraft: nil, draftReplacesCardID: nil,
-                                    front: draft.front, back: draft.back, pages: draft.pages, kind: draft.kind)
+                                    front: draft.front, back: draft.back, pages: draft.pages, kind: draft.kind, solve: draft.solve)
         }
     }
 
@@ -384,6 +395,7 @@ public actor JobRunner {
             guard let card = lecture.cards.first(where: { $0.id == sourceCardID && !$0.isSuperseded }),
                   (point.cardIDs ?? []).contains(sourceCardID) || card.learningPointID == point.id,
                   card.front == draft.front, card.back == draft.back,
+                  card.solve?.draft == draft.solve,
                   draft.sourceCardPages == nil || card.sourcePages == draft.sourceCardPages else { return false }
             return true
         }
@@ -397,7 +409,7 @@ public actor JobRunner {
             let linkedIDs = Set(point.cardIDs ?? [])
             return lecture.cards.contains { card in
                 !card.isSuperseded && (linkedIDs.contains(card.id) || card.learningPointID == point.id) &&
-                    card.front == draft.front && card.back == draft.back
+                    card.front == draft.front && card.back == draft.back && card.solve?.draft == draft.solve
             }
         }
 
@@ -408,10 +420,11 @@ public actor JobRunner {
         }
     }
 
-    private static func normalizedCardKey(front: String, back: String) -> String {
+    private static func normalizedCardKey(front: String, back: String, solve: SolveDraft?) -> String {
         func normalize(_ text: String) -> String {
             text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
         }
+        if let solve = solve?.validated { return "solve\u{0}" + normalize(solve.skill) + "\u{0}" + solve.sample.signature }
         return normalize(front) + "\u{0}" + normalize(back)
     }
 
@@ -423,11 +436,15 @@ public actor JobRunner {
     }
 
     func schedule() {
-        while active.count < 3 && !pending.isEmpty {
+        while active.count + (solveVariantSlotBusy ? 1 : 0) < 3 && !pending.isEmpty {
             let work = pending.removeFirst()
             active[work.job.id] = Task { await self.run(work) }
         }
-        if active.isEmpty && pending.isEmpty && reservations.isEmpty {
+        if active.count < 3 && !solveVariantSlotBusy && !solveVariantWaiters.isEmpty {
+            solveVariantSlotBusy = true
+            solveVariantWaiters.removeFirst().continuation.resume(returning: true)
+        }
+        if active.isEmpty && pending.isEmpty && reservations.isEmpty && !solveVariantSlotBusy && solveVariantWaiters.isEmpty {
             let waiters = idleWaiters; idleWaiters.removeAll(); waiters.forEach { $0.resume() }
         }
     }
@@ -583,7 +600,12 @@ public actor JobRunner {
                 var linked = Set<UUID>()
                 var linkedCards: [CardDraft] = []
                 var unlinkedCards: [CardDraft] = []
+                var invalidSolvePages = Set<Int>()
                 for wire in output.cards {
+                    if let solve = wire.solve, solve.validated == nil {
+                        invalidSolvePages.formUnion(wire.sourceSlides)
+                        continue
+                    }
                     if let label = wire.point {
                         let identity = UUID(uuidString: label)?.uuidString.lowercased() ?? label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                         guard seenPointLabels.insert(identity).inserted else { continue }
@@ -592,6 +614,7 @@ public actor JobRunner {
                                 // The request's draft changed while the provider was running. Drop this stale
                                 // result instead of consuming the current point or restoring obsolete text.
                                 guard let current = liveByWireID[pointID] else { continue }
+                                guard (current.solve == nil) == (wire.solve == nil) else { continue }
                                 var card = wire.draft
                                 card.learningPointID = current.learningPointID
                                 linkedCards.append(card)
@@ -618,18 +641,18 @@ public actor JobRunner {
                             let currentPages = card.sourcePages.filter(work.job.pages.contains)
                             let sourcePages = currentPages.isEmpty ? point.pages.filter(work.job.pages.contains) : currentPages
                             guard !sourcePages.isEmpty else { continue }
-                            var preserved = CardDraft(front: card.front, back: card.back, sourcePages: sourcePages, flag: card.flag)
+                            var preserved = CardDraft(front: card.front, back: card.back, sourcePages: sourcePages, flag: card.flag, solve: card.solve?.draft)
                             preserved.learningPointID = pointID
                             preservedCards.append(preserved)
                         }
                     }
                 }
 
-                let expectedSignatures = Set(expected.map { Self.normalizedCardKey(front: $0.front, back: $0.back) })
-                let linkedSignatures = Set((linkedCards + preservedCards).map { Self.normalizedCardKey(front: $0.front, back: $0.back) })
+                let expectedSignatures = Set(expected.map { Self.normalizedCardKey(front: $0.front, back: $0.back, solve: $0.solve) })
+                let linkedSignatures = Set((linkedCards + preservedCards).map { Self.normalizedCardKey(front: $0.front, back: $0.back, solve: $0.solve) })
                 var unlinkedSignatures = Set<String>()
                 let uniqueUnlinked = unlinkedCards.filter { draft in
-                    let key = Self.normalizedCardKey(front: draft.front, back: draft.back)
+                    let key = Self.normalizedCardKey(front: draft.front, back: draft.back, solve: draft.solve)
                     guard !expectedSignatures.contains(key), !linkedSignatures.contains(key) else { return false }
                     return unlinkedSignatures.insert(key).inserted
                 }
@@ -637,10 +660,13 @@ public actor JobRunner {
                 var cards = linkedCards + preservedCards + uniqueUnlinked
                 for draft in liveExpected where !linked.contains(draft.wirePointID) {
                     cards.append(CardDraft(front: draft.front, back: draft.back, sourcePages: draft.pages,
-                                           learningPointID: draft.learningPointID))
+                                           learningPointID: draft.learningPointID, solve: draft.solve))
                 }
                 let covered = Set(cards.flatMap(\.sourcePages) + output.skipped.map(\.slide))
-                let missing = work.job.pages.filter { !covered.contains($0) }.map { SkippedSlide(slide: $0, reason: "Model returned no card or skip reason; review this slide.") }
+                let missing = work.job.pages.filter { !covered.contains($0) }.map { page in
+                    let reason = invalidSolvePages.contains(page) ? "Model returned a solve exercise with an invalid answer key." : "Model returned no card or skip reason; review this slide."
+                    return SkippedSlide(slide: page, reason: reason)
+                }
                 try LectureReducer.reduce(&lecture, action: .landGeneration(jobID: work.job.id, cards: cards, skipped: output.skipped + missing, usage: response.usage))
             case .revise:
                 guard let output = frozenRevised else { throw AIError.invalidResponse("Missing revision payload.") }
@@ -653,7 +679,8 @@ public actor JobRunner {
                 guard let t = lecture.threads.firstIndex(where: { $0.id == work.job.threadID }) else { throw AIError.invalidResponse("The slide thread no longer exists.") }
                 if work.job.kind == .ask || work.job.kind == .chat {
                     if let chat = frozenChat {
-                        try LectureReducer.reduce(&lecture, action: .applyChatEdits(jobID: work.job.id, edits: chat.edits))
+                        let solveCardIDs = Set(lecture.cards.filter { $0.solve != nil }.map(\.id))
+                        try LectureReducer.reduce(&lecture, action: .applyChatEdits(jobID: work.job.id, edits: chat.edits.filter { !solveCardIDs.contains($0.cardID) }))
                     }
                     let text = frozenChat?.message ?? response.content
                     let expression = try NSRegularExpression(pattern: #"\[slide (\d+)\]"#, options: .caseInsensitive)
@@ -774,7 +801,7 @@ public actor JobRunner {
         return count
     }
     public func waitUntilIdle() async {
-        if active.isEmpty && pending.isEmpty && reservations.isEmpty { return }
+        if active.isEmpty && pending.isEmpty && reservations.isEmpty && !solveVariantSlotBusy && solveVariantWaiters.isEmpty { return }
         await withCheckedContinuation { idleWaiters.append($0) }
     }
 

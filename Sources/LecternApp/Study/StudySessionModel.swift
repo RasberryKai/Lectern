@@ -48,6 +48,8 @@ final class StudySessionModel {
         }
         let position: Int
         let action: Action
+        var solveCase: SolveCase? = nil
+        var solveResponse: StudySolveResponse? = nil
     }
 
     let app: AppModel
@@ -67,6 +69,7 @@ final class StudySessionModel {
     private var limitLifted = false
     private var gradedIDs: [CardKey: Int] = [:]
     private var attemptID = UUID()
+    private var solvePresentationID = UUID()
     private var pendingGrade: PendingGrade?
 
     private(set) var gradeCount = 0
@@ -74,6 +77,8 @@ final class StudySessionModel {
     private(set) var status: Status
     private(set) var isBusy = false
     private(set) var revealed = false
+    private(set) var currentSolveCase: SolveCase?
+    private(set) var currentSolveAnswers: [SolveAnswer]?
     private(set) var sourceIndex = 0
     private(set) var pane: Pane?
     private(set) var chatModel: LectureWindowModel?
@@ -133,6 +138,8 @@ final class StudySessionModel {
     var elapsedSeconds: Int { Int(activeSeconds.rounded()) }
     var unseenCount: Int { refreshedPlan.totalUnseen }
     var dueRemaining: Int { refreshedPlan.dueCount }
+    var deferredSolveCount: Int { refreshedPlan.deferredSolveCount }
+    var readySolveCount: Int { refreshedPlan.cards.count { $0.card.solve != nil } }
     var approvedCount: Int { status == .empty ? plan.approvedCount : refreshedPlan.approvedCount }
     var nextDue: Date? { refreshedPlan.nextDue ?? (status == .empty ? plan.nextDue : nil) }
     var canKeepGoing: Bool { position < queue.count }
@@ -173,9 +180,58 @@ final class StudySessionModel {
     }
 
     func reveal() {
-        guard current != nil, !isBusy, editDraft == nil, !revealed else { return }
+        guard let current, current.card.solve == nil, !isBusy, editDraft == nil, !revealed else { return }
         revealed = true
         toast = nil
+    }
+
+    func prepareCurrentSolveCase() async {
+        guard let entry = current, entry.card.solve != nil, currentSolveCase == nil, !isBusy else { return }
+        let turn = turnID
+        var deferred = false
+        await perform {
+            do {
+                let exercise = try await app.store.presentSolveCase(entry, presentationID: solvePresentationID)
+                guard turnID == turn else { return }
+                if let exercise {
+                    currentSolveCase = exercise
+                    cardStartedAt = clock.now
+                } else {
+                    deferred = true
+                    toast = "No unseen cases are ready. This card keeps its schedule."
+                    advance()
+                }
+                var refill = entry
+                if let exercise { refill.seenSolveCaseIDs.insert(exercise.id) }
+                app.prepareSolveCases(for: refill, checkLatest: exercise == nil)
+            } catch {
+                canSkipCurrent = true
+                throw error
+            }
+        }
+        if deferred { await app.refreshStudy() }
+    }
+
+    func checkSolve(answers: [SolveAnswer]) {
+        guard !isBusy, !revealed, let content = currentSolveCase?.content,
+              !SolveChecker.check(content, answers: answers).hasInvalidInput else { return }
+        currentSolveAnswers = answers
+        revealed = true
+        toast = nil
+    }
+
+    func retireSolveCase() async {
+        guard let entry = current, let exercise = currentSolveCase, revealed, !hasPendingGrade else { return }
+        await perform {
+            try await flushChatDraft()
+            let updated = try await app.store.retireSolveCase(entry, caseID: exercise.id)
+            var refill = entry
+            refill.card = updated
+            app.prepareSolveCases(for: refill, checkLatest: true)
+            advance()
+            toast = "Case removed. This card keeps its schedule."
+            app.scheduleReload()
+        }
     }
 
     func showSlide(cycle: Bool = false) {
@@ -192,7 +248,8 @@ final class StudySessionModel {
     }
 
     func showAsk() {
-        guard current != nil, editDraft == nil, !isBusy, !hasPendingGrade else { return }
+        guard let current, (current.card.solve == nil || revealed),
+              editDraft == nil, !isBusy, !hasPendingGrade else { return }
         pane = .ask
     }
 
@@ -206,6 +263,7 @@ final class StudySessionModel {
             chatModel.selectCard(entry.id)
             chatModel.sourceIndex = sourceIndex
             chatModel.chatContext = ChatContext(followsScreen: false, pins: [.card(entry.id)])
+            chatModel.studySolveContext = solveAskContext
             return
         }
         do {
@@ -219,6 +277,7 @@ final class StudySessionModel {
             model.selectCard(entry.id)
             model.sourceIndex = sourceIndex
             model.chatContext = ChatContext(followsScreen: false, pins: [.card(entry.id)])
+            model.studySolveContext = solveAskContext
             chatModel = model
         } catch {
             guard !Task.isCancelled, current.map(CardKey.init) == CardKey(entry) else { return }
@@ -252,6 +311,10 @@ final class StudySessionModel {
         }
         guard updated != entry.card else { return }
         queue[position].entry.card = updated
+        if updated.currentRevisionID != entry.card.currentRevisionID,
+           updated.solve != nil || entry.card.solve != nil {
+            resetCard()
+        }
         if !updated.sourcePages.indices.contains(sourceIndex) { sourceIndex = 0 }
     }
 
@@ -261,7 +324,8 @@ final class StudySessionModel {
         if rating == .again, configuration.retryAfterMiss { return "end of session" }
         let now = max(Date(), entry.memory?.lastReview ?? .distantPast)
         guard let state = try? StudyScheduler.review(entry.memory, rating: rating, at: now,
-                                                      configuration: configuration, cardID: entry.id) else { return "" }
+                                                      configuration: configuration, cardID: entry.id,
+                                                      isSolve: entry.card.solve != nil) else { return "" }
         let delay = max(60, Int(state.due.timeIntervalSince(now).rounded()))
         if delay < 86_400 { return "in \(Format.count(delay / 60, "min", "min"))" }
         return "in \(Format.count(delay / 86_400, "day"))"
@@ -270,6 +334,11 @@ final class StudySessionModel {
     func grade(_ rating: StudyRating) async {
         guard let entry = current, revealed, editDraft == nil, !isBusy,
               pendingGrade == nil || pendingGrade?.rating == rating else { return }
+        let solveCase = currentSolveCase
+        let response = solveCase.flatMap { exercise in
+            currentSolveAnswers.map { StudySolveResponse(presentationID: solvePresentationID, caseID: exercise.id, answers: $0) }
+        }
+        guard entry.card.solve == nil || response != nil else { return }
         let eventID = attemptID
         let configuration = app.studyCatalog.configuration(moduleID: entry.moduleID)
         let request = pendingGrade ?? PendingGrade(rating: rating, answeredAt: Date(),
@@ -282,7 +351,7 @@ final class StudySessionModel {
             do {
                 state = try await app.store.gradeStudyCard(entry, rating: rating, eventID: eventID, now: request.answeredAt,
                                                            answeringTime: request.answeringTime, permitEarly: isRetry || includeFuture,
-                                                           extraNewPerModule: extraNewPerModule)
+                                                           extraNewPerModule: extraNewPerModule, solveResponse: response)
             } catch {
                 // A complete event can reach the journal before a sync error. Retry that event ID
                 // with the same rating and time instead of turning it into a second grade.
@@ -294,7 +363,8 @@ final class StudySessionModel {
             }
             pendingGrade = nil
             let retry = rating == .again && request.retryAfterMiss
-            undo = Undo(position: position, action: .grade(id: eventID, rating: rating, appendedRetry: retry))
+            undo = Undo(position: position, action: .grade(id: eventID, rating: rating, appendedRetry: retry),
+                        solveCase: solveCase, solveResponse: response)
             gradeCount += 1
             gradedIDs[CardKey(entry), default: 0] += 1
             if rating == .again {
@@ -329,8 +399,8 @@ final class StudySessionModel {
             toast = "Disabled. It’s back in \(entry.lectureName) as unreviewed."
             advance()
             app.scheduleReload()
-            await app.refreshStudy()
         }
+        await app.refreshStudy()
     }
 
     func undoLast() async {
@@ -354,16 +424,23 @@ final class StudySessionModel {
             position = undo.position
             self.undo = nil
             resetCard()
-            revealed = true
+            if let previousCase = undo.solveCase, let response = undo.solveResponse {
+                currentSolveCase = previousCase
+                currentSolveAnswers = response.answers
+                solvePresentationID = response.presentationID
+                revealed = true
+            } else {
+                revealed = queue[position].entry.card.solve == nil
+            }
             toast = nil
             status = .studying
             resumeClock()
-            await app.refreshStudy()
         }
+        await app.refreshStudy()
     }
 
     func beginEdit() {
-        guard !isBusy, editDraft == nil, !hasPendingGrade, let entry = current else { return }
+        guard !isBusy, editDraft == nil, !hasPendingGrade, let entry = current, entry.card.solve == nil else { return }
         editDraft = EditDraft(front: entry.card.front, back: entry.card.back)
     }
 
@@ -439,8 +516,8 @@ final class StudySessionModel {
             undo = nil
             toast = nil
             advance()
-            await app.refreshStudy()
         }
+        await app.refreshStudy()
     }
 
     private func advance() {
@@ -476,6 +553,9 @@ final class StudySessionModel {
     private func resetCard() {
         cardStartedAt = clock.now
         attemptID = UUID()
+        solvePresentationID = UUID()
+        currentSolveCase = nil
+        currentSolveAnswers = nil
         revealed = false
         sourceIndex = 0
         editDraft = nil
@@ -487,6 +567,20 @@ final class StudySessionModel {
         finishedAt = clock.now
         pane = nil
         chatModel = nil
+    }
+
+    private var solveAskContext: String? {
+        guard let exercise = currentSolveCase, let answers = currentSolveAnswers else { return nil }
+        let answerData = try? JSONEncoder().encode(answers)
+        let submission = answerData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        return """
+        The learner is asking about this specific checked solve-card case.
+        Exercise:
+        \(exercise.content.staticQuestion)
+        Answer key and explanation:
+        \(exercise.content.staticAnswer)
+        Submitted answers in field order: \(submission)
+        """
     }
 
     private func perform(_ body: () async throws -> Void) async {

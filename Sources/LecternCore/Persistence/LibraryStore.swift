@@ -675,6 +675,11 @@ extension LibraryStore {
         }
         return result
     }
+    func validateAttachmentFiles(for lecture: Lecture) throws {
+        for attachment in try attachmentMetadata(for: lecture).values {
+            _ = try loadChatAttachmentUnlocked(moduleID: lecture.moduleID, lectureID: lecture.id, attachment: attachment)
+        }
+    }
     private func attachmentBlobs(for lecture: Lecture) throws -> [String: Data] {
         try attachmentMetadata(for: lecture).mapValues { try loadChatAttachmentUnlocked(moduleID: lecture.moduleID, lectureID: lecture.id, attachment: $0) }
     }

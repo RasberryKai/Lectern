@@ -15,13 +15,17 @@ public struct AIRequest: Codable, Equatable, Sendable {
     public var chatSnapshot: ChatSnapshot? = nil
     public var pdf: Data?
     public var workingDirectory: URL
-    /// Background chat distillation uses its own contract: concept-level points in Prepare, card suggestions in Review.
+    /// Background operations can use a more specific contract than the job kind's default.
     public var outputSchemaOverride: String? = nil
     /// Diagnostic attribution only; never sent as study content to a provider.
     public var diagnosticContext: [String: String]? = nil
     var outputSchema: String? {
-        outputSchemaOverride ?? AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true,
-                                                    allowsCardDeletion: chatSnapshot?.allowsCardDeletion == true)
+        if let outputSchemaOverride { return outputSchemaOverride }
+        // The output contract is part of the frozen Generate and Revise prompt.
+        // Replaying it keeps snapshots written before solve cards compatible.
+        if (kind == .generate || kind == .revise), let schema = PromptBuilder.frozenCardSchema(in: prompt) { return schema }
+        return AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true,
+                                  allowsCardDeletion: chatSnapshot?.allowsCardDeletion == true)
     }
     var allowsWebSearch: Bool { kind == .chat }
     var cliSystemPrompt: String {
@@ -76,10 +80,12 @@ public struct WireCard: Codable, Equatable, Sendable {
     public var flag: String?
     /// Generate only: the chat card draft this card realises.
     public var point: String? = nil
-    public init(front: String, back: String, sourceSlides: [Int], flag: String? = nil, point: String? = nil) {
+    public var solve: SolveDraft? = nil
+    public init(front: String, back: String, sourceSlides: [Int], flag: String? = nil, point: String? = nil, solve: SolveDraft? = nil) {
         self.front = front; self.back = back; self.sourceSlides = sourceSlides; self.flag = flag; self.point = point
+        self.solve = solve
     }
-    public var draft: CardDraft { CardDraft(front: front, back: back, sourcePages: sourceSlides, flag: flag) }
+    public var draft: CardDraft { CardDraft(front: front, back: back, sourcePages: sourceSlides, flag: flag, solve: solve) }
 }
 public struct DistilledPoints: Codable, Equatable, Sendable {
     public struct Point: Codable, Equatable, Sendable {
@@ -200,19 +206,22 @@ public enum AIOutputSchema {
                 + (allowsCardDeletion ? #""deletions":{"type":"array","items":\#(chatCardDeletion)},"# : "")
             return #"{"type":"object","additionalProperties":false,"required":["message","edits","quiz"\#(extraRequired)],"properties":{\#(extraProperties)"quiz":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["question","answer"],"properties":{"question":{"type":"string"},"answer":{"type":"string"}}}},"message":{"type":"string"},"edits":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID","front","back"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"},"front":{"type":"string"},"back":{"type":"string"}}}}}}"#
         case .generate:
-            return #"{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":CARD},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}"#.replacingOccurrences(of: "CARD", with: generatedCard)
+            return #"{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":\#(cardSchema(generated: true))},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}},"$defs":\#(solveDefinitions)}"#
         case .revise:
-            return #"{"type":"object","additionalProperties":false,"required":["cards","rationale"],"properties":{"cards":{"type":"array","minItems":1,"maxItems":3,"items":CARD},"rationale":{"type":"string"}}}"#.replacingOccurrences(of: "CARD", with: card)
+            return #"{"type":"object","additionalProperties":false,"required":["cards","rationale"],"properties":{"cards":{"type":"array","minItems":1,"maxItems":3,"items":\#(cardSchema(generated: false))},"rationale":{"type":"string"}},"$defs":\#(solveDefinitions)}"#
         case .distil:
             return #"{"type":"object","additionalProperties":false,"required":["learningPoints","summary"],"properties":{"summary":{"type":"string"},"learningPoints":{"type":"array","maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["text","pages"],"properties":{"text":{"type":"string"},"pages":{"type":"array","items":{"type":"integer"}}}}}}}"#
         }
     }
     public static let chatDistillation = #"{"type":"object","additionalProperties":false,"required":["summary","closedThroughMessageID","learningPoints"],"properties":{"summary":{"type":"string"},"closedThroughMessageID":{"type":["string","null"]},"learningPoints":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["text","pages","kind","difficulty","evidence","front","back","replacesCardID","mergesPointID","endMessageID"],"properties":{"text":{"type":"string"},"pages":{"type":"array","items":{"type":"integer"}},"kind":{"type":"string","enum":["ownWords","misconception","understood"]},"difficulty":{"type":"integer","minimum":0,"maximum":3},"evidence":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["messageID","quote"],"properties":{"messageID":{"type":"string"},"quote":{"type":"string"}}}},"front":{"type":"string"},"back":{"type":"string"},"replacesCardID":{"type":["string","null"]},"mergesPointID":{"type":["string","null"]},"endMessageID":{"type":"string"}}}}}}"#
     public static let reviewDistillation = #"{"type":"object","additionalProperties":false,"required":["summary","suggestion"],"properties":{"summary":{"type":"string"},"suggestion":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["reason","cardID","baseRevisionID","front","back","sourceSlides"],"properties":{"reason":{"type":"string"},"cardID":{"type":["string","null"]},"baseRevisionID":{"type":["string","null"]},"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}}}}]}}}"#
-    private static let generatedCard = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag","point"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]},"point":{"type":["string","null"]}}}"#
     private static let newChatCard = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}}}}"#
     private static let chatCardDeletion = #"{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"}}}"#
-    private static let card = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]}}}"#
+    private static func cardSchema(generated: Bool) -> String {
+        let pointKey = generated ? #","point""# : ""
+        let pointProperty = generated ? #","point":{"type":["string","null"]}"# : ""
+        return ##"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag","solve"\##(pointKey)],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]},"solve":{"anyOf":[{"type":"null"},{"$ref":"#/$defs/solveDraft"}]}\##(pointProperty)}}"##
+    }
 }
 
 /// Deterministic offline provider for frontend previews and integration tests.

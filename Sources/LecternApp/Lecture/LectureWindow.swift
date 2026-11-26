@@ -233,6 +233,8 @@ struct LectureWorkspace: View {
     private func handleReviewKey(_ event: NSEvent, modifiers: NSEvent.ModifierFlags, letter: String) -> Bool {
         if Key.isReturn(event) {
             guard !model.answerHidden, model.selectedCard?.proposal?.state == .ready else { return false }
+            let hasSolveDraft = model.selectedCard?.proposal?.cards.contains { $0.solve != nil } == true
+            guard modifiers != .shift || !hasSolveDraft else { return false }
             Task { await model.acceptProposal(approve: modifiers == .shift) }
             return true
         }
@@ -241,6 +243,7 @@ struct LectureWorkspace: View {
         case Key.left, Key.up: model.stepCard(-1); return true
         case Key.right, Key.down: model.stepCard(1); return true
         case Key.space:
+            guard model.selectedCard?.solve == nil else { return false }
             if model.answerHidden { model.revealAnswer(); return true }
             guard let card = model.selectedCard, !card.sourcePages.isEmpty else { return false }
             let pages = card.sourcePages

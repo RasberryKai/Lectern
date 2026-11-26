@@ -9,6 +9,7 @@ struct ChatCardContent: Codable, Equatable, Sendable {
     let mathInterpretations: [String: MathInterpretation]?
     let cardID: UUID?
     let baseRevisionID: UUID?
+    let solve: SolveDraft?
 
     init(_ card: Card, number: Int, includeEditIDs: Bool = false) {
         self.number = number
@@ -18,6 +19,7 @@ struct ChatCardContent: Codable, Equatable, Sendable {
         mathInterpretations = card.mathInterpretations.isEmpty ? nil : card.mathInterpretations
         cardID = includeEditIDs ? card.id : nil
         baseRevisionID = includeEditIDs ? card.currentRevisionID : nil
+        solve = card.solve?.draft
     }
 
     static func deck(_ cards: [Card]) -> [Self] {

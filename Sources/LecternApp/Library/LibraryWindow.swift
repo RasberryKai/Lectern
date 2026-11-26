@@ -289,6 +289,12 @@ struct ModuleCreationForm: View {
                     if let onClose {
                         Button("Cancel", action: onClose)
                             .buttonStyle(LinkButtonStyle(color: Theme.quiet)).keyboardShortcut(.cancelAction)
+                    } else {
+                        Button("Import a library backup…") {
+                            model.showLibrarySettingsOnOpen = true
+                            model.showSettings = true
+                        }
+                        .buttonStyle(LinkButtonStyle())
                     }
                 }
                 .padding(40)

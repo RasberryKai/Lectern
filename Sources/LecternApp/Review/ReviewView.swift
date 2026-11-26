@@ -31,7 +31,8 @@ struct ReviewView: View {
                 SegmentedControl(options: [(false, "Browse"), (true, "Test")],
                                  selection: Binding(get: { model.testMode }, set: { model.setTestMode($0) }),
                                  activeFill: Theme.ink, activeText: Theme.canvas)
-                    .help("Test hides the answer until you press Space · T switches")
+                    .help(model.selectedCard?.solve == nil ? "Test hides the answer until you press Space · T switches"
+                          : "Test hides the solution until you check your answers · T switches")
             }
             if let card = model.selectedCard {
                 if !model.answerHidden {
@@ -42,7 +43,12 @@ struct ReviewView: View {
                     .font(Theme.body)
                     .panel(padding: 12)
                 }
-                CardDetail(model: model, card: card, focus: focus)
+                if let solve = card.solve {
+                    SolveCardDetail(model: model, card: card, solve: solve)
+                        .id(card.id)
+                } else {
+                    CardDetail(model: model, card: card, focus: focus)
+                }
             } else { emptyState }
         }
     }
@@ -183,11 +189,187 @@ private struct CardRow: View {
 
     private var tag: some View {
         HStack(spacing: 5) {
+            if card.solve != nil {
+                Image(systemName: "pencil.and.list.clipboard").font(.system(size: 11)).foregroundStyle(Theme.quiet)
+                    .accessibilityLabel("Solve card")
+            }
             if card.proposal != nil || card.flag != nil { Image(systemName: "sparkles").font(.system(size: 11)).foregroundStyle(Theme.ai) }
             if revising { ProgressView().controlSize(.mini) }
             else { Circle().fill(issues ? Theme.bad : card.verdict.v2Color).frame(width: 7, height: 7) }
         }
         .accessibilityLabel(card.verdict.v2Title)
+    }
+}
+
+private struct SolveCardDetail: View {
+    @Bindable var model: LectureWindowModel
+    let card: Card
+    let solve: SolveCard
+    @State private var showRequest = false
+    @State private var caseToRemove: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Solve sample").eyebrow()
+                SolveExerciseView(content: solve.draft.sample, canReveal: !model.testMode, canRetry: true) { _ in
+                    if model.answerHidden { model.revealAnswer() }
+                }
+                .id(solve.cases.first?.id ?? card.id)
+                .id(model.testMode)
+                if !model.answerHidden {
+                    Divider()
+                    draftDetails(solve.draft)
+                    if let flag = card.flag {
+                        Label(flag, systemImage: "sparkles").font(Theme.small).foregroundStyle(Theme.ai)
+                    }
+                    let issues = model.lecture.issues(for: card)
+                    if !issues.isEmpty { ReviewIssues(model: model, card: card, issues: issues) }
+                    HStack(spacing: 10) {
+                        Button("Request change") {
+                            showRequest = true
+                        }
+                        .buttonStyle(LinkButtonStyle(color: Theme.ai))
+                        .disabled(model.readOnly || card.proposal?.state == .pending)
+                        Spacer()
+                        VerdictBar(model: model, solve: true)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .panel(padding: 20)
+            if !model.answerHidden {
+                if let proposal = card.proposal { ProposalCard(model: model, card: card, proposal: proposal) }
+                if card.verdict == .good { casePool }
+            }
+        }
+        .sheet(isPresented: $showRequest) {
+            SolveRevisionRequest(addsCard: false) { feedback in
+                Task { await model.requestSolveRevision(feedback) }
+            }
+        }
+        .alert("Remove this case?", isPresented: Binding(
+            get: { caseToRemove != nil }, set: { if !$0 { caseToRemove = nil } }
+        ), presenting: caseToRemove) { id in
+            Button("Remove case", role: .destructive) { Task { await model.retireSolveCase(id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("The card and its review history stay in Study.")
+        }
+    }
+
+    private func draftDetails(_ draft: SolveDraft) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(draft.skill).font(Theme.heading(16, weight: .semibold))
+            Text(draft.reason).font(Theme.body)
+            Text("What varies").eyebrow().padding(.top, 3)
+            Text(draft.variation).font(Theme.body).foregroundStyle(Theme.quiet)
+        }
+    }
+
+    private var casePool: some View {
+        let activeCases = solve.activeCases
+        let seen = model.app.studyCatalog.decks.first { $0.id == model.ref.moduleID }?.seenSolveCases[card.id] ?? []
+        let readyCount = activeCases.count { !seen.contains($0.id) && $0.content.checkedContent != nil }
+        return DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                if readyCount == 0 {
+                    Text("No verified cases are ready.").font(Theme.body).foregroundStyle(Theme.quiet)
+                }
+                ForEach(Array(solve.cases.enumerated()), id: \.element.id) { index, exercise in
+                    if !exercise.retired {
+                        SolvePoolCase(exercise: exercise, number: index + 1, seen: seen.contains(exercise.id),
+                                      readOnly: model.readOnly) {
+                            caseToRemove = exercise.id
+                        }
+                    }
+                }
+                if let error = model.solveRefillError {
+                    Text(error).font(Theme.small).foregroundStyle(Theme.bad)
+                }
+                if model.isRefillingSolveCases {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Preparing more cases…").font(Theme.small).foregroundStyle(Theme.quiet)
+                    }
+                } else if readyCount < SolveCard.poolTarget && !model.readOnly {
+                    Button(model.solveRefillError == nil ? "Prepare more cases" : "Retry preparing cases") {
+                        model.refillSolveCases()
+                    }
+                        .buttonStyle(LinkButtonStyle())
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack(spacing: 8) {
+                Text("Verified cases").font(Theme.body.weight(.semibold))
+                Text("\(readyCount) ready").font(Theme.small).foregroundStyle(Theme.quiet)
+                if model.isRefillingSolveCases { ProgressView().controlSize(.mini) }
+            }
+        }
+        .panel(padding: 12)
+    }
+}
+
+private struct SolveRevisionRequest: View {
+    let addsCard: Bool
+    let submit: (String) -> Void
+    @State private var request = ""
+    @FocusState private var focused: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let feedback = request.trimmingCharacters(in: .whitespacesAndNewlines)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(addsCard ? "Add a solve card" : "Request a change").font(Theme.heading(20))
+            Text(addsCard ? "Lectern will draft a practice case based on this flip card."
+                 : "What should change about this exercise?").font(Theme.body).foregroundStyle(Theme.quiet)
+            TextField(addsCard ? "What should it practice? (optional)" : "Describe the change",
+                      text: $request, axis: .vertical)
+                .focused($focused)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(3...6)
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(addsCard ? "Request solve card" : "Request change") {
+                    dismiss()
+                    submit(addsCard ? "Add a separate solve card that applies this rule. \(feedback)" : feedback)
+                }
+                .buttonStyle(PrimaryButtonStyle(tint: Theme.ai))
+                .disabled(!addsCard && feedback.isEmpty)
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
+        .onAppear { focused = true }
+    }
+}
+
+private struct SolvePoolCase: View {
+    let exercise: SolveCase
+    let number: Int
+    let seen: Bool
+    let readOnly: Bool
+    let remove: () -> Void
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            if expanded {
+                VStack(alignment: .leading, spacing: 12) {
+                    SolveExerciseView(content: exercise.content, canReveal: true, canRetry: true)
+                    Button("Remove case", action: remove).buttonStyle(LinkButtonStyle(color: Theme.bad))
+                        .disabled(readOnly)
+                }
+                .padding(.top, 8)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text("Case \(number)").font(Theme.body)
+                if seen { Text("Seen").font(Theme.caption).foregroundStyle(Theme.quiet) }
+            }
+        }
     }
 }
 
@@ -198,6 +380,7 @@ private struct CardDetail: View {
     let card: Card
     var focus: FocusState<EditorField?>.Binding
     @State private var editingSide: EditorField?
+    @State private var showSolveRequest = false
 
     var body: some View {
         let issues = model.lecture.issues(for: card)
@@ -219,7 +402,7 @@ private struct CardDetail: View {
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Theme.aiWash, in: RoundedRectangle(cornerRadius: 10)).padding(16)
                 }
-                if !hidden, !issues.isEmpty { issueList(issues).padding(12) }
+                if !hidden, !issues.isEmpty { ReviewIssues(model: model, card: card, issues: issues).padding(12) }
                 side("Front", text: $model.editorFront, field: .front, size: 24)
                 Rectangle().fill(Theme.border).frame(height: 1)
                 if hidden { answerPrompt } else { answer }
@@ -228,6 +411,10 @@ private struct CardDetail: View {
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            if !model.testMode, card.proposal == nil, !model.readOnly {
+                Button("Add solve card…") { showSolveRequest = true }
+                    .buttonStyle(LinkButtonStyle(color: Theme.ai))
+            }
             if !hidden { MathChoices(model: model, card: card) }
             hints(hidden: hidden)
             if !hidden { history }
@@ -238,6 +425,11 @@ private struct CardDetail: View {
         }
         .onChange(of: editingSide) { old, _ in
             if old != nil { Task { await model.run { try await model.session.flushEdits() } } }
+        }
+        .sheet(isPresented: $showSolveRequest) {
+            SolveRevisionRequest(addsCard: true) { feedback in
+                Task { await model.requestSolveRevision(feedback) }
+            }
         }
     }
 
@@ -281,25 +473,6 @@ private struct CardDetail: View {
                 Text(model.testMode ? "Rate the card, not your memory" : "Click text to edit").font(Theme.caption)
             }
         }.font(Theme.small).foregroundStyle(Theme.faint).frame(maxWidth: .infinity)
-    }
-
-    private func issueList(_ issues: [CardIssue]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(issues.enumerated()), id: \.offset) { _, issue in
-                HStack(alignment: .firstTextBaseline) {
-                    Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.bad)
-                    Text(issue.message).font(Theme.small)
-                    Spacer()
-                    if issue.kind == .importSyntax {
-                        Button("Mark as fixed") { Task { await model.dispatch(.resolveIssue(cardID: card.id)) } }
-                            .buttonStyle(LinkButtonStyle()).disabled(model.readOnly)
-                    }
-                }
-            }
-            Text("Approval is blocked until these are fixed.").font(Theme.caption).foregroundStyle(Theme.quiet)
-        }
-        .padding(10)
-        .background(Theme.badWash, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func side(_ title: String, text: Binding<String>, field: EditorField, size: CGFloat) -> some View {
@@ -355,6 +528,31 @@ private struct CardDetail: View {
     }
 }
 
+private struct ReviewIssues: View {
+    let model: LectureWindowModel
+    let card: Card
+    let issues: [CardIssue]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(issues.enumerated()), id: \.offset) { _, issue in
+                HStack(alignment: .firstTextBaseline) {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.bad)
+                    Text(issue.message).font(Theme.small)
+                    Spacer()
+                    if issue.kind == .importSyntax {
+                        Button("Mark as fixed") { Task { await model.dispatch(.resolveIssue(cardID: card.id)) } }
+                            .buttonStyle(LinkButtonStyle()).disabled(model.readOnly)
+                    }
+                }
+            }
+            Text("Approval is blocked until these are fixed.").font(Theme.caption).foregroundStyle(Theme.quiet)
+        }
+        .padding(10)
+        .background(Theme.badWash, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 // MARK: - Ambiguous math
 
 private struct MathChoices: View {
@@ -400,6 +598,10 @@ private struct ProposalCard: View {
     let card: Card
     let proposal: Proposal
 
+    private var addsSolveCard: Bool {
+        card.solve == nil && proposal.cards.count == 1 && proposal.cards[0].solve != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
@@ -416,14 +618,22 @@ private struct ProposalCard: View {
             case .pending:
                 HStack { ProgressView().controlSize(.small); Text("Waiting for AI…").font(Theme.small) }
             case .failed:
-                Text("This proposal failed. Discard it and request the change in chat again.").font(Theme.small).foregroundStyle(Theme.bad)
+                Text("This proposal failed. Discard it to request the change again.").font(Theme.small).foregroundStyle(Theme.bad)
             case .ready:
                 if proposal.cards.count == 1, let draft = proposal.cards.first {
-                    if draft.front != card.front { DiffText(label: "Front", before: card.front, after: draft.front) }
-                    if draft.back != card.back { DiffText(label: "Back", before: card.back, after: draft.back) }
-                    if draft.front == card.front && draft.back == card.back {
-                        Text("Text unchanged\(draft.sourcePages != card.sourcePages ? "; sources become \(Format.slides(draft.sourcePages))" : "").")
-                            .font(Theme.small).foregroundStyle(Theme.quiet)
+                    if let solve = draft.solve {
+                        Text(solve.skill).font(Theme.heading(16, weight: .semibold))
+                        Text(solve.reason).font(Theme.body)
+                        Text(solve.variation).font(Theme.small).foregroundStyle(Theme.quiet)
+                        SolveExerciseView(content: solve.sample, canReveal: true, canRetry: true)
+                            .id(proposal.id)
+                    } else {
+                        if draft.front != card.front { DiffText(label: "Front", before: card.front, after: draft.front) }
+                        if draft.back != card.back { DiffText(label: "Back", before: card.back, after: draft.back) }
+                        if draft.front == card.front && draft.back == card.back {
+                            Text("Text unchanged\(draft.sourcePages != card.sourcePages ? "; sources become \(Format.slides(draft.sourcePages))" : "").")
+                                .font(Theme.small).foregroundStyle(Theme.quiet)
+                        }
                     }
                 } else {
                     ForEach(Array(proposal.cards.enumerated()), id: \.offset) { index, draft in
@@ -445,7 +655,7 @@ private struct ProposalCard: View {
                 HStack(spacing: 10) { proposalActions }
                 VStack(alignment: .leading, spacing: 8) { proposalActions }
             }
-            .disabled(model.readOnly || proposal.state != .ready)
+            .disabled(model.readOnly || proposal.state == .pending)
         }
         .padding(18)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
@@ -453,9 +663,11 @@ private struct ProposalCard: View {
     }
 
     @ViewBuilder private var proposalActions: some View {
-        Button("Accept ↩") { Task { await model.acceptProposal(approve: false) } }
-            .buttonStyle(PrimaryButtonStyle())
-        if proposal.cards.count == 1 {
+        if proposal.state == .ready {
+            Button(addsSolveCard ? "Add solve card" : "Accept ↩") { Task { await model.acceptProposal(approve: false) } }
+                .buttonStyle(PrimaryButtonStyle())
+        }
+        if proposal.state == .ready, proposal.cards.count == 1, proposal.cards.first?.solve == nil, card.solve == nil {
             Button("Accept and mark Good") { Task { await model.acceptProposal(approve: true) } }
                 .buttonStyle(SecondaryButtonStyle())
         }
@@ -600,13 +812,16 @@ private struct ReviewSourceSection: View {
 
 private struct VerdictBar: View {
     let model: LectureWindowModel
+    var solve = false
 
     var body: some View {
         trailing
             .buttonStyle(.plain)
-            .padding(.horizontal, 16).padding(.vertical, 12)
+            .padding(.horizontal, solve ? 0 : 16).padding(.vertical, solve ? 0 : 12)
             .frame(maxWidth: .infinity, alignment: .trailing)
-            .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
+            .overlay(alignment: .top) {
+                if !solve { Rectangle().fill(Theme.border).frame(height: 1) }
+            }
     }
 
     @ViewBuilder private var trailing: some View {
@@ -625,8 +840,8 @@ private struct VerdictBar: View {
 
     private var verdicts: some View {
         HStack(spacing: 6) {
-            verdictButton("Good", key: "1", value: .good)
-            verdictButton("Bad", key: "2", value: .bad)
+            verdictButton(solve ? "Approve" : "Good", key: "1", value: .good)
+            verdictButton(solve ? "Reject" : "Bad", key: "2", value: .bad)
         }.fixedSize()
     }
 

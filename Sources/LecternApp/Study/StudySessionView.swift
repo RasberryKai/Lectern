@@ -7,6 +7,7 @@ struct StudySessionView: View {
     @FocusState private var focus: EditorField?
     @State private var enlargedSource: StudySource?
     @State private var imageDropTargeted = false
+    @State private var caseToRemove: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,6 +18,7 @@ struct StudySessionView: View {
                     HStack(spacing: 0) {
                         studyStage(entry)
                             .id(session.turnID)
+                            .task(id: session.turnID) { await session.prepareCurrentSolveCase() }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         if let pane = session.pane {
                             Rectangle().fill(Theme.border).frame(width: 1)
@@ -33,10 +35,26 @@ struct StudySessionView: View {
         .navigationTitle("Study")
         .navigationSubtitle(session.scopeLabel)
         .task { await session.refreshCardAfterNavigation() }
+        .onChange(of: session.isBusy) { _, busy in
+            if !busy, session.error == nil, session.current?.card.solve != nil, session.currentSolveCase == nil {
+                Task { await session.prepareCurrentSolveCase() }
+            }
+        }
         .sheet(item: $enlargedSource) { source in
             StudySourceSheet(source: source) { page in
                 Task { await session.openPrepare(page: page) }
             }
+        }
+        .alert("Remove this case?", isPresented: Binding(
+            get: { caseToRemove != nil }, set: { if !$0 { caseToRemove = nil } }
+        ), presenting: caseToRemove) { id in
+            Button("Remove case", role: .destructive) {
+                guard session.currentSolveCase?.id == id else { return }
+                Task { await session.retireSolveCase() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Study will keep the card and its review history.")
         }
         .background(KeyMonitor { event, editing in handleKey(event, editing: editing) })
     }
@@ -107,22 +125,31 @@ struct StudySessionView: View {
             VStack(spacing: 14) {
                 if let error = session.error {
                     VStack(alignment: .trailing, spacing: 8) {
-                        ErrorBanner(message: error, dismiss: session.hasPendingGrade ? nil : { session.error = nil })
+                        ErrorBanner(message: error, dismiss: session.hasPendingGrade || session.canSkipCurrent ? nil : { session.error = nil })
                         if session.hasPendingGrade {
                             Button("Retry saving grade") { Task { await session.retrySavingGrade() } }
                                 .buttonStyle(SecondaryButtonStyle())
                                 .disabled(session.isBusy)
                         } else if session.canSkipCurrent {
-                            Button("Skip card") { Task { await session.skipUnavailableCard() } }
-                                .buttonStyle(LinkButtonStyle(color: Theme.quiet))
-                                .disabled(session.isBusy)
+                            HStack(spacing: 12) {
+                                if entry.card.solve != nil, session.currentSolveCase == nil {
+                                    Button("Retry loading case") { Task { await session.prepareCurrentSolveCase() } }
+                                        .buttonStyle(SecondaryButtonStyle())
+                                }
+                                Button("Skip card") { Task { await session.skipUnavailableCard() } }
+                                    .buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                            }
+                            .disabled(session.isBusy)
                         }
                     }
                     .frame(maxWidth: 640)
                 } else if let notice = session.toast {
                     toast(notice)
                 }
-                studyCard(entry)
+                Group {
+                    if entry.card.solve != nil { solveCard(entry) }
+                    else { studyCard(entry) }
+                }
                     .frame(maxWidth: 640)
                 shortcuts
                     .frame(maxWidth: 640)
@@ -133,13 +160,54 @@ struct StudySessionView: View {
         }
     }
 
+    private func solveCard(_ entry: StudyCard) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 9) {
+                Text("Solve card").eyebrow()
+                cardStatus(entry)
+            }
+            if let exercise = session.currentSolveCase {
+                SolveExerciseView(content: exercise.content, answers: session.currentSolveAnswers) { answers in
+                    session.checkSolve(answers: answers)
+                }
+                .id(exercise.id)
+                .disabled(session.isBusy)
+                if session.revealed {
+                    HStack(spacing: 12) {
+                        if session.sourcePage != nil {
+                            Button {
+                                session.showSlide(cycle: true)
+                                focus = nil
+                            } label: {
+                                Label("Source slide", systemImage: "display")
+                            }
+                            .buttonStyle(SecondaryButtonStyle())
+                        }
+                        Button(action: openAsk) { Label("Ask AI", systemImage: "sparkles") }
+                            .buttonStyle(SecondaryButtonStyle(foreground: Theme.ai))
+                    }
+                    .disabled(session.isBusy || session.hasPendingGrade)
+                    Divider()
+                    gradeActions
+                }
+            } else if session.error == nil {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Finding a verified case…").font(Theme.body).foregroundStyle(Theme.quiet)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panel(padding: 26)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Solve card")
+    }
+
     private func studyCard(_ entry: StudyCard) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 9) {
                 Text("Flip card").eyebrow()
-                if session.isRetry { studyBadge("Again", fill: Theme.amberWash, text: Theme.amber) }
-                else if entry.memory == nil { studyBadge("New", fill: Theme.goodWash, text: Theme.accentText) }
-                else { studyBadge("Review", fill: Theme.inset, text: Theme.quiet) }
+                cardStatus(entry)
                 Spacer(minLength: 0)
                 if session.revealed, let page = session.sourcePage {
                     Button {
@@ -250,7 +318,12 @@ struct StudySessionView: View {
 
     private var cardTools: some View {
         HStack(spacing: 10) {
-            toolButton("Edit", key: "E", action: session.beginEdit)
+            if let exercise = session.currentSolveCase {
+                Button("Remove case") { caseToRemove = exercise.id }
+                    .buttonStyle(.plain).font(Theme.small).foregroundStyle(Theme.quiet)
+            } else {
+                toolButton("Edit", key: "E", action: session.beginEdit)
+            }
             toolButton("Disable", key: "D") { Task { await session.disable() } }
         }
         .fixedSize()
@@ -299,11 +372,12 @@ struct StudySessionView: View {
     }
 
     private var recallHints: some View {
-        Text("Space show · 1 Got it · 2 Missed · G Prepare")
+        Text(session.current?.card.solve == nil ? "Space show · 1 Got it · 2 Missed · G Prepare"
+             : session.revealed ? "1 Got it · 2 Missed · G Prepare" : "")
     }
 
     private var navigationHints: some View {
-        Text("E edit · D disable · Esc end")
+        Text(session.current?.card.solve == nil ? "E edit · D disable · Esc end" : "D disable · Esc end")
     }
 
     private func toast(_ message: String) -> some View {
@@ -326,6 +400,12 @@ struct StudySessionView: View {
             .fixedSize()
     }
 
+    @ViewBuilder private func cardStatus(_ entry: StudyCard) -> some View {
+        if session.isRetry { studyBadge("Again", fill: Theme.amberWash, text: Theme.amber) }
+        else if entry.memory == nil { studyBadge("New", fill: Theme.goodWash, text: Theme.accentText) }
+        else { studyBadge("Review", fill: Theme.inset, text: Theme.quiet) }
+    }
+
     private var completion: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -334,6 +414,9 @@ struct StudySessionView: View {
                     .accessibilityAddTraits(.isHeader)
                 Text(completionDetail).font(.system(size: 15)).foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
+                if session.status != .empty, session.deferredSolveCount > 0 {
+                    Text(deferredSolveDetail).font(Theme.body).foregroundStyle(Theme.quiet)
+                }
                 if session.continuationDueCount == 0, let next = session.nextDue, session.status != .limited {
                     Text("Next review \(next.formatted(.relative(presentation: .numeric))).")
                         .font(Theme.body).foregroundStyle(Theme.quiet)
@@ -384,10 +467,13 @@ struct StudySessionView: View {
         switch session.status {
         case .studying: "Study"
         case .empty:
-            if session.continuationDueCount > 0 { "Cards ready to review" }
+            if session.continuationDueCount > 0 || session.readySolveCount > 0 { "Cards ready to review" }
+            else if session.deferredSolveCount > 0 { "Waiting for fresh cases" }
             else if session.approvedCount == 0 { "Ready when you are" }
             else { "Nothing due" }
-        case .done: session.continuationDueCount > 0 ? "Session complete" : "Done for today"
+        case .done:
+            session.continuationDueCount > 0 || session.readySolveCount > 0 || session.deferredSolveCount > 0
+                ? "Session complete" : "Done for today"
         case .ended: "Session ended"
         case .limited:
             switch session.options.stop {
@@ -403,8 +489,9 @@ struct StudySessionView: View {
         case .studying: ""
         case .empty:
             if session.continuationDueCount > 0 { "\(Format.count(session.continuationDueCount, "card")) due now." }
+            else if session.readySolveCount > 0 { "\(Format.count(session.readySolveCount, "solve card")) ready." }
+            else if session.deferredSolveCount > 0 { deferredSolveDetail }
             else if session.approvedCount == 0 { "Approve cards in Review first." }
-            else if session.options.cardTypes == .solve { "Choose Flip cards in session options to study the approved cards." }
             else if session.nextDue != nil { "Your scheduled cards are up to date." }
             else if session.unseenCount > 0 { "You’ve reached your new-card limit for today." }
             else { "Your scheduled cards are up to date." }
@@ -413,6 +500,11 @@ struct StudySessionView: View {
         case .limited:
             "\(Format.count(session.gradeCount, "grade")) in \(elapsedLabel). \(session.missCount) missed. \(Format.count(session.dueRemaining, "due card")) left for today."
         }
+    }
+
+    private var deferredSolveDetail: String {
+        let count = session.deferredSolveCount
+        return count == 1 ? "One solve card needs a fresh case." : "\(count) solve cards need fresh cases."
     }
 
     private var elapsedLabel: String {
@@ -432,6 +524,13 @@ struct StudySessionView: View {
                         await session.app.startStudy(scope: session.scope, options: session.options, limitNewInSession: 0)
                     }
                 }.buttonStyle(PrimaryButtonStyle())
+            } else if session.status == .done || session.status == .empty, session.readySolveCount > 0 {
+                Button("Study ready solve cards") {
+                    var nextOptions = session.options
+                    nextOptions.cardTypes = .solve
+                    Task { await session.app.startStudy(scope: session.scope, options: nextOptions) }
+                }
+                .buttonStyle(PrimaryButtonStyle())
             } else if session.status == .done, let next = session.nextModule {
                 Button("Next · \(next.module.name) · \(next.count)") {
                     Task { await session.app.startStudy(scope: .module(next.module.id)) }
@@ -486,7 +585,8 @@ struct StudySessionView: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .disabled(session.editDraft != nil || session.isBusy)
+        .disabled(session.editDraft != nil || session.isBusy ||
+                  (pane == .ask && session.current?.card.solve != nil && !session.revealed))
     }
 
     private func askPane(_ entry: StudyCard) -> some View {
@@ -543,7 +643,7 @@ struct StudySessionView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Enlarge slide \(page)")
-                    .help("Enlarge slide · Space")
+                    .help(entry.card.solve == nil ? "Enlarge slide · Space" : "Enlarge slide")
                     HStack {
                         if entry.card.sourcePages.count > 1 {
                             Button(action: session.previousSource) {
@@ -580,7 +680,8 @@ struct StudySessionView: View {
                 VStack(spacing: 10) {
                     Image(systemName: "display").font(.system(size: 30)).blur(radius: 3)
                         .accessibilityHidden(true)
-                    Text("Hidden until you show the answer").font(Theme.small)
+                    Text(session.current?.card.solve == nil ? "Hidden until you show the answer" : "Hidden until you check your answer")
+                        .font(Theme.small)
                 }
                 .foregroundStyle(Theme.quiet)
             }
@@ -662,6 +763,7 @@ struct StudySessionView: View {
         if letter == "u", session.canUndo { Task { await session.undoLast() }; return true }
         guard let entry = session.current, !session.isBusy else { return false }
         if event.keyCode == Key.space {
+            guard entry.card.solve == nil else { return false }
             if !session.revealed { session.reveal() }
             else if let page = session.sourcePage { enlarge(entry, page: page) }
             return true
@@ -672,7 +774,10 @@ struct StudySessionView: View {
         case "g":
             if session.revealed, let page = session.sourcePage { Task { await session.openPrepare(page: page) } }
             return true
-        case "e": session.beginEdit(); return true
+        case "e":
+            guard entry.card.solve == nil else { return false }
+            session.beginEdit()
+            return true
         case "d": Task { await session.disable() }; return true
         default: return false
         }

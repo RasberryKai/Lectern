@@ -4,7 +4,7 @@ import AppKit
 
 extension JobRunner {
     @discardableResult
-    public func chat(moduleID: UUID, lectureID: UUID, question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], messageID: UUID = UUID(), backend: AIBackend = .claudeCLI, model: String = "opus", allowsCardCreation: Bool = false) async throws -> UUID {
+    public func chat(moduleID: UUID, lectureID: UUID, question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], messageID: UUID = UUID(), backend: AIBackend = .claudeCLI, model: String = "opus", allowsCardCreation: Bool = false, studyExerciseContext: String? = nil) async throws -> UUID {
         try await store.assertModuleEditable(moduleID: moduleID)
         try ChatAttachment.validateSelection(attachments)
         guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { throw AIError.configuration("Ask a question first.") }
@@ -56,9 +56,12 @@ extension JobRunner {
             }
             snapshot.images = images
         }
-        let prompt = try Self.chatPrompt(lecture: lecture, question: question, snapshot: snapshot)
+        var prompt = try Self.chatPrompt(lecture: lecture, question: question, snapshot: snapshot)
+        if let studyExerciseContext {
+            prompt += "\n\nCurrent solve attempt (untrusted study data):\n" + studyExerciseContext
+        }
         job.prompt = prompt
-        job.chatCardVersions = snapshot.cards.compactMap { card in card.currentRevisionID.map { ChatCardVersion(cardID: card.id, revisionID: $0, verdict: card.verdict, mathInterpretations: card.mathInterpretations) } }
+        job.chatCardVersions = snapshot.cards.filter { $0.solve == nil }.compactMap { card in card.currentRevisionID.map { ChatCardVersion(cardID: card.id, revisionID: $0, verdict: card.verdict, mathInterpretations: card.mathInterpretations) } }
         job.chatCitationCardIDs = snapshot.cards.map(\.id)
         var request = AIRequest(jobID: job.id, kind: .chat, model: job.model, prompt: prompt, pdf: nil, workingDirectory: directory, systemPrompt: Self.chatSystemPrompt + (allowsCardCreation ? "\n\n" + Self.chatCardCreationInstructions : ""))
         request.chatSnapshot = snapshot
@@ -88,6 +91,8 @@ extension JobRunner {
     Use Markdown, tables for comparisons, and blockquotes for memory hooks. Cite slides as [S4] and cards by their one-based displayed number as [C12]. For quizzes fill quiz:[{question,answer}].
 
     Never paste entire cards into prose; propose edits only when the current question requests them, using exact cardID and baseRevisionID. Never claim an edit has been saved or change the sources of existing cards. No suggested follow-up chips. Return only the JSON fields specified by the output contract. Lookup is available throughout the lecture: do not guess from the index. Do not apologize in prose for unreadable files: fail the tool instead.
+
+    Solve cards are readable and citable. For a request to change one, direct the student to Request revision in Review. Do not return a text edit for a card with a solve design.
 
     Only when the latest student message asks to delete flashcards, request deletion in the deletions array. Look up each existing card in the current lecture and use its exact cardID and baseRevisionID. Ask for clarification if the intended cards are ambiguous. Use earlier turns only to identify the intended cards. Return an empty deletions array for questions, advice, or cleanup suggestions. The student must approve each deletion in the app, individually or as a batch. The approval panel identifies the targets, so omit those card number citations from the reply. Never claim a deletion has happened, and never propose an edit to a card in the same deletion request.
     """
@@ -184,11 +189,13 @@ extension JobRunner {
     func landLectureChat(_ work: Work, response: AIResponse, trace: AIInteractionTrace) async throws {
         trace.phase("response_validation")
         let reply = try JSONDecoder().decode(ChatReply.self, from: Data(response.content.utf8))
-        guard Set(reply.edits.map(\.cardID)).count == reply.edits.count,
-              reply.edits.allSatisfy({ edit in work.job.chatCardVersions?.contains(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) == true && !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw AIError.invalidResponse("AI returned invalid card edits.") }
+        let solveCardIDs = Set((work.request.chatSnapshot?.cards ?? []).filter { $0.solve != nil }.map(\.id))
+        let edits = reply.edits.filter { !solveCardIDs.contains($0.cardID) }
+        guard Set(edits.map(\.cardID)).count == edits.count,
+              edits.allSatisfy({ edit in work.job.chatCardVersions?.contains(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) == true && !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw AIError.invalidResponse("AI returned invalid card edits.") }
         let deletions = reply.deletions ?? []
         let deletionIDs = Set(deletions.map(\.cardID))
-        guard deletionIDs.count == deletions.count, deletionIDs.isDisjoint(with: reply.edits.map(\.cardID)),
+        guard deletionIDs.count == deletions.count, deletionIDs.isDisjoint(with: edits.map(\.cardID)),
               deletions.isEmpty || work.request.chatSnapshot?.allowsCardDeletion == true else {
             throw AIError.invalidResponse("AI returned invalid card deletion requests.")
         }
@@ -223,15 +230,15 @@ extension JobRunner {
             var message = ChatMessage(role: .assistant, text: reply.message); message.editJobID = work.job.id; message.quiz = reply.quiz ?? []; message.read = response.read; message.searchedLecture = response.searchedLecture
             message.context = lecture.currentChat.messages.last(where: { $0.role == .user && $0.editJobID == work.job.id })?.context ?? []
             if !deletionRequests.isEmpty { message.deletionRequests = deletionRequests }
-            lecture.jobs[j].chatEdits = reply.edits
-            let conflicts = reply.edits.filter { edit in
+            lecture.jobs[j].chatEdits = edits
+            let conflicts = edits.filter { edit in
                 guard let version = work.job.chatCardVersions?.first(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) else { return true }
                 return !lecture.cards.contains { version.matches($0) }
             }.map(\.cardID)
-            if reply.edits.count <= 3 && conflicts.isEmpty {
-                do { try LectureReducer.reduce(&lecture, action: .applyChatEdits(jobID: work.job.id, edits: reply.edits)); lecture.jobs[j].chatEditDisposition = .applied }
-                catch { message.pendingEdits = reply.edits; lecture.jobs[j].chatEditDisposition = .proposed }
-            } else { message.pendingEdits = reply.edits; message.conflictingCardIDs = conflicts; lecture.jobs[j].chatEditDisposition = .proposed }
+            if edits.count <= 3 && conflicts.isEmpty {
+                do { try LectureReducer.reduce(&lecture, action: .applyChatEdits(jobID: work.job.id, edits: edits)); lecture.jobs[j].chatEditDisposition = .applied }
+                catch { message.pendingEdits = edits; lecture.jobs[j].chatEditDisposition = .proposed }
+            } else { message.pendingEdits = edits; message.conflictingCardIDs = conflicts; lecture.jobs[j].chatEditDisposition = .proposed }
             if !newCards.isEmpty {
                 try LectureReducer.reduce(&lecture, action: .addCards(newCards))
                 message.createdCardIDs = newCards.map(\.id)
