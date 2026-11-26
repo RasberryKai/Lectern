@@ -1,16 +1,21 @@
 import AppKit
+#if SWIFT_PACKAGE
 import LecternCore
+#endif
 import SwiftUI
 import WebKit
 
-struct ChatCitation: Equatable {
-    let kind: String
-    let number: Int
+enum ChatCitation: Equatable {
+    case slide(Int)
+    case card(Int)
 
     init?(kind: String, number: Int) {
-        guard ["S", "C"].contains(kind), number > 0 else { return nil }
-        self.kind = kind
-        self.number = number
+        guard number > 0 else { return nil }
+        switch kind {
+        case "S": self = .slide(number)
+        case "C": self = .card(number)
+        default: return nil
+        }
     }
 }
 
@@ -18,12 +23,11 @@ struct ChatCitation: Equatable {
 struct ChatMarkdownView: View {
     let text: String
     var streaming = false
-    var onCitation: (String, Int) -> Void = { _, _ in }
-    var onHoverCitation: (ChatCitation?) -> Void = { _ in }
+    let onCitation: (ChatCitation) -> Void
     @State private var height: CGFloat = 28
     var body: some View {
         ChatMarkdownWeb(html: ChatMarkdown.html(streaming ? ChatMarkdown.finishedBlocks(text) : text), streaming: streaming, height: $height,
-                        onCitation: onCitation, onHoverCitation: onHoverCitation)
+                        onCitation: onCitation)
             .frame(height: max(28, height))
             .accessibilityLabel(text)
     }
@@ -34,8 +38,7 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
     let html: String
     var streaming = false
     @Binding var height: CGFloat
-    let onCitation: (String, Int) -> Void
-    let onHoverCitation: (ChatCitation?) -> Void
+    let onCitation: (ChatCitation) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -60,7 +63,6 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
         view.loadHTMLString(document, baseURL: bundle.resourceURL?.appendingPathComponent("MathJax", isDirectory: true))
     }
     static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
-        coordinator.parent.onHoverCitation(nil)
         view.configuration.userContentController.removeScriptMessageHandler(forName: "chat")
     }
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -73,13 +75,9 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
                 let measured = max(28, CGFloat(height))
                 if abs(parent.height - measured) > 0.5 { parent.height = measured }
             }
-            if let type = body["type"] as? String, let n = body["number"] as? Int { parent.onCitation(type, n) }
-            if body["hover"] != nil {
-                let hover = body["hover"] as? [String: Any]
-                let citation = (hover?["type"] as? String).flatMap { kind in
-                    (hover?["number"] as? Int).flatMap { ChatCitation(kind: kind, number: $0) }
-                }
-                parent.onHoverCitation(citation)
+            if let kind = body["type"] as? String, let number = body["number"] as? Int,
+               let citation = ChatCitation(kind: kind, number: number) {
+                parent.onCitation(citation)
             }
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
@@ -115,14 +113,9 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
         const content=document.getElementById('content');
         function resize(){post({height:Math.ceil(content.getBoundingClientRect().height)+1})}
         new ResizeObserver(resize).observe(content);requestAnimationFrame(resize);
-        function endHover(){post({hover:null})}
         document.querySelectorAll('.cite').forEach(e=>{
-            e.onclick=()=>{endHover();post({type:e.dataset.type,number:Number(e.dataset.n)})};
-            e.onmouseenter=()=>post({hover:{type:e.dataset.type,number:Number(e.dataset.n)}});
-            e.onmouseleave=endHover;
+            e.onclick=()=>post({type:e.dataset.type,number:Number(e.dataset.n)});
         });
-        document.documentElement.addEventListener('mouseleave',endHover);
-        window.addEventListener('pagehide',endHover);
         if(window.MathJax.startup)window.MathJax.startup.promise.then(()=>window.MathJax.typesetPromise()).then(resize).catch(()=>{document.getElementById('status').textContent='Math could not be rendered; source is shown.';resize()});
         </script></body></html>
         """

@@ -65,6 +65,9 @@ extension LectureSession {
                 var edits = latest.jobs[j].chatEdits ?? []
                 if force {
                     for i in edits.indices { guard let card = latest.cards.first(where: { $0.id == edits[i].cardID && !$0.isSuperseded }), let revision = card.currentRevisionID else { throw LectureError.missingCard(edits[i].cardID) }; edits[i].baseRevisionID = revision }
+                    if latest.jobs[j].chatCitationCardIDs == nil {
+                        latest.jobs[j].chatCitationCardIDs = latest.jobs[j].chatCardVersions?.map(\.cardID)
+                    }
                     latest.jobs[j].chatCardVersions = latest.cards.compactMap { c in c.currentRevisionID.map { ChatCardVersion(cardID: c.id, revisionID: $0, verdict: c.verdict, mathInterpretations: c.mathInterpretations) } }
                 }
                 latest.jobs[j].state = .running

@@ -3,22 +3,16 @@ import AppKit
 import SwiftUI
 import WebKit
 
-@MainActor @Observable private final class CitationState {
-    var citation: ChatCitation?
-    var events: [ChatCitation?] = []
-    var clicked: ChatCitation?
+@MainActor private final class CitationState {
+    var clicks: [ChatCitation] = []
 }
 
 private struct FixtureView: View {
     let state: CitationState
     let text: String
     var body: some View {
-        ChatMarkdownView(text: text, onCitation: { state.clicked = ChatCitation(kind: $0, number: $1) }, onHoverCitation: {
-            state.citation = $0
-            state.events.append($0)
-        })
-        .popover(isPresented: Binding(get: { state.citation != nil }, set: { if !$0 { state.citation = nil } })) {
-            Text(state.citation?.kind == "C" ? "Card preview" : "Slide preview").padding(20).allowsHitTesting(false)
+        ChatMarkdownView(text: text) { citation in
+            state.clicks.append(citation)
         }
         .padding(16).frame(width: 660)
     }
@@ -141,28 +135,26 @@ private struct FixtureView: View {
                 for invalid in ["[S0]", "[S80–S79]", "[S1–S101]", "[S1–C2]", "[S999999999999999999999]"] {
                     check("Invalid range stays literal: \(invalid)", ChatMarkdown.inline(invalid) == invalid)
                 }
-                let baselineWindows = app.windows.filter(\.isVisible).count
-                for kind in ["S", "C"] {
-                    let number = kind == "S" ? 48 : 12
-                    _ = try await web.evaluateJavaScript("document.querySelector('[data-type=\"\(kind)\"]').dispatchEvent(new MouseEvent('mouseenter'))")
-                    await settle()
-                    check("\(kind) hover shows the correct preview", state.citation == ChatCitation(kind: kind, number: number))
-                    check("\(kind) preview window appears", app.windows.filter(\.isVisible).count > baselineWindows)
-                    _ = try await web.evaluateJavaScript("document.querySelector('[data-type=\"\(kind)\"]').dispatchEvent(new MouseEvent('mouseleave'))")
-                    await settle()
-                    check("\(kind) mouse leave dismisses preview", state.citation == nil && state.events.last! == nil)
-                    check("\(kind) preview window closes", app.windows.filter(\.isVisible).count == baselineWindows)
-                }
-                _ = try await web.evaluateJavaScript("document.querySelector('[data-type=\"C\"]').click()")
+                let hoverIsInert = try await web.evaluateJavaScript("""
+                (()=>{
+                    const messages = [], originalPost = window.post;
+                    window.post = message => { if (message.height === undefined) messages.push(message); originalPost(message); };
+                    const citations = document.querySelectorAll('.cite');
+                    for (const citation of citations) {
+                        citation.dispatchEvent(new MouseEvent('mouseenter'));
+                        citation.dispatchEvent(new MouseEvent('mouseleave'));
+                    }
+                    window.post = originalPost;
+                    return messages.length === 0 && [...citations].every(citation => !citation.hasAttribute('title'));
+                })()
+                """) as? Bool == true
+                check("Slide and card hover sends no events and has no tooltip", hoverIsInert)
+                _ = try await web.evaluateJavaScript("""
+                document.querySelector('[data-type="C"][data-n="12"]').click();
+                document.querySelector('[data-type="S"][data-n="80"]').click();
+                """)
                 await settle()
-                check("Card click retains navigation", state.clicked == ChatCitation(kind: "C", number: 12))
-                _ = try await web.evaluateJavaScript("[...document.querySelectorAll('p')].find(p=>p.textContent.startsWith('Useful shortcut:')).querySelector('[data-type=\"S\"][data-n=\"80\"]')?.click()")
-                await settle()
-                check("Range endpoint retains slide navigation", state.clicked == ChatCitation(kind: "S", number: 80))
-                // Regression: JS false used to bridge to integer zero and leave a slide-0 preview open.
-                _ = try await web.evaluateJavaScript("window.webkit.messageHandlers.chat.postMessage({hover:false});null")
-                await settle()
-                check("Legacy false hover cannot become slide zero", state.citation == nil)
+                check("Card and slide clicks dispatch their exact targets", state.clicks == [.card(12), .slide(80)])
                 if CommandLine.arguments.count > 1 {
                     let image = try await web.takeSnapshot(configuration: nil)
                     if let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {

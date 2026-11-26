@@ -20,7 +20,7 @@ struct PrepareView: View {
         } stage: {
             center
         } right: {
-            LectureSidePanel(model: model, focus: focus)
+            LectureChatSidebar(model: model, focus: focus)
         }
         .onChange(of: model.filteredSlides.map(\.pageIndex), initial: true) { _, _ in
             model.reconcilePrepareFocus()
@@ -31,6 +31,10 @@ struct PrepareView: View {
 
     /// Former header ⋯ menu items that aren't pane toggles; right-click the slide list.
     @ViewBuilder private var sidebarOptions: some View {
+        if let page = model.focusedPage, !model.cards(from: page).isEmpty {
+            Button("Review cards from slide \(page)") { model.showCards(fromPage: page) }
+            Divider()
+        }
         Button("Select all slides") { Task { await model.setAllSelected(true) } }.disabled(model.readOnly)
         Button("Deselect all slides") { Task { await model.setAllSelected(false) } }.disabled(model.readOnly)
         Divider()
@@ -214,42 +218,6 @@ struct LandingBanner: View {
         }
         .padding(12)
         .background(Theme.goodWash, in: RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-struct PrepareCardsPane: View {
-    let model: LectureWindowModel
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8) {
-                let cards = model.cards(from: model.focusedPage ?? 0)
-                if cards.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("No cards from this slide yet").font(Theme.heading(20))
-                        Text("Select the slides you want to learn, then generate cards.").font(Theme.body).foregroundStyle(Theme.quiet)
-                    }.padding(12)
-                }
-                ForEach(cards) { card in
-                    Button {
-                        model.showCards(fromPage: model.focusedPage ?? 0)
-                        model.selectCard(card.id)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(card.front).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink)
-                            Text(card.back).font(Theme.body).foregroundStyle(Theme.quiet).lineLimit(5)
-                            HStack(spacing: 5) {
-                                Circle().fill(card.verdict.v2Color).frame(width: 7, height: 7)
-                                Text("\(card.verdict.v2Title) · card \(model.cardNumbers[card.id] ?? 0)")
-                                    .font(Theme.caption).foregroundStyle(Theme.faint)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 9))
-                        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.border))
-                    }.buttonStyle(.plain)
-                }
-            }.padding(14)
-        }
     }
 }
 

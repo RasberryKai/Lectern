@@ -34,6 +34,7 @@ extension JobRunner {
         userMessage.attachments = attachments
         var snapshot = try Self.chatSnapshot(lecture: lecture, refs: contextRefs, source: store.sourceURL(moduleID: moduleID, lectureID: lectureID), directory: directory)
         if allowsCardCreation { snapshot.allowsCardCreation = true }
+        snapshot.allowsCardDeletion = true
         var images: [ChatSnapshotImage] = []
         for message in lecture.currentChat.messages {
             for attachment in message.attachments {
@@ -58,6 +59,7 @@ extension JobRunner {
         let prompt = try Self.chatPrompt(lecture: lecture, question: question, snapshot: snapshot)
         job.prompt = prompt
         job.chatCardVersions = snapshot.cards.compactMap { card in card.currentRevisionID.map { ChatCardVersion(cardID: card.id, revisionID: $0, verdict: card.verdict, mathInterpretations: card.mathInterpretations) } }
+        job.chatCitationCardIDs = snapshot.cards.map(\.id)
         var request = AIRequest(jobID: job.id, kind: .chat, model: job.model, prompt: prompt, pdf: nil, workingDirectory: directory, systemPrompt: Self.chatSystemPrompt + (allowsCardCreation ? "\n\n" + Self.chatCardCreationInstructions : ""))
         request.chatSnapshot = snapshot
         job.inputHash = try Self.inputHash(request)
@@ -85,7 +87,9 @@ extension JobRunner {
 
     Use Markdown, tables for comparisons, and blockquotes for memory hooks. Cite slides as [S4] and cards by their one-based displayed number as [C12]. For quizzes fill quiz:[{question,answer}].
 
-    Never paste entire cards into prose; propose edits only when the current question requests them, using exact cardID and baseRevisionID. Never claim an edit has been saved. Never delete cards or change the sources of existing cards. No suggested follow-up chips. Return only the JSON fields specified by the output contract. Lookup is available throughout the lecture: do not guess from the index. Do not apologize in prose for unreadable files: fail the tool instead.
+    Never paste entire cards into prose; propose edits only when the current question requests them, using exact cardID and baseRevisionID. Never claim an edit has been saved or change the sources of existing cards. No suggested follow-up chips. Return only the JSON fields specified by the output contract. Lookup is available throughout the lecture: do not guess from the index. Do not apologize in prose for unreadable files: fail the tool instead.
+
+    Only when the latest student message asks to delete flashcards, request deletion in the deletions array. Look up each existing card in the current lecture and use its exact cardID and baseRevisionID. Ask for clarification if the intended cards are ambiguous. Use earlier turns only to identify the intended cards. Return an empty deletions array for questions, advice, or cleanup suggestions. The student must approve each deletion in the app, individually or as a batch. The approval panel identifies the targets, so omit those card number citations from the reply. Never claim a deletion has happened, and never propose an edit to a card in the same deletion request.
     """
     private static let chatCardCreationInstructions = """
     Review chat can add flashcards to the current lecture. Only when the latest student message asks to add cards, put each new card in newCards with its own front, back and sourceSlides array. An explicit follow-up like "yeah add one" can refer to a card discussed earlier. Use earlier conversation to resolve what the student means, never as authorization on its own. For questions, advice, or draft-only requests, return an empty newCards array.
@@ -161,9 +165,9 @@ extension JobRunner {
 
         FROZEN ATTACHED CONTEXT:
         \(content.joined(separator: "\n"))
-        LOOKUP: use read_slides(pages) and get_cards(ids:["C12"]), or CLI Read slides/007.png, slides/007.txt, cards/C12.json for a specific card or cards.json for all cards, only inside this job directory. Card number matches the displayed [C12] citation. The full deck has current questions, answers and sources only; before proposing an edit, read the individual card to obtain its exact cardID and baseRevisionID. All slides have images+text. Read only what you need; never input.pdf. Cards may be edited via edit_cards(edits), or the final edits array. Do not duplicate edits. The full lecture is available for lookup even if no focus is attached.
+        LOOKUP: use read_slides(pages) and get_cards(ids:["C12"]), or CLI Read slides/007.png, slides/007.txt, cards/C12.json for a specific card or cards.json for all cards, only inside this job directory. Card number matches the displayed [C12] citation. The full deck has current questions, answers and sources only; before proposing an edit or deletion, read the individual card to obtain its exact cardID and baseRevisionID. All slides have images+text. Read only what you need; never input.pdf. Cards may be edited via edit_cards(edits), or the final edits array. Do not duplicate edits. The full lecture is available for lookup even if no focus is attached.
         OUTPUT CONTRACT:
-        \(AIOutputSchema.json(for: .chat, allowsCardCreation: snapshot.allowsCardCreation == true)!)
+        \(AIOutputSchema.json(for: .chat, allowsCardCreation: snapshot.allowsCardCreation == true, allowsCardDeletion: snapshot.allowsCardDeletion == true)!)
         INCLUDED LEARNING POINTS:
         \(try json(lecture.learningPoints.filter(\.included)))
         SUMMARY OF OLDER TURNS:
@@ -182,6 +186,20 @@ extension JobRunner {
         let reply = try JSONDecoder().decode(ChatReply.self, from: Data(response.content.utf8))
         guard Set(reply.edits.map(\.cardID)).count == reply.edits.count,
               reply.edits.allSatisfy({ edit in work.job.chatCardVersions?.contains(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) == true && !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw AIError.invalidResponse("AI returned invalid card edits.") }
+        let deletions = reply.deletions ?? []
+        let deletionIDs = Set(deletions.map(\.cardID))
+        guard deletionIDs.count == deletions.count, deletionIDs.isDisjoint(with: reply.edits.map(\.cardID)),
+              deletions.isEmpty || work.request.chatSnapshot?.allowsCardDeletion == true else {
+            throw AIError.invalidResponse("AI returned invalid card deletion requests.")
+        }
+        let frozenCards = deletions.isEmpty ? [:] : Dictionary(uniqueKeysWithValues: (work.request.chatSnapshot?.cards ?? []).map { ($0.id, $0) })
+        let deletionRequests = try deletions.map { deletion in
+            guard let card = frozenCards[deletion.cardID], !card.isSuperseded, card.currentRevisionID == deletion.baseRevisionID else {
+                throw AIError.invalidResponse("A deletion request did not match a frozen flashcard revision.")
+            }
+            let version = ChatCardVersion(cardID: card.id, revisionID: deletion.baseRevisionID, verdict: card.verdict, mathInterpretations: card.mathInterpretations)
+            return ChatDeletionRequest(version: version, card: card)
+        }
         let drafts = reply.newCards ?? []
         guard drafts.isEmpty || work.request.chatSnapshot?.allowsCardCreation == true else {
             throw AIError.invalidResponse("New flashcards can only be added from Review chat.")
@@ -196,7 +214,7 @@ extension JobRunner {
             let revision = CardRevision(front: front, back: back, author: .ai, reason: "Added from Review chat")
             return Card(sourcePages: Set(draft.sourceSlides).sorted(), front: front, back: back, history: [revision])
         }
-        guard !reply.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reply.quiz?.isEmpty == false || !newCards.isEmpty else {
+        guard !reply.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reply.quiz?.isEmpty == false || !newCards.isEmpty || !deletionRequests.isEmpty else {
             throw AIError.invalidResponse("AI returned an empty answer.")
         }
         trace.phase("lecture_persistence")
@@ -204,6 +222,7 @@ extension JobRunner {
             guard let j = lecture.jobs.firstIndex(where: { $0.id == work.job.id }), lecture.jobs[j].state == .running, lecture.currentChat.id == work.job.threadID else { throw LectureError.jobNotRunning(work.job.id) }
             var message = ChatMessage(role: .assistant, text: reply.message); message.editJobID = work.job.id; message.quiz = reply.quiz ?? []; message.read = response.read; message.searchedLecture = response.searchedLecture
             message.context = lecture.currentChat.messages.last(where: { $0.role == .user && $0.editJobID == work.job.id })?.context ?? []
+            if !deletionRequests.isEmpty { message.deletionRequests = deletionRequests }
             lecture.jobs[j].chatEdits = reply.edits
             let conflicts = reply.edits.filter { edit in
                 guard let version = work.job.chatCardVersions?.first(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) else { return true }
@@ -266,6 +285,9 @@ extension JobRunner {
             guard !latest.currentChat.messages.contains(where: { $0.editJobID == jobID && $0.createdCardIDs?.isEmpty == false }) else {
                 throw AIError.configuration("This answer already added flashcards. Send a new message to continue.")
             }
+            guard !latest.currentChat.messages.contains(where: { $0.editJobID == jobID && $0.deletionRequests?.contains(where: { $0.state == .deleted }) == true }) else {
+                throw AIError.configuration("This answer already deleted flashcards. Send a new message to continue.")
+            }
             if latest.canUndoChatEdits(jobID: jobID) {
                 try LectureReducer.reduce(&latest, action: .undoChatEdits(jobID: jobID))
             }
@@ -274,6 +296,7 @@ extension JobRunner {
             latest.jobs[j].finishedAt = nil
             latest.jobs[j].chatEditUndo = nil
             latest.jobs[j].chatEditsUndoneAt = nil
+            latest.jobs[j].chatCitationCardIDs = chatSnapshot.cards.map(\.id)
             latest.currentChat.messages.removeAll { $0.role == .assistant && $0.editJobID == jobID }
             return latest.jobs[j]
         }

@@ -95,10 +95,15 @@ struct ModuleView: View {
         guard let progress else {
             return archived ? "Archived · \(Format.count(lectures.count, "lecture"))" : ""
         }
-        let outstandingSlides = progress.lectures.reduce(0) { $0 + $1.selectedPageCount - $1.coveredSelectedPageCount }
+        let outstandingSlides = progress.lectures.flatMap(\.preparationReasons).reduce(into: 0) { count, reason in
+            if case .generateMissingCoverage(let pages) = reason { count += pages.count }
+        }
         var parts = ["\(progress.cardMakingDoneCount) of \(progress.totals.plannedLectureCount) done"]
-        if progress.totals.reviewCardCount > 0 {
-            parts.append("\(Format.count(progress.totals.reviewCardCount, "card")) to review")
+        let cardsToReview = progress.lectures.reduce(into: 0) { count, lecture in
+            if lecture.status == .toReview { count += lecture.reviewCardCount }
+        }
+        if cardsToReview > 0 {
+            parts.append("\(Format.count(cardsToReview, "card")) to review")
         }
         if outstandingSlides > 0 {
             parts.append("\(Format.count(outstandingSlides, "slide")) left to prepare")
@@ -200,7 +205,7 @@ struct ModuleView: View {
             }
             ForEach(allSlots.prefix(visibleCount)) { slot in
                 if let lectureID = slot.lectureID, let lecture = lectures.first(where: { $0.id == lectureID }) {
-                    LectureRow(index: slot.id.index - 1, lecture: lecture,
+                    LectureRow(slotNumber: slot.id.index, lecture: lecture,
                                progress: progress?.lectures.first { $0.lectureID == lecture.id }, archived: archived,
                                dropCount: dropLectureID == lecture.id ? dropCount : 0) { mode in
                         model.openLecture(LectureRef(moduleID: moduleID, lectureID: lecture.id), mode: mode)
@@ -365,7 +370,7 @@ private struct PDFDropDelegate: DropDelegate {
 
 private struct LectureRow: View {
     @Environment(AppModel.self) private var model
-    let index: Int
+    let slotNumber: Int
     let lecture: Lecture
     let progress: LectureProgress?
     let archived: Bool
@@ -376,12 +381,14 @@ private struct LectureRow: View {
 
     private var ref: LectureRef { LectureRef(moduleID: lecture.moduleID, lectureID: lecture.id) }
 
+    private var lectureName: String { Format.lectureName(lecture.name, slotNumber: slotNumber) }
+
     private var activeCards: [Card] { lecture.cards.filter { !$0.isSuperseded } }
 
     var body: some View {
         HStack(spacing: 0) {
             Button { open(nil) } label: {
-                Text(Format.lectureTitle(index: index, name: lecture.name)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(lectureName).font(.system(size: 13, weight: .semibold)).lineLimit(1)
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -421,7 +428,7 @@ private struct LectureRow: View {
     private var dropTarget: some View {
         HStack(spacing: 12) {
             Image(systemName: "plus.rectangle.on.rectangle").font(.system(size: 15, weight: .medium))
-            Text("Drop to add \(Format.count(dropCount, "PDF")) to \(Format.lectureTitle(index: index, name: lecture.name))")
+            Text("Drop to add \(Format.count(dropCount, "PDF")) to \(lectureName)")
                 .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text("You set the order next").font(Theme.small)

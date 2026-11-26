@@ -25,11 +25,11 @@ final class LectureWindowModel {
     var reviewFilter: ReviewFilter
     var selectedCardID: UUID?
     var thumbnailSize: ThumbnailSize
-    var notesVisible: Bool
+    var notesVisible = false
     var thumbnailsVisible: Bool
     /// Coverage shows card backs under the fronts. Saved per lecture.
     var coverageShowsBacks: Bool
-    var askVisible = true
+    var askVisible = false
     var panes = LecturePaneState()
     var chatContext = ChatContext()
     var chatScrollTarget: UUID?
@@ -63,6 +63,7 @@ final class LectureWindowModel {
     var dismissedSessionError: String? = nil
     var showGenerateSheet = false
     var enlargedPage: Int? = nil
+    var reviewSourcesVisible = false
     var sourceIndex = 0
     var dismissedJobIDs: Set<UUID> = []
     var proposeResult: String? = nil
@@ -98,7 +99,6 @@ final class LectureWindowModel {
         reviewFilter = prefs.reviewFilter == .needsAdjustment ? .unreviewed : prefs.reviewFilter
         selectedCardID = prefs.selectedCardID
         thumbnailSize = prefs.thumbnailSize
-        notesVisible = prefs.inspectorVisible
         thumbnailsVisible = prefs.sidebarVisible
         coverageShowsBacks = prefs.coverageShowsBacks
         if selectedCardID == nil { selectedCardID = visibleCards.first?.id }
@@ -613,7 +613,6 @@ final class LectureWindowModel {
         prefs.reviewFilter = reviewFilter
         prefs.selectedCardID = selectedCardID.flatMap { id in lecture.cards.contains { $0.id == id } ? id : nil }
         prefs.thumbnailSize = thumbnailSize
-        prefs.inspectorVisible = notesVisible
         prefs.sidebarVisible = thumbnailsVisible
         prefs.coverageShowsBacks = coverageShowsBacks
         return prefs

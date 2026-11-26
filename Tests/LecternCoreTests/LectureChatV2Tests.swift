@@ -248,6 +248,103 @@ private actor V2Gate: AIProvider {
         #expect(oneCard["cardID"] as? String == lecture.cards[0].id.uuidString); #expect(oneCard["baseRevisionID"] as? String == lecture.cards[0].currentRevisionID?.uuidString)
         #expect(requests[0].pdf == nil); #expect(requests[0].chatSnapshot?.initialRefs == [.allCards])
     }
+
+    @Test @MainActor func deletionRequestsWaitForIndividualOrBatchApproval() async throws {
+        let (store, module, lecture, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cards = lecture.cards
+        let reply = ChatReply(message: "Review the proposed deletions.", deletions: cards.map {
+            ChatCardDeletion(cardID: $0.id, baseRevisionID: $0.currentRevisionID!)
+        })
+        let provider = FakeAIProvider(responses: [AIResponse(content: String(decoding: try JSONEncoder().encode(reply), as: UTF8.self))])
+        let runner = JobRunner(store: store, providers: [provider])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+        var preferences = lecture.viewPreferences
+        preferences.selectedCardID = cards[0].id
+        try await session.dispatch(.setViewPreferences(preferences))
+
+        _ = try await session.chat(question: "Delete these cards", contextRefs: [.allCards])
+        await runner.waitUntilIdle()
+        try await session.refresh()
+        let answer = try #require(session.lecture.currentChat.messages.last)
+        let chatID = session.lecture.currentChat.id
+        #expect(session.lecture.cards == cards)
+        #expect(answer.deletionRequests?.map(\.front) == cards.map(\.front))
+        #expect(answer.deletionRequests?.map(\.state) == [.pending, .pending, .pending, .pending])
+        let schema = try #require(await provider.requests.first?.outputSchema)
+        let object = try #require(JSONSerialization.jsonObject(with: Data(schema.utf8)) as? [String: Any])
+        #expect((object["required"] as? [String])?.contains("deletions") == true)
+
+        try await session.newChat()
+        try await session.openChat(id: chatID)
+        try await session.dispatch(.resolveChatDeletions(chatID: chatID, messageID: answer.id, cardIDs: [cards[0].id], delete: true))
+        #expect(session.lecture.cards.filter { !$0.isSuperseded }.map(\.id) == cards.dropFirst().map(\.id))
+        #expect(session.lecture.viewPreferences.selectedCardID == nil)
+        let jobID = try #require(answer.editJobID)
+        #expect(session.lecture.jobs.first { $0.id == jobID }?.chatCitationCardIDs == cards.map(\.id))
+        #expect(session.lecture.chatCitationCardID(number: 1, jobID: jobID) == nil)
+        #expect(session.lecture.chatCitationCardID(number: 2, jobID: jobID) == cards[1].id)
+        #expect(session.lecture.chatCitationCardID(number: 1, jobID: nil) == cards[1].id)
+
+        var olderLecture = session.lecture
+        let jobIndex = try #require(olderLecture.jobs.firstIndex { $0.id == jobID })
+        olderLecture.jobs[jobIndex].chatCitationCardIDs = nil
+        #expect(olderLecture.chatCitationCardID(number: 1, jobID: jobID) == nil)
+        #expect(olderLecture.chatCitationCardID(number: 2, jobID: jobID) == cards[1].id)
+
+        try await session.dispatch(.resolveChatDeletions(chatID: chatID, messageID: answer.id, cardIDs: [cards[1].id], delete: false))
+        try await session.dispatch(.resolveChatDeletions(chatID: chatID, messageID: answer.id, cardIDs: [cards[2].id, cards[3].id], delete: true))
+        await #expect(throws: AIError.self) { try await session.retryChat(messageID: answer.id) }
+        let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(saved.currentChat.messages.last?.deletionRequests?.map(\.state) == [.deleted, .kept, .deleted, .deleted])
+        #expect(saved.cards.filter { !$0.isSuperseded } == [cards[1]])
+        #expect(saved.cards[0].history == cards[0].history)
+    }
+
+    @Test @MainActor func staleDeletionCannotRemoveAnyCardInItsBatch() async throws {
+        let (store, _, lecture, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let targets = Array(lecture.cards.prefix(2))
+        let reply = ChatReply(message: "Review the proposed deletions.", deletions: targets.map {
+            ChatCardDeletion(cardID: $0.id, baseRevisionID: $0.currentRevisionID!)
+        })
+        let provider = FakeAIProvider(responses: [AIResponse(content: String(decoding: try JSONEncoder().encode(reply), as: UTF8.self))])
+        let runner = JobRunner(store: store, providers: [provider])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+        _ = try await session.chat(question: "Delete two cards", contextRefs: [.allCards])
+        await runner.waitUntilIdle()
+        try await session.refresh()
+        let answer = try #require(session.lecture.currentChat.messages.last)
+        let chatID = session.lecture.currentChat.id
+        try await session.dispatch(.commitEdit(cardID: targets[1].id, front: "Changed", back: targets[1].back, sourcePages: []))
+        await #expect(throws: LectureError.self) {
+            try await session.dispatch(.resolveChatDeletions(chatID: chatID, messageID: answer.id, cardIDs: Set(targets.map(\.id)), delete: true))
+        }
+        await #expect(throws: LectureError.self) {
+            try await session.dispatch(.resolveChatDeletions(chatID: chatID, messageID: answer.id, cardIDs: [lecture.cards[2].id], delete: true))
+        }
+        #expect(session.lecture.cards.allSatisfy { !$0.isSuperseded })
+        #expect(session.lecture.currentChat.messages.last?.deletionRequests?.map(\.state) == [.pending, .pending])
+        try await session.dispatch(.resolveChatDeletions(chatID: chatID, messageID: answer.id, cardIDs: [targets[0].id], delete: true))
+        #expect(session.lecture.cards[0].isSuperseded)
+        #expect(!session.lecture.cards[1].isSuperseded)
+    }
+
+    @Test @MainActor func deletionProposalRejectsCardOutsideFrozenSnapshot() async throws {
+        let (store, _, lecture, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reply = ChatReply(message: "Review the proposed deletion.", deletions: [.init(cardID: UUID(), baseRevisionID: UUID())])
+        let provider = FakeAIProvider(responses: [AIResponse(content: String(decoding: try JSONEncoder().encode(reply), as: UTF8.self))])
+        let runner = JobRunner(store: store, providers: [provider])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+        let jobID = try await session.chat(question: "Delete the first card", contextRefs: [.allCards])
+        await runner.waitUntilIdle()
+        try await session.refresh()
+        #expect(session.lecture.jobs.first(where: { $0.id == jobID })?.state == .failed)
+        #expect(session.lecture.currentChat.messages.allSatisfy { $0.deletionRequests == nil })
+        #expect(session.lecture.cards == lecture.cards)
+    }
+
     @Test @MainActor func concurrentChangesBecomePendingAndForceApplyIsExplicit() async throws {
         let (store, module, lecture, root) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let gate = V2Gate(try response(lecture.cards, count: 1)); let runner = JobRunner(store: store, providers: [gate]); let session = LectureSession(lecture: lecture, store: store, runner: runner)

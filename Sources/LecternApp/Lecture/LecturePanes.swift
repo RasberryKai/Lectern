@@ -3,8 +3,6 @@ import LecternCore
 import Observation
 import SwiftUI
 
-nonisolated enum LectureSideTab: String { case content, chat }
-
 /// Independent layouts for the thumbnail workspace and the wider review list.
 @Observable final class LecturePaneState {
     var prepareLeft: Double = UserDefaults.standard.object(forKey: "v2.prepare.left") as? Double ?? 180
@@ -13,15 +11,7 @@ nonisolated enum LectureSideTab: String { case content, chat }
     var reviewRight: Double = UserDefaults.standard.object(forKey: "v2.review.right") as? Double ?? 360
     var focusedDivider: PaneSide?
     var reviewLeftVisible = true
-    private var prepareTab = LectureSideTab(rawValue: UserDefaults.standard.string(forKey: "v2.prepare.tab") ?? "content") ?? .content
-    private var reviewTab = LectureSideTab(rawValue: UserDefaults.standard.string(forKey: "v2.review.tab") ?? "content") ?? .content
 
-    func tab(for mode: LectureMode) -> LectureSideTab { mode == .prepare ? prepareTab : reviewTab }
-    func setTab(_ tab: LectureSideTab, for mode: LectureMode) {
-        if mode == .prepare { prepareTab = tab } else { reviewTab = tab }
-        UserDefaults.standard.set(tab.rawValue, forKey: "v2.\(mode == .prepare ? "prepare" : "review").tab")
-    }
-    func openChat(_ mode: LectureMode) { setTab(.chat, for: mode) }
     func width(_ side: PaneSide, mode: LectureMode) -> Double {
         mode == .prepare ? (side == .left ? prepareLeft : prepareRight) : (side == .left ? reviewLeft : reviewRight)
     }
@@ -139,44 +129,23 @@ struct ShortcutKey: View {
     }
 }
 
-/// The content tab and chat share the same space in both workspaces.
-struct LectureSidePanel: View {
+struct LectureChatSidebar: View {
     @Bindable var model: LectureWindowModel
     var focus: FocusState<EditorField?>.Binding
     @State private var imageDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                tab(.chat, title: "Ask AI", icon: "sparkles")
-                tab(.content, title: model.mode == .prepare ? "Cards" : "Slide", icon: model.mode == .prepare ? "rectangle.on.rectangle" : "display")
+            HStack {
+                Label("Ask AI", systemImage: "sparkles")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
                 ChatHistoryControls(model: model)
             }
-            .padding(.horizontal, 10).padding(.top, 8)
-            .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
-            if !model.readOnly {
-                Label(model.isImportingChatImages ? "Preparing images…" : (imageDropTargeted ? "Drop images to add to chat" : "Drop images anywhere in this pane"), systemImage: "photo.badge.plus")
-                    .font(Theme.caption).foregroundStyle(imageDropTargeted ? Theme.ai : Theme.faint)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16).padding(.vertical, 7)
-                    .background(imageDropTargeted ? Theme.aiWash : .clear)
-            }
-            if model.panes.tab(for: model.mode) != .chat, let error = model.chatAttachmentError {
-                HStack(alignment: .top) {
-                    Text(error).font(Theme.caption).foregroundStyle(Theme.bad)
-                    Spacer(minLength: 4)
-                    Button { model.chatAttachmentError = nil } label: { Image(systemName: "xmark").font(.system(size: 10)) }
-                        .buttonStyle(.plain).help("Dismiss attachment error")
-                }.padding(10)
-            }
-            if model.panes.tab(for: model.mode) == .chat {
-                AskPanel(model: model, page: model.mode == .prepare ? (model.focusedPage ?? 0) : (model.selectedCard?.sourcePages.first ?? 0), cardID: model.mode == .review ? model.selectedCardID : nil, focus: focus)
-            } else if model.mode == .prepare {
-                PrepareCardsPane(model: model)
-            } else {
-                ReviewSourcePane(model: model)
-            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            Divider().overlay(Theme.border)
+            AskPanel(model: model, page: model.mode == .prepare ? (model.focusedPage ?? 0) : (model.selectedCard?.sourcePages.first ?? 0), cardID: model.mode == .review ? model.selectedCardID : nil, focus: focus)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
@@ -184,7 +153,6 @@ struct LectureSidePanel: View {
                 guard model.canAttachChatImages, !images.isEmpty else { return false }
                 Task {
                     if await model.importChatImages(images) {
-                        model.panes.openChat(model.mode)
                         focus.wrappedValue = .ask
                     }
                 }
@@ -198,28 +166,5 @@ struct LectureSidePanel: View {
                     .padding(6).allowsHitTesting(false)
             }
         }
-    }
-
-    private func tab(_ value: LectureSideTab, title: String, icon: String) -> some View {
-        let active = model.panes.tab(for: model.mode) == value
-        return Button {
-            model.panes.setTab(value, for: model.mode)
-            if value == .chat { focus.wrappedValue = .ask }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 12))
-                Text(title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1).fixedSize()
-                if value == .chat { ShortcutKey(text: "⌘⇧A") }
-                else {
-                    if model.mode == .prepare { Text("\(model.cards(from: model.focusedPage ?? 0).count)").font(Theme.caption).foregroundStyle(Theme.faint) }
-                    ShortcutKey(text: "⌘⇧S")
-                }
-            }
-            .foregroundStyle(active ? Theme.ink : Theme.quiet)
-            .padding(.horizontal, 7).padding(.vertical, 10)
-            .overlay(alignment: .bottom) { Rectangle().fill(active ? Theme.ink : .clear).frame(height: 2) }
-        }
-        .buttonStyle(.plain)
-        .help(value == .chat ? "Toggle AI chat · ⌘⇧A" : "Toggle \(model.mode == .prepare ? "cards" : "source slide") · ⌘⇧S")
     }
 }

@@ -79,16 +79,37 @@ struct LectureCompletionTests {
             $0.jobs.append(Job(kind: .ask, pages: []))
         }
         #expect(running.cardMakingCompletedAt == completedAt)
-        let waiting = try #require(try await store.dashboard().modules.first?.lectures.first)
-        #expect(waiting.automaticStatus == .preparing)
-        #expect(waiting.preparationReasons == [.waitingForJobs(jobIDs: [running.jobs[0].id])])
-        #expect(waiting.cardMakingCompletedAt == completedAt)
+        let duringAsk = try #require(try await store.dashboard().modules.first?.lectures.first)
+        #expect(duringAsk.automaticStatus.cardMakingStatus == .done)
+        #expect(duringAsk.preparationReasons.isEmpty)
+        #expect(duringAsk.cardMakingCompletedAt == completedAt)
 
         let failed = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
             $0.jobs[0].state = .failed
         }
         #expect(failed.cardMakingCompletedAt == completedAt)
         #expect(try await store.dashboard().modules[0].lectures[0].automaticStatus == .toExport)
+    }
+
+    @Test func successfulGenerationCanCompleteWithoutChangingCards() async throws {
+        let (store, module, root) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("one-page.pdf")
+        try makeOnePagePDF(at: source)
+        let lecture = try await store.importPDF(from: source, moduleID: module.id)
+        let job = Job(kind: .generate, pages: [1])
+        let running = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            try LectureReducer.reduce(&$0, action: .startJob(job))
+        }
+        #expect(running.cardMakingCompletedAt == nil)
+
+        let completed = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            try LectureReducer.reduce(&$0, action: .landGeneration(jobID: job.id, cards: [],
+                skipped: [SkippedSlide(slide: 1, reason: "Title slide")], usage: nil))
+        }
+        #expect(completed.cards.isEmpty)
+        #expect(completed.cardMakingCompletedAt != nil)
+        #expect(try await store.dashboard().modules[0].lectures[0].status == .done)
     }
 
     @Test func noCardsStayAutomaticallyIncompleteAndManualOverridesCount() async throws {

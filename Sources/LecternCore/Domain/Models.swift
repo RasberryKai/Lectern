@@ -185,7 +185,7 @@ public enum ThreadContext: Codable, Equatable, Hashable, Sendable { case none, s
 public enum FlashcardContext: String, Codable, CaseIterable, Sendable { case none, all, current }
 public enum MessageRole: String, Codable, Sendable { case user, assistant }
 public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
-    private enum CodingKeys: String, CodingKey { case id, role, text, citedPages, at, editJobID, attachments, context, read, quiz, stopped, searchedLecture, pendingEdits, conflictingCardIDs, createdCardIDs, clicked, suggestion }
+    private enum CodingKeys: String, CodingKey { case id, role, text, citedPages, at, editJobID, attachments, context, read, quiz, stopped, searchedLecture, pendingEdits, conflictingCardIDs, createdCardIDs, deletionRequests, clicked, suggestion }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id); role = try c.decode(MessageRole.self, forKey: .role); text = try c.decode(String.self, forKey: .text)
@@ -195,6 +195,7 @@ public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
         searchedLecture = try c.decodeIfPresent(Bool.self, forKey: .searchedLecture) ?? false
         createdCardIDs = try c.decodeIfPresent([UUID].self, forKey: .createdCardIDs)
         pendingEdits = try c.decodeIfPresent([ChatCardEdit].self, forKey: .pendingEdits) ?? []; conflictingCardIDs = try c.decodeIfPresent([UUID].self, forKey: .conflictingCardIDs) ?? []
+        deletionRequests = try c.decodeIfPresent([ChatDeletionRequest].self, forKey: .deletionRequests)
         clicked = try c.decodeIfPresent(Bool.self, forKey: .clicked) ?? false
         suggestion = try c.decodeIfPresent(CardSuggestion.self, forKey: .suggestion)
     }
@@ -212,6 +213,7 @@ public struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
     public var searchedLecture: Bool = false
     public var createdCardIDs: [UUID]? = nil
     public var pendingEdits: [ChatCardEdit] = []
+    public internal(set) var deletionRequests: [ChatDeletionRequest]? = nil
     public var conflictingCardIDs: [UUID] = []
     public var editJobID: UUID? = nil
     /// The student marked this answer as the explanation that worked.
@@ -374,6 +376,8 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var chatEdits: [ChatCardEdit]? = nil
     public var chatEditDisposition: ChatEditDisposition? = nil
     public var chatCardVersions: [ChatCardVersion]? = nil
+    /// One-based card numbering in the original chat request.
+    public var chatCitationCardIDs: [UUID]? = nil
     public var chatEditUndo: [ChatEditUndo]? = nil
     public var chatEditsUndoneAt: Date? = nil
     /// Page numbering used by the immutable request snapshot.

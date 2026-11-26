@@ -97,7 +97,7 @@ struct LearningPointDrawer: View {
             HStack(spacing: 5) {
                 ForEach(reasons(point), id: \.text) { reason in chip(reason.text, tint: reason.tint, wash: reason.wash) }
                 ForEach(point.pages.sorted(), id: \.self) { page in
-                    Button("Slide \(page)") { model.openChatCitation("S", page) }
+                    Button("Slide \(page)") { model.previewLearningPointSlide(page) }
                         .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Theme.ai)
                         .padding(.horizontal, 5).padding(.vertical, 1.5)
                         .background(Theme.aiWash, in: RoundedRectangle(cornerRadius: 4))
@@ -180,7 +180,7 @@ struct LearningPointDrawer: View {
                 if !point.pages.isEmpty {
                     HStack(spacing: 4) {
                         ForEach(point.pages.sorted(), id: \.self) { page in
-                            Button("Slide \(page)") { model.openChatCitation("S", page) }
+                            Button("Slide \(page)") { model.previewLearningPointSlide(page) }
                                 .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Theme.ai)
                                 .padding(.horizontal, 5).padding(.vertical, 1.5)
                                 .background(Theme.aiWash, in: RoundedRectangle(cornerRadius: 4))

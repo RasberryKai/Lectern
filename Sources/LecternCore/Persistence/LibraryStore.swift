@@ -239,12 +239,12 @@ public actor LibraryStore {
     /// Timestamp only real effective-status transitions. Old complete records remain undated
     /// until they are reopened and completed again; `updatedAt` cannot identify completion.
     func reconcileCardMakingCompletion(from previous: Lecture, to updated: inout Lecture, at date: Date) {
-        // Chat, notes, preferences, and job-only writes do not affect card-making completion.
-        // Avoid reparsing card math and coverage under the library lock for those common writes.
+        // Most writes leave the inputs to card-making completion unchanged.
         guard previous.cards == updated.cards,
               previous.progressOverride == updated.progressOverride,
               previous.pageCount == updated.pageCount,
-              previous.slides.map(\.isSelected) == updated.slides.map(\.isSelected) else {
+              previous.slides.map(\.isSelected) == updated.slides.map(\.isSelected),
+              previous.successfullyGeneratedPages == updated.successfullyGeneratedPages else {
             reconcileChangedCardMakingCompletion(from: previous, to: &updated, at: date)
             return
         }
@@ -252,8 +252,8 @@ public actor LibraryStore {
     }
 
     private func reconcileChangedCardMakingCompletion(from previous: Lecture, to updated: inout Lecture, at date: Date) {
-        let wasComplete = DashboardBuilder.cardMakingCompletionStatus(for: previous) == .done
-        let isComplete = DashboardBuilder.cardMakingCompletionStatus(for: updated) == .done
+        let wasComplete = DashboardBuilder.lectureProgress(previous).status.cardMakingStatus == .done
+        let isComplete = DashboardBuilder.lectureProgress(updated).status.cardMakingStatus == .done
         switch (wasComplete, isComplete) {
         // Library JSON uses ISO 8601 at whole-second precision; canonicalize before returning
         // the in-memory lecture so a reload does not appear to change the event time.

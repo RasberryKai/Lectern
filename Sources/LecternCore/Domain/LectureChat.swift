@@ -3,6 +3,21 @@ import Foundation
 public enum ContextRef: Codable, Equatable, Hashable, Sendable {
     case slide(Int), card(UUID), allSlides, allCards
 }
+
+extension Lecture {
+    public func chatCitationCardID(number: Int, jobID: UUID?) -> UUID? {
+        guard number > 0 else { return nil }
+        let job = jobID.flatMap { id in jobs.first { $0.id == id && $0.isLectureChat == true } }
+        let index = number - 1
+        if let citedCards = job?.chatCitationCardIDs ?? job?.chatCardVersions?.map(\.cardID) {
+            guard citedCards.indices.contains(index) else { return nil }
+            let id = citedCards[index]
+            return cards.contains { $0.id == id && !$0.isSuperseded } ? id : nil
+        }
+        return cards.lazy.filter { !$0.isSuperseded }.dropFirst(index).first?.id
+    }
+}
+
 public struct ChatContext: Equatable, Sendable {
     public var followsScreen: Bool
     public var pins: [ContextRef]
@@ -58,6 +73,22 @@ public struct LectureChat: Codable, Equatable, Identifiable, Sendable {
 
 
 public enum ChatEditDisposition: String, Codable, Sendable { case proposed, applied, dismissed }
+
+public struct ChatDeletionRequest: Codable, Equatable, Identifiable, Sendable {
+    public enum State: String, Codable, Sendable { case pending, deleted, kept }
+
+    public let version: ChatCardVersion
+    public let front: String
+    public let back: String
+    public internal(set) var state: State = .pending
+    public var id: UUID { version.cardID }
+
+    init(version: ChatCardVersion, card: Card) {
+        self.version = version
+        self.front = card.front
+        self.back = card.back
+    }
+}
 
 public struct ChatAttachment: Codable, Equatable, Identifiable, Sendable {
     public static let maximumImageBytes = 5 * 1_024 * 1_024

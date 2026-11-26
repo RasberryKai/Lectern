@@ -155,13 +155,11 @@ extension LectureWindowModel {
         chatPreparationFailure = nil
         chatContext = ChatContext()
         askVisible = true
-        panes.openChat(mode)
     }
     func resumeChat(_ id: UUID) async {
         guard runningChat == nil, !isStartingChat, !isImportingChatImages else { return }
         if readOnly {
             readOnlyChatID = id == lecture.currentChat.id ? nil : id
-            panes.openChat(mode)
             return
         }
         chatDraftSaveTask?.cancel()
@@ -171,7 +169,6 @@ extension LectureWindowModel {
         chatAttachmentError = nil
         chatPreparationFailure = nil
         chatContext = ChatContext()
-        panes.openChat(mode)
     }
     func deleteChat(_ id: UUID) async { guard !readOnly else { return }; await run { try await session.deleteArchivedChat(id: id) } }
     func removeChatLearningPoint(_ id: UUID) async {
@@ -221,7 +218,7 @@ extension LectureWindowModel {
         return nil
     }
     func showChat(forPage page: Int) {
-        askVisible = true; panes.openChat(mode)
+        askVisible = true
         guard let target = firstChatMessage(forPage: page) else { return }
         Task {
             if target.chatID != displayedChat.id { await resumeChat(target.chatID) }
@@ -231,7 +228,7 @@ extension LectureWindowModel {
     }
     /// Opens the chat at the discussion a learning point came from.
     func showChat(for point: LearningPoint) {
-        askVisible = true; panes.openChat(mode)
+        askVisible = true
         guard let target = chatLocation(for: point) else {
             errorMessage = "The source chat for this card is no longer available."
             return
@@ -255,7 +252,7 @@ extension LectureWindowModel {
     }
     func fixFlagWithClaude(cardID: UUID) {
         guard !readOnly, runningChat == nil, !isStartingChat, let card = activeCards.first(where: { $0.id == cardID }) else { return }
-        askVisible = true; panes.openChat(mode)
+        askVisible = true
         let question = "Fix this flag on Card \(cardNumbers[cardID] ?? 0): \(card.flag ?? card.issue?.message ?? "Check this card for accuracy and clarity.")"
         let refs: [ContextRef] = [.card(cardID)] + card.sourcePages.map(ContextRef.slide)
         isStartingChat = true
@@ -279,14 +276,50 @@ extension LectureWindowModel {
             try await session.refresh()
         } }
     }
-    func openChatCitation(_ kind: String, _ number: Int) {
-        if kind == "C" { if let card = activeCards.first(where: { cardNumbers[$0.id] == number }) { openChatCard(card.id) }; return }
-        guard number > 0, number <= lecture.pageCount else { return }
-        if mode == .prepare { focus(number - 1) } else { enlargedPage = number }
+    func openChatCitation(_ citation: ChatCitation, jobID: UUID?) {
+        switch citation {
+        case .slide(let page):
+            guard page > 0, page <= lecture.pageCount else {
+                errorMessage = "This cited slide is no longer available."
+                return
+            }
+            jumpToPrepare(page: page)
+            askVisible = true
+        case .card(let number):
+            guard let id = lecture.chatCitationCardID(number: number, jobID: jobID) else {
+                errorMessage = "This cited card is no longer available."
+                return
+            }
+            openChatCard(id)
+        }
+    }
+    func previewLearningPointSlide(_ page: Int) {
+        guard page > 0, page <= lecture.pageCount else { return }
+        if mode == .prepare { focus(page - 1) } else { enlargedPage = page }
     }
     func openChatCard(_ id: UUID) {
         reviewSearch = ""; reviewFilter = .all; setMode(.review); selectCard(id)
-        panes.openChat(.review); askVisible = true
+        askVisible = true
+    }
+    func resolveChatDeletions(chatID: UUID, messageID: UUID, cardIDs: Set<UUID>, delete: Bool) async {
+        guard !readOnly else { return }
+        await run {
+            try await session.flushEdits()
+            do {
+                try await session.dispatch(.resolveChatDeletions(chatID: chatID, messageID: messageID, cardIDs: cardIDs, delete: delete))
+            } catch {
+                try? await session.refresh()
+                throw error
+            }
+            if delete {
+                chatContext.pins.removeAll { ref in
+                    if case .card(let id) = ref { return cardIDs.contains(id) }
+                    return false
+                }
+            }
+        }
+        syncEditor()
+        app.scheduleReload()
     }
     func retryChatAnswer(_ message: ChatMessage) async {
         guard !readOnly, runningChat == nil else { return }

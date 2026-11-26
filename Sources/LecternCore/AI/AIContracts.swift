@@ -19,7 +19,10 @@ public struct AIRequest: Codable, Equatable, Sendable {
     public var outputSchemaOverride: String? = nil
     /// Diagnostic attribution only; never sent as study content to a provider.
     public var diagnosticContext: [String: String]? = nil
-    var outputSchema: String? { outputSchemaOverride ?? AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true) }
+    var outputSchema: String? {
+        outputSchemaOverride ?? AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true,
+                                                    allowsCardDeletion: chatSnapshot?.allowsCardDeletion == true)
+    }
     var allowsWebSearch: Bool { kind == .chat }
     var cliSystemPrompt: String {
         guard allowsWebSearch else { return systemPrompt }
@@ -150,6 +153,16 @@ public struct ChatCardEdit: Codable, Equatable, Sendable {
     }
 }
 
+public struct ChatCardDeletion: Codable, Equatable, Sendable {
+    public var cardID: UUID
+    public var baseRevisionID: UUID
+
+    public init(cardID: UUID, baseRevisionID: UUID) {
+        self.cardID = cardID
+        self.baseRevisionID = baseRevisionID
+    }
+}
+
 public struct ChatReply: Codable, Equatable, Sendable {
     public struct NewCard: Codable, Equatable, Sendable {
         public var front: String
@@ -167,21 +180,24 @@ public struct ChatReply: Codable, Equatable, Sendable {
     public var message: String
     public var edits: [ChatCardEdit]
     public var newCards: [NewCard]?
+    public var deletions: [ChatCardDeletion]?
 
-    public init(message: String, edits: [ChatCardEdit] = [], newCards: [NewCard]? = nil) {
+    public init(message: String, edits: [ChatCardEdit] = [], newCards: [NewCard]? = nil, deletions: [ChatCardDeletion]? = nil) {
         self.message = message
         self.edits = edits
         self.newCards = newCards
+        self.deletions = deletions
     }
 }
 
 public enum AIOutputSchema {
-    public static func json(for kind: JobKind, allowsCardCreation: Bool = false) -> String? {
+    public static func json(for kind: JobKind, allowsCardCreation: Bool = false, allowsCardDeletion: Bool = false) -> String? {
         switch kind {
         case .ask: return nil
         case .chat:
-            let extraRequired = allowsCardCreation ? #","newCards""# : ""
-            let extraProperties = allowsCardCreation ? #""newCards":{"type":"array","items":\#(newChatCard)},"# : ""
+            let extraRequired = (allowsCardCreation ? #","newCards""# : "") + (allowsCardDeletion ? #","deletions""# : "")
+            let extraProperties = (allowsCardCreation ? #""newCards":{"type":"array","items":\#(newChatCard)},"# : "")
+                + (allowsCardDeletion ? #""deletions":{"type":"array","items":\#(chatCardDeletion)},"# : "")
             return #"{"type":"object","additionalProperties":false,"required":["message","edits","quiz"\#(extraRequired)],"properties":{\#(extraProperties)"quiz":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["question","answer"],"properties":{"question":{"type":"string"},"answer":{"type":"string"}}}},"message":{"type":"string"},"edits":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID","front","back"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"},"front":{"type":"string"},"back":{"type":"string"}}}}}}"#
         case .generate:
             return #"{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":CARD},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}"#.replacingOccurrences(of: "CARD", with: generatedCard)
@@ -195,6 +211,7 @@ public enum AIOutputSchema {
     public static let reviewDistillation = #"{"type":"object","additionalProperties":false,"required":["summary","suggestion"],"properties":{"summary":{"type":"string"},"suggestion":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["reason","cardID","baseRevisionID","front","back","sourceSlides"],"properties":{"reason":{"type":"string"},"cardID":{"type":["string","null"]},"baseRevisionID":{"type":["string","null"]},"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}}}}]}}}"#
     private static let generatedCard = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag","point"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]},"point":{"type":["string","null"]}}}"#
     private static let newChatCard = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}}}}"#
+    private static let chatCardDeletion = #"{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"}}}"#
     private static let card = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]}}}"#
 }
 
@@ -233,6 +250,8 @@ public struct ChatSnapshot: Codable, Equatable, Sendable {
     public var initialRefs: [ContextRef]
     /// Nil for older frozen snapshots and for chat outside Review.
     public var allowsCardCreation: Bool? = nil
+    /// Nil on older snapshots, which keep their original contract when retried.
+    var allowsCardDeletion: Bool? = nil
     public init(slides: [ChatSlide], cards: [Card], initialRefs: [ContextRef]) { self.slides = slides; self.cards = cards; self.initialRefs = initialRefs }
 }
 

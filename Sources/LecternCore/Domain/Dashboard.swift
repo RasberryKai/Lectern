@@ -11,6 +11,7 @@ public enum PreparationReason: Equatable, Sendable {
     case selectSlides
     /// Source pages are one based, matching Lecture.coverage(page:).
     case generateMissingCoverage(pages: [Int])
+    case generateMoreCards
     case waitingForJobs(jobIDs: [UUID])
     case addCards
 }
@@ -97,6 +98,15 @@ public struct DashboardSnapshot: Equatable, Sendable {
     public var archivedModuleCount: Int { archivedModules.count }
 }
 
+extension Lecture {
+    /// A successful job prepares its entire scope, including slides that yielded no cards.
+    var successfullyGeneratedPages: Set<Int> {
+        jobs.reduce(into: []) { pages, job in
+            if job.kind == .generate && job.state == .succeeded { pages.formUnion(job.pages) }
+        }
+    }
+}
+
 public enum DashboardBuilder {
     /// The store validates identities before taking the atomic snapshot supplied here.
     /// No files, wall clock, mutable global state, or AI calls are consulted.
@@ -121,16 +131,6 @@ public enum DashboardBuilder {
     }
 
     static func lectureProgress(_ lecture: Lecture) -> LectureProgress {
-        progress(lecture, includeWaitingForJobs: true)
-    }
-
-    /// A running job temporarily adds a dashboard preparation reason, but does not undo
-    /// completed card making unless its eventual result changes cards or lecture coverage.
-    static func cardMakingCompletionStatus(for lecture: Lecture) -> LectureProgressStatus {
-        progress(lecture, includeWaitingForJobs: false).status.cardMakingStatus
-    }
-
-    private static func progress(_ lecture: Lecture, includeWaitingForJobs: Bool) -> LectureProgress {
         let cards = lecture.cards.filter { !$0.isSuperseded }
         var review = 0, proposals = 0, ready = 0, changed = 0
         for card in cards {
@@ -144,23 +144,40 @@ public enum DashboardBuilder {
                 if card.exported != nil { changed += 1 }
             }
         }
-        let selected = lecture.slides.filter(\.isSelected)
-        let missing = selected.filter { lecture.coverage(page: $0.pageIndex + 1) == 0 }.map { $0.pageIndex + 1 }
-        let running = lecture.jobs.filter { $0.state == .running }.map(\.id)
+        let selected = lecture.slides.filter(\.isSelected).map { $0.pageIndex + 1 }
+        let meetsReviewMinimum = Double(cards.count) >= 0.3 * Double(selected.count)
+        let finishedReviewBelowMinimum = !meetsReviewMinimum && !cards.isEmpty && review == 0
+        let covered = Set(cards.lazy.filter { $0.verdict != .bad }.flatMap(\.sourcePages))
+        let uncovered = selected.filter { !covered.contains($0) }
+        let generated = lecture.successfullyGeneratedPages
+        let needingGeneration = uncovered.filter { !generated.contains($0) }
         var reasons: [PreparationReason] = []
         if lecture.pageCount > 0 {
             if selected.isEmpty { reasons.append(.selectSlides) }
-            if !missing.isEmpty { reasons.append(.generateMissingCoverage(pages: missing)) }
+            if !needingGeneration.isEmpty && !finishedReviewBelowMinimum {
+                let running = lecture.jobs.filter { $0.kind == .generate && $0.state == .running }.map(\.id)
+                if !running.isEmpty { reasons.append(.waitingForJobs(jobIDs: running)) }
+                reasons.append(.generateMissingCoverage(pages: needingGeneration))
+            }
         } else if cards.isEmpty {
             reasons.append(.addCards)
         }
-        if includeWaitingForJobs && !running.isEmpty { reasons.append(.waitingForJobs(jobIDs: running)) }
-        let status: LectureProgressStatus = review > 0 ? .toReview : !reasons.isEmpty ? .preparing : ready > 0 ? .toExport : .done
+        if review > 0 && !meetsReviewMinimum && reasons.isEmpty {
+            reasons.append(.generateMoreCards)
+        }
+        let status: LectureProgressStatus
+        if review > 0 && meetsReviewMinimum {
+            status = .toReview
+        } else if !reasons.isEmpty {
+            status = .preparing
+        } else {
+            status = ready > 0 ? .toExport : .done
+        }
         return LectureProgress(lectureID: lecture.id, name: lecture.name, automaticStatus: status,
                                statusOverride: lecture.progressOverride, cardMakingCompletedAt: lecture.cardMakingCompletedAt,
                                reviewCardCount: review,
                                proposalCount: proposals, readyExportCount: ready, changedExportCount: changed,
-                               selectedPageCount: selected.count, coveredSelectedPageCount: selected.count - missing.count,
+                               selectedPageCount: selected.count, coveredSelectedPageCount: selected.count - uncovered.count,
                                preparationReasons: reasons)
     }
 

@@ -158,7 +158,7 @@ public struct MessagesAPIProvider: AIProvider {
             var urlRequest = try Self.makeURLRequest(prompt: request.prompt, kind: .chat, pdf: nil,
                 systemPrompt: request.systemPrompt, apiKey: apiKey,
                 model: request.model.hasPrefix("claude-") ? request.model : model,
-                apiVersion: apiVersion, endpoint: endpoint, maxOutputTokens: maxOutputTokens, allowsCardCreation: snapshot.allowsCardCreation == true)
+                apiVersion: apiVersion, endpoint: endpoint, maxOutputTokens: maxOutputTokens, outputSchema: request.outputSchema)
             var body = try JSONSerialization.jsonObject(with: urlRequest.httpBody!) as! [String: Any]
             body["messages"] = messages
             body["stream"] = true

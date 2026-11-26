@@ -19,7 +19,7 @@ struct ReviewView: View {
                 }
             }
         } right: {
-            LectureSidePanel(model: model, focus: focus)
+            LectureChatSidebar(model: model, focus: focus)
         }
     }
 
@@ -33,8 +33,17 @@ struct ReviewView: View {
                                  activeFill: Theme.ink, activeText: Theme.canvas)
                     .help("Test hides the answer until you press Space · T switches")
             }
-            if let card = model.selectedCard { CardDetail(model: model, card: card, focus: focus) }
-            else { emptyState }
+            if let card = model.selectedCard {
+                if !model.answerHidden {
+                    DisclosureGroup("Source slides", isExpanded: $model.reviewSourcesVisible) {
+                        ReviewSourceSection(model: model, card: card)
+                            .padding(.top, 10)
+                    }
+                    .font(Theme.body)
+                    .panel(padding: 12)
+                }
+                CardDetail(model: model, card: card, focus: focus)
+            } else { emptyState }
         }
     }
 
@@ -512,53 +521,50 @@ struct DiffText: View {
     }
 }
 
-// MARK: - Source pane
+// MARK: - Source slides
 
-struct ReviewSourcePane: View {
+private struct ReviewSourceSection: View {
     @Bindable var model: LectureWindowModel
+    let card: Card
     @State private var showSourcePicker = false
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if let card = model.selectedCard, !model.answerHidden {
-                    sourceActions(for: card)
-                }
-                if let card = model.selectedCard, !card.sourcePages.isEmpty {
-                    let index = min(model.sourceIndex, card.sourcePages.count - 1)
-                    let page = card.sourcePages[index]
+        VStack(alignment: .leading, spacing: 12) {
+            sourceActions
+            if card.sourcePages.isEmpty {
+                Text("No source slides linked to this card.").foregroundStyle(Theme.quiet)
+            } else {
+                let index = min(model.sourceIndex, card.sourcePages.count - 1)
+                let page = card.sourcePages[index]
+                if page > 0, page <= model.lecture.pageCount {
                     let url = model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID)
-                    if model.answerHidden {
-                        // The slide is the answer; blur it until Space.
-                        SlideImage(sourceURL: url, pageIndex: page - 1, width: 900)
-                            .blur(radius: 22).opacity(0.5)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay { Text("Hidden until you show the answer").font(Theme.small).foregroundStyle(Theme.quiet) }
-                            .accessibilityLabel("Source slide hidden until you show the answer")
-                    } else if page > 0 && page <= model.lecture.pageCount {
-                        SlideImage(sourceURL: url, pageIndex: page - 1, width: 900)
-                            .onTapGesture { model.enlargedPage = page }
-                        HStack {
-                            Text("Slide \(page)").font(Theme.body)
-                            Spacer()
-                            Button("Enlarge") { model.enlargedPage = page }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
-                            Button("Prepare") { model.jumpToPrepare(page: page) }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
-                        }
-                        if card.sourcePages.count > 1 {
-                            HStack {
-                                Button { model.sourceIndex = (index - 1 + card.sourcePages.count) % card.sourcePages.count } label: { Image(systemName: "chevron.left") }
-                                Text("\(index + 1) of \(card.sourcePages.count) sources · S cycles").font(Theme.caption).foregroundStyle(Theme.faint)
-                                Button { model.sourceIndex = (index + 1) % card.sourcePages.count } label: { Image(systemName: "chevron.right") }
-                            }.buttonStyle(.plain)
-                        }
-                        let note = model.noteText(for: page - 1)
-                        if !note.isEmpty { Text(note).font(Theme.body).foregroundStyle(Theme.quiet) }
-                    } else { Text("This source slide is unavailable. Choose Edit source slides to update its number.").font(Theme.body).foregroundStyle(Theme.bad) }
-                } else { Text("No source slides linked to this card.").font(Theme.body).foregroundStyle(Theme.quiet) }
-            }.padding(16)
+                    SlideImage(sourceURL: url, pageIndex: page - 1, width: 900)
+                        .onTapGesture { model.enlargedPage = page }
+                    HStack {
+                        Text("Slide \(page)")
+                        Spacer()
+                        Button("Enlarge") { model.enlargedPage = page }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                        Button("Prepare") { model.jumpToPrepare(page: page) }.buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                    }
+                    let note = model.noteText(for: page - 1)
+                    if !note.isEmpty { Text(note).foregroundStyle(Theme.quiet) }
+                } else {
+                    Text("This source slide is unavailable. Choose Edit source slides to update its number.").foregroundStyle(Theme.bad)
+                }
+                if card.sourcePages.count > 1 {
+                    HStack {
+                        Button { model.sourceIndex = (index - 1 + card.sourcePages.count) % card.sourcePages.count } label: { Image(systemName: "chevron.left") }
+                            .accessibilityLabel("Previous source slide")
+                        Text("\(index + 1) of \(card.sourcePages.count) sources · S cycles").font(Theme.caption).foregroundStyle(Theme.faint)
+                        Button { model.sourceIndex = (index + 1) % card.sourcePages.count } label: { Image(systemName: "chevron.right") }
+                            .accessibilityLabel("Next source slide")
+                    }.buttonStyle(.plain)
+                }
+            }
         }
     }
 
-    private func sourceActions(for card: Card) -> some View {
+    private var sourceActions: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button("Edit source slides") { showSourcePicker = true }
                 .buttonStyle(LinkButtonStyle(color: Theme.quiet))

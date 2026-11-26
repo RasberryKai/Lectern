@@ -92,19 +92,94 @@ final class DashboardTests: XCTestCase {
     }
 
     func testStatusPrecedenceAndRunningJobs() {
-        let job = Job(kind: .ask, pages: [1])
+        let job = Job(kind: .generate, pages: [1, 2])
         var lecture = Lecture(moduleID: UUID(), name: "L", pageCount: 2, cards: [Card(sourcePages: [1], front: "Q", back: "A")], jobs: [job])
         XCTAssertEqual(progress(lecture).status, .toReview)
         lecture.cards[0].verdict = .good
         XCTAssertEqual(progress(lecture).status, .preparing)
-        lecture.cards[0].sourcePages = [1, 2]
-        XCTAssertEqual(progress(lecture).preparationReasons, [.waitingForJobs(jobIDs: [job.id])])
+        XCTAssertEqual(progress(lecture).preparationReasons, [.waitingForJobs(jobIDs: [job.id]), .generateMissingCoverage(pages: [2])])
+        lecture.jobs[0].state = .failed
+        XCTAssertEqual(progress(lecture).preparationReasons, [.generateMissingCoverage(pages: [2])])
         lecture.jobs[0].state = .succeeded
         XCTAssertEqual(progress(lecture).status, .toExport)
         lecture.cards[0].exported = ExportMark(revisionID: lecture.cards[0].currentRevisionID!)
         XCTAssertEqual(progress(lecture).status, .done)
-        lecture.jobs[0].state = .running
+        lecture.jobs.append(Job(kind: .generate, pages: [1, 2]))
+        XCTAssertEqual(progress(lecture).status, .done)
+    }
+
+    func testReviewRequiresThirtyPercentOfSelectedSlidesAndCountsResolvedCards() {
+        let pages = Array(1...11)
+        let job = Job(kind: .generate, pages: pages, state: .succeeded)
+        let hidden = Card(front: "Old", back: "A", supersededBy: [])
+        var lecture = Lecture(moduleID: UUID(), name: "L", pageCount: 11, cards: [
+            Card(sourcePages: [1], front: "Q", back: "A"),
+            approved(pages: [2]),
+            Card(sourcePages: [3], front: "Q", back: "A", verdict: .bad),
+            hidden
+        ], jobs: [job])
+
+        let belowMinimum = snapshot([lecture]).modules[0]
+        XCTAssertEqual(belowMinimum.slots[0].status, .preparing)
+        XCTAssertEqual(belowMinimum.lectures[0].reviewCardCount, 1)
+        XCTAssertFalse(belowMinimum.nextUp.contains(.review(lectureID: lecture.id, cardCount: 1)))
+        XCTAssertTrue(belowMinimum.nextUp.contains(.prepare(lectureID: lecture.id, reasons: [.generateMoreCards])))
+
+        lecture.slides[10].isSelected = false
+        let atMinimum = snapshot([lecture]).modules[0]
+        XCTAssertEqual(atMinimum.slots[0].status, .toReview)
+        XCTAssertEqual(atMinimum.nextUp.first, .review(lectureID: lecture.id, cardCount: 1))
+    }
+
+    func testReviewingAllCardsBelowMinimumCompletesCardMaking() {
+        var lecture = Lecture(moduleID: UUID(), name: "L", pageCount: 10, cards: [
+            Card(sourcePages: [1], front: "Q1", back: "A1"),
+            Card(sourcePages: [2], front: "Q2", back: "A2")
+        ])
         XCTAssertEqual(progress(lecture).status, .preparing)
+        lecture.cards[0].verdict = .good
+        XCTAssertEqual(progress(lecture).status, .preparing)
+        lecture.cards[1].verdict = .bad
+
+        let completed = snapshot([lecture]).modules[0]
+        XCTAssertEqual(completed.cardMakingDoneCount, 1)
+        XCTAssertEqual(completed.lectures[0].status, .toExport)
+        XCTAssertTrue(completed.lectures[0].preparationReasons.isEmpty)
+
+        lecture.cards[0].verdict = .bad
+        XCTAssertEqual(progress(lecture).status, .done)
+        lecture.cards[0].verdict = .unreviewed
+        XCTAssertEqual(progress(lecture).status, .preparing)
+    }
+
+    func testGeneratedLectureFinishesAfterReviewEvenWhenCardsAreRemoved() throws {
+        let job = Job(kind: .generate, pages: [1, 2, 3])
+        var lecture = Lecture(moduleID: UUID(), name: "L", pageCount: 4, jobs: [job])
+        lecture.slides[3].isSelected = false
+        try LectureReducer.reduce(&lecture, action: .landGeneration(jobID: job.id, cards: [
+            CardDraft(front: "Q1", back: "A1", sourcePages: [1]),
+            CardDraft(front: "Q2", back: "A2", sourcePages: [2]),
+            CardDraft(front: "Q3", back: "A3", sourcePages: [1])
+        ], skipped: [SkippedSlide(slide: 3, reason: "Title slide")], usage: nil), now: now)
+        XCTAssertEqual(progress(lecture).status, .toReview)
+        XCTAssertTrue(progress(lecture).preparationReasons.isEmpty)
+
+        try LectureReducer.reduce(&lecture, action: .setVerdict(cardID: lecture.cards[0].id, .good), now: now)
+        try LectureReducer.reduce(&lecture, action: .setVerdict(cardID: lecture.cards[2].id, .good), now: now)
+        XCTAssertEqual(progress(lecture).status, .toReview)
+        // Confirmed AI deletion keeps the card as a superseded record.
+        lecture.cards[1].supersededBy = []
+        let result = snapshot([lecture]).modules[0]
+        XCTAssertEqual(result.cardMakingDoneCount, 1)
+        XCTAssertEqual(result.lectures[0].status.cardMakingStatus, .done)
+        XCTAssertEqual(result.lectures[0].reviewCardCount, 0)
+        XCTAssertEqual(result.lectures[0].readyExportCount, 2)
+        XCTAssertEqual(result.lectures[0].coveredSelectedPageCount, 1)
+        XCTAssertTrue(result.lectures[0].preparationReasons.isEmpty)
+
+        try LectureReducer.reduce(&lecture, action: .setSlideSelection(pageIndex: 3, true), now: now)
+        XCTAssertEqual(progress(lecture).status, .preparing)
+        XCTAssertEqual(progress(lecture).preparationReasons, [.generateMissingCoverage(pages: [4])])
     }
 
     func testExportCountsMatchExistingAnkiRuleAndChangedIsSubset() throws {

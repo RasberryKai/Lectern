@@ -28,6 +28,11 @@ enum Format {
         "Lecture \(String(format: "%02d", slot.id.index)) · \(statusLabel(slot.status))\(slot.statusOverride == nil ? "" : " · Manual")"
     }
 
+    static func lectureName(_ name: String, slotNumber: Int?) -> String {
+        guard name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return name }
+        return slotNumber.map { String(format: "%02d", $0) } ?? "Lecture"
+    }
+
     /// "03 Distributions". Names that already start with a number keep their own numbering.
     static func lectureTitle(index: Int, name: String) -> String {
         if let first = name.first, first.isNumber { return name }
@@ -113,6 +118,7 @@ enum Format {
         switch first {
         case .selectSlides: return "Finish selecting slides"
         case .generateMissingCoverage(let pages): return "Generate cards for \(count(pages.count, "slide"))"
+        case .generateMoreCards: return "Generate more cards"
         case .waitingForJobs: return "Waiting for AI"
         case .addCards: return "Add cards"
         }

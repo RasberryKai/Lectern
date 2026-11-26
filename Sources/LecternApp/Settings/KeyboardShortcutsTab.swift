@@ -15,10 +15,8 @@ struct KeyboardShortcutsTab: View {
                         section("Lecture workspace", [
                             ("Prepare / Coverage / Review", "⌘1  ⌘2  ⌘3"),
                             ("Generate cards", "⌘ G"),
-                            ("Toggle AI chat", "⌘ ⇧ A"),
-                            ("New chat", "⌘ N"),
-                            ("Cards (Prepare) / Source (Review)", "⌘ ⇧ S"),
-                            ("Toggle right pane", "⌘ ⌥ B")
+                            ("Toggle AI chat", "⌘ ⇧ A  /  ⌘ ⌥ B"),
+                            ("New chat", "⌘ N")
                         ])
                         section("Prepare", [
                             ("Previous / next slide", "←  →"),
@@ -36,7 +34,8 @@ struct KeyboardShortcutsTab: View {
                             ("Accept and mark Good", "⇧ ↩"),
                             ("Discard proposal", "X"),
                             ("Undo", "U"),
-                            ("Source slides", "S"),
+                            ("Show / cycle source slides", "S"),
+                            ("Toggle source slides", "⌘ ⇧ S"),
                             ("Browse / Test", "T"),
                             ("Show answer (Test)", "Space"),
                             ("Edit card front", "E")

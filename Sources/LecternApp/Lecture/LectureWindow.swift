@@ -143,12 +143,12 @@ struct LectureWorkspace: View {
         if modifiers == [.command, .shift], letter == "a" {
             // The chat sits behind the generation overlay; don't focus it there.
             guard !generationOverlayVisible, model.mode != .coverage else { return true }
-            toggleSidePanel(.chat)
+            toggleChat()
             return true
         }
-        if modifiers == [.command, .shift], letter == "s" {
-            guard model.mode != .coverage else { return true }
-            toggleSidePanel(.content)
+        if modifiers == [.command, .shift], letter == "s", model.mode == .review {
+            guard !generationOverlayVisible, !model.answerHidden, model.selectedCard != nil else { return true }
+            model.reviewSourcesVisible.toggle()
             return true
         }
         // Native focus is authoritative: SwiftUI's FocusState can lag while
@@ -159,10 +159,8 @@ struct LectureWorkspace: View {
         if model.titleDraft != nil && editing { return false }
         if model.panes.focusedDivider != nil && (event.keyCode == Key.left || event.keyCode == Key.right) { return false }
         if modifiers == [.command, .option], letter == "b" {
-            guard model.mode != .coverage else { return true }
-            model.askVisible.toggle()
-            if model.askVisible { model.panes.openChat(model.mode) }
-            if !model.askVisible, focus == .ask { focus = nil }
+            guard !generationOverlayVisible, model.mode != .coverage else { return true }
+            toggleChat()
             return true
         }
 
@@ -199,23 +197,19 @@ struct LectureWorkspace: View {
         if model.mode == .coverage { return false }
         if modifiers.isEmpty, letter == "a" {
             model.askVisible = true
-            model.panes.openChat(model.mode)
             focus = .ask
             return true
         }
         return model.mode == .prepare ? handlePrepareKey(event, modifiers: modifiers) : handleReviewKey(event, modifiers: modifiers, letter: letter)
     }
 
-    private func toggleSidePanel(_ tab: LectureSideTab) {
-        let closing = model.askVisible && model.panes.tab(for: model.mode) == tab
-        model.askVisible = !closing
-        if closing {
+    private func toggleChat() {
+        model.askVisible.toggle()
+        if model.askVisible {
+            focus = .ask
+        } else if focus == .ask {
             focus = nil
             NSApp.keyWindow?.makeFirstResponder(nil)
-        } else {
-            model.panes.setTab(tab, for: model.mode)
-            focus = tab == .chat ? .ask : nil
-            if tab == .content { NSApp.keyWindow?.makeFirstResponder(nil) }
         }
     }
 
@@ -265,21 +259,15 @@ struct LectureWorkspace: View {
         case "j": model.stepCard(-1); return true
         case "k": model.stepCard(1); return true
         case "s":
-            let wasShowingSlide = model.askVisible && model.panes.tab(for: .review) == .content
-            model.askVisible = true
-            model.panes.setTab(.content, for: .review)
-            guard wasShowingSlide else { return true }
-            guard let count = model.selectedCard?.sourcePages.count, count > 0 else { return false }
-            model.sourceIndex = (model.sourceIndex + 1) % count
+            guard let card = model.selectedCard else { return false }
+            if model.reviewSourcesVisible, !card.sourcePages.isEmpty {
+                model.sourceIndex = (model.sourceIndex + 1) % card.sourcePages.count
+            }
+            model.reviewSourcesVisible = true
             return true
         case "g":
             guard let card = model.selectedCard, !card.sourcePages.isEmpty else { return false }
             model.jumpToPrepare(page: card.sourcePages[min(model.sourceIndex, card.sourcePages.count - 1)])
-            return true
-        case "a":
-            model.askVisible = true
-            model.panes.openChat(model.mode)
-            focus = .ask
             return true
         case "e":
             focus = .front
@@ -332,15 +320,11 @@ struct LectureTopBar: View {
                         await app.returnToLibrary(destination: app.studySession == nil ? .module(model.ref.moduleID) : nil)
                     }
                 } label: {
-                    Label(app.studySession == nil ? model.moduleName : "Back to study", systemImage: "arrow.left")
-                        .lineLimit(1)
+                    Image(systemName: "arrow.backward").frame(width: 14, height: 16)
                 }
-                .buttonStyle(LinkButtonStyle(color: Theme.quiet))
+                .buttonStyle(SecondaryButtonStyle())
+                .accessibilityLabel(app.studySession == nil ? "Back" : "Back to study")
                 .disabled(app.leavingLecture)
-                if let slot = app.progress(model.ref.moduleID)?.slots.first(where: { $0.lectureID == model.ref.lectureID }) {
-                    Text(String(format: "%02d", slot.id.index))
-                        .font(Theme.small).foregroundStyle(Theme.faint).monospacedDigit()
-                }
                 presentationTitle
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -384,8 +368,8 @@ struct LectureTopBar: View {
                 Image(systemName: "sidebar.right").frame(width: 14, height: 16)
             }
             .buttonStyle(SecondaryButtonStyle())
-            .accessibilityLabel(model.askVisible ? "Hide right pane" : "Show right pane")
-            .help("Toggle right pane · ⌘⌥B")
+            .accessibilityLabel(model.askVisible ? "Hide AI chat" : "Show AI chat")
+            .help("Toggle AI chat · ⌘⇧A")
         }
     }
 
@@ -410,8 +394,9 @@ struct LectureTopBar: View {
                 if old == .title, current != .title, model.titleDraft != nil { saveTitle() }
             }
         } else {
+            let slotNumber = app.progress(model.ref.moduleID)?.slots.first { $0.lectureID == model.ref.lectureID }?.id.index
             Button { beginRename() } label: {
-                Text(model.lecture.name).font(Theme.heading(20)).lineLimit(1)
+                Text(Format.lectureName(model.lecture.name, slotNumber: slotNumber)).font(Theme.heading(20)).lineLimit(1)
             }
             .buttonStyle(.plain)
             .help("Click to rename presentation")

@@ -110,6 +110,7 @@ public enum LectureAction: Equatable, Sendable {
     /// The student doesn't want a card for this point; it no longer feeds Generate either.
     case skipLearningPoint(pointID: UUID)
     case resolveCardSuggestion(chatID: UUID, messageID: UUID, apply: Bool)
+    case resolveChatDeletions(chatID: UUID, messageID: UUID, cardIDs: Set<UUID>, delete: Bool)
 }
 public enum LectureReducer {
     /// Reduces a copy first: failed validation never leaves partial mutations behind.
@@ -192,18 +193,7 @@ public enum LectureReducer {
             let pages = lecture.jobs[j].pages
             if lecture.jobs[j].replacesExistingCards == true {
                 let removedCardIDs = Set(lecture.cards.map(\.id))
-                func invalidateSuggestions(in chat: inout LectureChat) {
-                    for messageIndex in chat.messages.indices {
-                        guard var suggestion = chat.messages[messageIndex].suggestion,
-                              suggestion.state == .pending,
-                              let target = suggestion.cardID,
-                              removedCardIDs.contains(target) else { continue }
-                        suggestion.state = .dismissed
-                        chat.messages[messageIndex].suggestion = suggestion
-                    }
-                }
-                invalidateSuggestions(in: &lecture.currentChat)
-                for chatIndex in lecture.archivedChats.indices { invalidateSuggestions(in: &lecture.archivedChats[chatIndex]) }
+                invalidateSuggestions(targeting: removedCardIDs, in: &lecture)
                 lecture.cards.removeAll()
                 lecture.skippedSlides.removeAll()
                 lecture.viewPreferences.selectedCardID = nil
@@ -358,6 +348,31 @@ public enum LectureReducer {
             if lecture.currentChat.id == chatID { var chat = lecture.currentChat; try resolve(&chat); lecture.currentChat = chat }
             else if let c = lecture.archivedChats.firstIndex(where: { $0.id == chatID }) { var chat = lecture.archivedChats[c]; try resolve(&chat); lecture.archivedChats[c] = chat }
             else { throw LectureError.invalidMetadata("This chat no longer exists.") }
+        case .resolveChatDeletions(let chatID, let messageID, let cardIDs, let delete):
+            guard lecture.currentChat.id == chatID,
+                  let m = lecture.currentChat.messages.firstIndex(where: { $0.id == messageID && $0.role == .assistant }),
+                  var requests = lecture.currentChat.messages[m].deletionRequests else {
+                throw LectureError.invalidMetadata("This deletion request is no longer available.")
+            }
+            let selected = requests.indices.filter { cardIDs.contains(requests[$0].id) }
+            guard !cardIDs.isEmpty, selected.count == cardIDs.count,
+                  selected.allSatisfy({ requests[$0].state == .pending }) else {
+                throw LectureError.invalidMetadata("The deletion request has changed. Review the remaining cards.")
+            }
+            if delete {
+                let cardIndices = try selected.map { requestIndex in
+                    let request = requests[requestIndex]
+                    guard let i = lecture.cards.firstIndex(where: { $0.id == request.id }),
+                          request.version.matches(lecture.cards[i]) else {
+                        throw LectureError.invalidMetadata("A requested flashcard has changed or is gone. Keep it or ask again.")
+                    }
+                    return i
+                }
+                deleteCards(at: cardIndices, ids: cardIDs, in: &lecture)
+            }
+            for i in selected { requests[i].state = delete ? .deleted : .kept }
+            lecture.currentChat.messages[m].deletionRequests = requests
+            lecture.currentChat.updatedAt = now
         case .markExported(let ids):
             for id in ids {
                 let i = try index(id, in: lecture)
@@ -365,6 +380,34 @@ public enum LectureReducer {
                 lecture.cards[i].exported = ExportMark(revisionID: revision, date: now)
             }
         }
+    }
+
+    private static func deleteCards(at indices: [Int], ids: Set<UUID>, in lecture: inout Lecture) {
+        for i in indices {
+            // Keep the existing card history while removing it from the active deck.
+            lecture.cards[i].supersededBy = []
+            lecture.cards[i].proposal = nil
+        }
+        if let selected = lecture.viewPreferences.selectedCardID, ids.contains(selected) {
+            lecture.viewPreferences.selectedCardID = nil
+        }
+        for i in lecture.learningPoints.indices {
+            lecture.learningPoints[i].cardIDs?.removeAll(where: ids.contains)
+        }
+        invalidateSuggestions(targeting: ids, in: &lecture)
+    }
+
+    private static func invalidateSuggestions(targeting ids: Set<UUID>, in lecture: inout Lecture) {
+        func invalidate(in chat: inout LectureChat) {
+            for i in chat.messages.indices {
+                guard var suggestion = chat.messages[i].suggestion, suggestion.state == .pending,
+                      let target = suggestion.cardID, ids.contains(target) else { continue }
+                suggestion.state = .dismissed
+                chat.messages[i].suggestion = suggestion
+            }
+        }
+        invalidate(in: &lecture.currentChat)
+        for i in lecture.archivedChats.indices { invalidate(in: &lecture.archivedChats[i]) }
     }
 }
 
@@ -399,7 +442,7 @@ public struct LectureController: Sendable {
         try LectureReducer.reduce(&lecture, action: action, now: now)
         switch action {
         case .startJob, .updateJob, .landGeneration, .landProposal, .applyChatEdits, .undoChatEdits, .upsertThread, .markExported, .markExportEntries,
-             .acceptLearningPointDraft, .skipLearningPoint, .resolveCardSuggestion: return
+             .acceptLearningPointDraft, .skipLearningPoint, .resolveCardSuggestion, .resolveChatDeletions: return
         default: break
         }
         if before != lecture { undoStack.append(UndoEntry(before: before, after: lecture)); if undoStack.count > 50 { undoStack.removeFirst() } }

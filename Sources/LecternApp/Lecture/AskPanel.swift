@@ -40,7 +40,9 @@ struct AskPanel: View {
                     }
                     .onChange(of: model.chatMessages.count) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
                     .onChange(of: model.runningChat.flatMap { model.progress($0.id)?.streamedText.count }) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
-                    .onChange(of: model.chatScrollTarget) { _, target in if let target { withAnimation { proxy.scrollTo(target, anchor: .top) } } }
+                    .onChange(of: model.chatScrollTarget, initial: true) { _, target in
+                        if let target { withAnimation { proxy.scrollTo(target, anchor: .top) } }
+                    }
                     .onChange(of: model.displayedChat.id) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
                 }
                 composer(maximumHeight: max(100, geometry.size.height * 0.45))
@@ -101,7 +103,7 @@ struct AskPanel: View {
                     if let read = progress?.read, !read.isEmpty {
                         Label("Read " + model.chatContextLabel(read), systemImage: "sparkle").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
                     }
-                    ChatCitedMarkdownView(model: model, text: text, streaming: true)
+                    ChatCitedMarkdownView(model: model, text: text, jobID: job.id, streaming: true)
                 } else {
                     let hint = model.chatWorkingHint(progress)
                     ChatWorkingIndicator(doing: hint.doing, done: hint.done)
@@ -196,7 +198,6 @@ struct AskPanel: View {
                     .buttonStyle(.plain).help("Attach images · paste or drop anywhere in this pane")
                     .accessibilityLabel("Attach images").disabled(model.readOnly || model.isImportingChatImages || model.isStartingChat)
                 if model.isImportingChatImages { ProgressView().controlSize(.mini).accessibilityLabel("Preparing images") }
-                Text("↩ send · ⇧↩ new line").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
                 Spacer()
                 if let job = model.runningChat {
                     Button { Task { await model.cancel(job.id) } } label: { Label("Stop", systemImage: "stop.fill") }

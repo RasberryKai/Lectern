@@ -22,11 +22,14 @@ struct ChatMessageView: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     if !message.read.isEmpty { Label("Read " + model.chatContextLabel(message.read), systemImage: "sparkle").font(.system(size: 10.5)).foregroundStyle(Theme.faint) }
-                    ChatCitedMarkdownView(model: model, text: message.text)
+                    ChatCitedMarkdownView(model: model, text: message.text, jobID: message.editJobID)
                     if message.stopped { Text("Stopped").font(Theme.caption).foregroundStyle(Theme.faint) }
                     if message.searchedLecture { Text("Searched the lecture").font(Theme.caption).foregroundStyle(Theme.faint) }
                     if !message.quiz.isEmpty { quiz }
                     if let ids = message.createdCardIDs, !ids.isEmpty { createdCards(ids) }
+                    if let requests = message.deletionRequests, !requests.isEmpty {
+                        ChatDeletionBlock(model: model, chatID: model.displayedChat.id, messageID: message.id, requests: requests)
+                    }
                     if let id = message.editJobID, let job = model.lecture.jobs.first(where: { $0.id == id }), job.chatEdits?.isEmpty == false || job.chatEditUndo?.isEmpty == false { ChatEditBlock(model: model, job: job) }
                     if let suggestion = message.suggestion { CardSuggestionBlock(model: model, message: message, suggestion: suggestion) }
                     HStack(spacing: 14) {
@@ -41,7 +44,9 @@ struct ChatMessageView: View {
                             .opacity(hovering || message.clicked ? 1 : 0).accessibilityHidden(!hovering && !message.clicked)
                             .disabled(model.readOnly)
                         }
-                        if message.createdCardIDs?.isEmpty != false, isLectureChatAnswer {
+                        if message.createdCardIDs?.isEmpty != false,
+                           message.deletionRequests?.contains(where: { $0.state == .deleted }) != true,
+                           isLectureChatAnswer {
                             action("Retry", "arrow.clockwise") { Task { await model.retryChatAnswer(message) } }
                                 .opacity(hovering ? 1 : 0).accessibilityHidden(!hovering)
                                 .disabled(model.readOnly || model.runningChat != nil)
@@ -79,7 +84,7 @@ struct ChatMessageView: View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(message.quiz.enumerated()), id: \.offset) { index, item in
                 DisclosureGroup {
-                    ChatCitedMarkdownView(model: model, text: item.answer).padding(.top, 6)
+                    ChatCitedMarkdownView(model: model, text: item.answer, jobID: message.editJobID).padding(.top, 6)
                 } label: { Text("\(index + 1). \(item.question)").font(.system(size: 13, weight: .medium)) }
                     .padding(10).background(Theme.inset, in: RoundedRectangle(cornerRadius: 8))
             }
@@ -91,49 +96,13 @@ struct ChatMessageView: View {
 struct ChatCitedMarkdownView: View {
     let model: LectureWindowModel
     let text: String
+    let jobID: UUID?
     var streaming = false
-    @State private var previewCitation: ChatCitation?
 
     var body: some View {
-        ChatMarkdownView(text: text, streaming: streaming, onCitation: model.openChatCitation) { citation in
-            guard let citation else { previewCitation = nil; return }
-            if citation.kind == "S" {
-                previewCitation = citation.number <= model.lecture.pageCount ? citation : nil
-            } else {
-                previewCitation = card(number: citation.number) != nil ? citation : nil
-            }
+        ChatMarkdownView(text: text, streaming: streaming) { citation in
+            model.openChatCitation(citation, jobID: jobID)
         }
-        .popover(isPresented: Binding(get: { previewCitation != nil }, set: { if !$0 { previewCitation = nil } }), arrowEdge: .top) {
-            if let citation = previewCitation {
-                preview(citation).allowsHitTesting(false)
-            }
-        }
-        .onHover { if !$0 { previewCitation = nil } }
-        .onDisappear { previewCitation = nil }
-    }
-
-    @ViewBuilder private func preview(_ citation: ChatCitation) -> some View {
-        if citation.kind == "S" {
-            VStack(alignment: .leading, spacing: 8) {
-                SlideImage(sourceURL: model.app.store.sourceURL(moduleID: model.ref.moduleID, lectureID: model.ref.lectureID), pageIndex: citation.number - 1, width: 300)
-                Text("Slide \(citation.number)").font(Theme.caption).foregroundStyle(Theme.quiet)
-            }.padding(10).frame(width: 320)
-        } else if let card = card(number: citation.number) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Card \(citation.number)").font(Theme.caption).foregroundStyle(Theme.quiet)
-                    Text("Front").font(Theme.caption).foregroundStyle(Theme.quiet)
-                    ChatMarkdownView(text: card.front)
-                    Divider()
-                    Text("Back").font(Theme.caption).foregroundStyle(Theme.quiet)
-                    ChatMarkdownView(text: card.back)
-                }.padding(12)
-            }.frame(width: 340, height: 360)
-        }
-    }
-
-    private func card(number: Int) -> Card? {
-        model.activeCards.first { model.cardNumbers[$0.id] == number }
     }
 }
 
@@ -170,6 +139,80 @@ struct ChatEditBlock: View {
             }
         }.padding(11).background(Theme.aiWash.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.ai.opacity(0.2)))
+    }
+}
+
+struct ChatDeletionBlock: View {
+    let model: LectureWindowModel
+    let chatID: UUID
+    let messageID: UUID
+    let requests: [ChatDeletionRequest]
+    @State private var resolving = false
+
+    var body: some View {
+        let pending = requests.filter { $0.state == .pending }
+        let cards = Dictionary(uniqueKeysWithValues: model.activeCards.map { ($0.id, $0) })
+        let stale = Set(pending.filter { request in cards[request.id].map(request.version.matches) != true }.map(\.id))
+        VStack(alignment: .leading, spacing: 10) {
+            Label(pending.isEmpty ? "Flashcard deletion reviewed" : "Delete \(Format.count(pending.count, "flashcard"))?",
+                  systemImage: "trash")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.bad)
+            ForEach(requests) { request in
+                Divider()
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(request.front)
+                        .font(.system(size: 12, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if request.state == .pending {
+                        DisclosureGroup("Show answer") {
+                            Text(request.back).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.quiet)
+                        if stale.contains(request.id) {
+                            Text("Card changed or is gone").font(Theme.caption).foregroundStyle(Theme.amber)
+                        }
+                        HStack(spacing: 10) {
+                            Button("Delete", role: .destructive) { resolve([request.id], delete: true) }
+                                .buttonStyle(SecondaryButtonStyle(foreground: Theme.bad))
+                                .accessibilityLabel("Delete \(request.front)")
+                                .disabled(stale.contains(request.id))
+                            Button("Keep") { resolve([request.id], delete: false) }
+                                .buttonStyle(SecondaryButtonStyle())
+                                .accessibilityLabel("Keep \(request.front)")
+                        }
+                        .disabled(resolving || model.readOnly)
+                    } else {
+                        Text(request.state == .deleted ? "Deleted" : "Kept")
+                            .font(Theme.caption).foregroundStyle(Theme.quiet)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if pending.count > 1 {
+                HStack(spacing: 10) {
+                    Button("Delete all", role: .destructive) { resolve(Set(pending.map(\.id)), delete: true) }
+                        .buttonStyle(SecondaryButtonStyle(foreground: Theme.bad))
+                        .disabled(!stale.isEmpty)
+                    Button("Keep all") { resolve(Set(pending.map(\.id)), delete: false) }
+                        .buttonStyle(SecondaryButtonStyle())
+                }
+                .disabled(resolving || model.readOnly)
+            }
+        }
+        .padding(11)
+        .background(Theme.aiWash.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.ai.opacity(0.2)))
+    }
+
+    private func resolve(_ ids: Set<UUID>, delete: Bool) {
+        guard !resolving else { return }
+        resolving = true
+        Task {
+            defer { resolving = false }
+            await model.resolveChatDeletions(chatID: chatID, messageID: messageID, cardIDs: ids, delete: delete)
+        }
     }
 }
 
