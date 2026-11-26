@@ -54,6 +54,8 @@ export const stonePositions = (count: number) => {
 export type MountainProps = {
   routes?: {progress: number; label: string; labelOpacity: number}[];
   routesOpacity?: number;
+  routesLift?: number; // svg units the routes drift up while they dissolve
+  routesBlur?: number; // blur while they dissolve
   fogOpacity?: number;
   fogDrift?: number; // 0..1 over the scene
   trail?: number; // 0..1 drawn
@@ -66,6 +68,8 @@ export type MountainProps = {
 export const Mountain: React.FC<MountainProps> = ({
   routes,
   routesOpacity = 1,
+  routesLift = 0,
+  routesBlur = 0,
   fogOpacity = 0,
   fogDrift = 0,
   trail = 0,
@@ -85,6 +89,9 @@ export const Mountain: React.FC<MountainProps> = ({
       <defs>
         <filter id="blur9" x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="9" />
+        </filter>
+        <filter id="routeBlur" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation={routesBlur} />
         </filter>
         <filter id="blur22" x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="22" />
@@ -138,7 +145,11 @@ export const Mountain: React.FC<MountainProps> = ({
 
         {/* guessed routes: they crawl up and fade out into the mist */}
         {routes && (
-          <g opacity={0.8 * routesOpacity} transform={`translate(0 ${ROUTE_SHIFT})`}>
+          <g
+            opacity={0.8 * routesOpacity}
+            transform={`translate(0 ${ROUTE_SHIFT - routesLift})`}
+            filter={routesBlur > 0 ? 'url(#routeBlur)' : undefined}
+          >
             {routes.map((r, i) => (
               <path
                 key={i}
@@ -213,7 +224,11 @@ export const Mountain: React.FC<MountainProps> = ({
       </g>
 
       {routes && (
-        <g opacity={routesOpacity} transform={`translate(0 ${ROUTE_SHIFT})`}>
+        <g
+          opacity={routesOpacity}
+          transform={`translate(0 ${ROUTE_SHIFT - routesLift})`}
+          filter={routesBlur > 0 ? 'url(#routeBlur)' : undefined}
+        >
           {routes.map((r, i) => (
             <text
               key={i}

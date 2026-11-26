@@ -131,8 +131,13 @@ export const Ignition: React.FC = () => {
   const sp = toScreen(p.x, p.y);
   const stoneFill = interpolate(zoomK, [0.15, 0.55], [0, 1], clamp);
 
-  const lockupIn = beat >= s.dropAt; // hard cut on the drop
+  const lockupK = interpolate(beat, [s.dropAt, s.dropAt + 0.4], [0, 1], {...clamp, easing: easeOut});
   const lockupOut = interpolate(beat, [s.diveAt, s.diveAt + 1], [1, 0], clamp);
+
+  // The fog scene's routes and headline dissolve upward into the mist.
+  const fog = scene('fog');
+  const d = interpolate(beat, s.dissolve, [0, 1], {...clamp, easing: easeInOut});
+  const routes = fog.copy.routes.map((label) => ({label, progress: 1, labelOpacity: 1}));
 
   return (
     <Void>
@@ -144,6 +149,10 @@ export const Ignition: React.FC = () => {
           }}
         >
           <Mountain
+            routes={d < 1 ? routes : undefined}
+            routesOpacity={1 - d}
+            routesLift={d * 24}
+            routesBlur={d * 6}
             fogOpacity={interpolate(beat, [0, 3], [1, 0], clamp)}
             fogDrift={1 + beat / 8}
             trail={trail}
@@ -154,8 +163,20 @@ export const Ignition: React.FC = () => {
           />
         </AbsoluteFill>
       </AbsoluteFill>
-      {lockupIn && (
-        <div style={{opacity: lockupOut}}>
+      {d < 1 && (
+        <Headline
+          lines={fog.copy.headline}
+          style={{opacity: 1 - d, filter: `blur(${d * 14}px)`, transform: `translateY(${-d * 18}px)`}}
+        />
+      )}
+      {lockupK > 0 && (
+        <div
+          style={{
+            opacity: lockupOut * lockupK,
+            filter: `blur(${(1 - lockupK) * 12}px)`,
+            transform: `translateY(${(1 - lockupK) * 18}px)`,
+          }}
+        >
           <div style={{position: 'absolute', left: 104, top: 96, display: 'flex', alignItems: 'center', gap: 22}}>
             <Mark size={92} glow />
             <span style={{fontFamily: fonts.logo, fontWeight: 600, fontSize: 86, letterSpacing: '-0.01em'}}>

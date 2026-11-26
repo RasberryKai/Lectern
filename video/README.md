@@ -10,7 +10,7 @@ holds scenes 1 to 6 (Countdown, Fog, Ignition, Slides, Ask, Generate):
 cd video
 npm install
 npm run studio    # live preview with a scrubber, hot-reloads on save
-npm run render    # writes out/lectern-launch-s1-6.mp4 (audio normalised to -14 LUFS)
+npm run render    # writes out/lectern-launch-s1-6.mp4
 ```
 
 ## Tweak it

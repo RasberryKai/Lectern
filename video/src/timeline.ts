@@ -55,20 +55,42 @@ export type Cue = {
 };
 
 // ── Music ───────────────────────────────────────────────────────────────────
-// ElevenLabs music v2.5, take 2 (30 s), time-stretched from 99.4 to exactly
-// 100 BPM. Its own drop sits 9.49 s into the file; the track is placed so that
-// drop lands on the storyboard's drop (film beat 20 = 0:12.0). That makes the
-// music enter at about 0:02.5, under the countdown.
+// Two ElevenLabs takes, joined on the drop (film beat 20 = 0:12.0), hidden
+// under the hit + stone clicks:
+//  intro: piano build (take 2, stretched 99.4 -> 100 BPM). Its own drop sits
+//         9.49 s into the file; it is placed so that point lands on the drop,
+//         and it is cut there, so only the piano part is heard.
+//  main:  high-energy track (take 3, 100 BPM, kick on every beat from 0.0 s),
+//         starts on the drop.
 export const MUSIC = {
-  file: 'audio/music-s1-6.mp3',
-  dropInFileSeconds: 9.49,
-  dropAtBeat: 20, // film beat where the drop must land
-  // Volume over the film: [film beat, volume] points.
-  volumeCurve: [
-    [0, 0.85],
-    [20, 1],
-  ] as [number, number][],
+  dropAtBeat: 20,
+  intro: {
+    file: 'audio/music-intro.mp3',
+    dropInFileSeconds: 9.49,
+    volume: 1,
+    outFrames: 2, // fade-out length at the drop (frames)
+  },
+  main: {
+    file: 'audio/music-main.mp3',
+    firstBeatInFileSeconds: 0.0,
+    volume: 0.72,
+  },
   fadeOutBeats: 1, // fade at the very end of this cut
+};
+
+// ── Transitions ─────────────────────────────────────────────────────────────
+// Each scene says how it comes in (`enter`):
+//   'cut'    no transition (used where the picture is continuous)
+//   'zoom'   depth transition: the old scene flies past the camera and blurs
+//            out while the new one settles in from behind, starting on the beat
+//   'emerge' the new scene settles in out of black (after the stone dive)
+export type Enter = 'cut' | 'zoom' | 'emerge';
+export const TRANSITION = {
+  beats: 0.75, // length of a zoom / emerge
+  scaleOut: 1.18, // how far the old scene flies towards the camera
+  scaleIn: 0.9, // where the new scene starts
+  blur: 18, // px of blur at the extremes
+  whooshVolume: 0.35, // whoosh on every zoom (0 = none)
 };
 
 // ── Scenes ──────────────────────────────────────────────────────────────────
@@ -76,6 +98,7 @@ export const SCENES = [
   {
     id: 'countdown',
     bars: 2,
+    enter: 'cut' as Enter,
     copy: {
       lines: ['12 lectures.', 'One exam.', '23 days.'],
     },
@@ -91,6 +114,7 @@ export const SCENES = [
   {
     id: 'fog',
     bars: 2,
+    enter: 'zoom' as Enter,
     copy: {
       headline: ["More material", "isn't a route."],
       routes: ['Summaries', 'Mind maps', '600 generated cards'],
@@ -106,6 +130,7 @@ export const SCENES = [
   {
     id: 'ignition',
     bars: 2,
+    enter: 'cut' as Enter,
     copy: {
       wordmark: 'Lectern',
       tagline: ['Your lectures,', 'turned into one route.'],
@@ -115,11 +140,12 @@ export const SCENES = [
     dropAt: 4, // beat of the drop (0:12.0): stones + lockup
     stonesOverBeats: 2, // twelve stones slam on over two beats
     stones: 12,
+    dissolve: [0, 1.5], // beats: fog routes, labels and headline evaporate
     diveAt: 6, // beat the camera starts flying up the trail into stone 3
     diveStone: 2, // 0-based: the third stone
     cues: [
       { sound: 'riser', at: 0, volume: 0.7 },
-      { sound: 'hit', at: 4, volume: 1 },
+      { sound: 'hit', at: 4, volume: 0.55 },
       // stone clicks: one every sixth of a beat, generated below
     ] as Cue[],
     stoneClickVolume: 0.35,
@@ -127,6 +153,7 @@ export const SCENES = [
   {
     id: 'slides',
     bars: 2,
+    enter: 'emerge' as Enter,
     copy: {
       headline: ['You read.', 'You decide what matters.'], // second line is dimmed
       noteLabel: 'Note on slide 12',
@@ -148,6 +175,7 @@ export const SCENES = [
   {
     id: 'ask',
     bars: 2,
+    enter: 'zoom' as Enter,
     copy: {
       headline: ['Answers that show', 'what they read.'],
       receipt: 'Read slides 12–14',
@@ -165,6 +193,7 @@ export const SCENES = [
   {
     id: 'generate',
     bars: 2,
+    enter: 'zoom' as Enter,
     copy: {
       headline: ['Flashcards from every slide.', "Some you don't flip. You solve."],
       slides: [11, 12, 14, 13],
