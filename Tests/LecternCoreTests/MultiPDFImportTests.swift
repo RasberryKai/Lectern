@@ -263,4 +263,118 @@ struct MultiPDFImportTests {
         #expect(restored.pdfParts == [second, first])
         #expect(widths(restoredStore.sourceURL(moduleID: module.id, lectureID: legacy.id)) == [102, 103, 100, 101])
     }
+
+    @Test func removingPDFConfirmsCurrentContentAndRemapsSurvivingSlides() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let first = try writePDF("First.pdf", pages: 2, width: 100, in: root)
+        let second = try writePDF("Second.pdf", pages: 2, width: 200, in: root)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let lecture = try await store.importPDFs([first, second], name: "Lecture", moduleID: module.id)
+        let source = store.sourceURL(moduleID: module.id, lectureID: lecture.id)
+        let parts = lecture.editablePDFParts
+        let deletedCard = Card(sourcePages: [1], front: "Remove", back: "First PDF")
+        let sharedCard = Card(sourcePages: [2, 4], front: "Keep", back: "Both PDFs", verdict: .good, allowedSourcePages: [1, 2, 4])
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.slides[0].note = "Remove this note"
+            $0.slides[3].note = "Keep this note"
+            $0.cards = [deletedCard, sharedCard]
+            $0.viewPreferences.selectedCardID = deletedCard.id
+            $0.viewPreferences.focusedPageIndex = 3
+            $0.jobs = [Job(kind: .generate, pages: [1, 2], state: .succeeded)]
+            $0.skippedSlides = [SkippedSlide(slide: 1, reason: "Title"), SkippedSlide(slide: 4, reason: "Summary")]
+            var message = ChatMessage(role: .assistant, text: "See [S1, S4] and [S2].", citedPages: [1, 4])
+            message.context = [.slide(1), .slide(4), .card(deletedCard.id)]
+            $0.currentChat.messages = [message]
+        }
+
+        let edits: [LecturePDFEdit] = [.existing(parts[1], pages: 2..<4)]
+        func remove(confirming confirmation: LecturePDFRemovalImpact? = nil) async throws -> Lecture {
+            try await store.editPDFs(edits, removing: [0..<2], confirming: confirmation,
+                                     basedOn: parts, moduleID: module.id, lectureID: lecture.id)
+        }
+        let confirmation: LecturePDFRemovalImpact
+        do {
+            _ = try await remove()
+            Issue.record("Expected a confirmation before the PDF changed")
+            return
+        } catch let impact as LecturePDFRemovalImpact {
+            confirmation = impact
+            #expect(impact.noteCount == 1)
+            #expect(impact.deletedCardCount == 1)
+            #expect(impact.sharedCardCount == 1)
+        }
+        #expect(widths(source) == [100, 101, 200, 201])
+        #expect(try await store.loadLecture(moduleID: module.id, lectureID: lecture.id).cards.map(\.id) == [deletedCard.id, sharedCard.id])
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.slides[0].note = "A changed note with the same count"
+        }
+        let updatedConfirmation: LecturePDFRemovalImpact
+        do {
+            _ = try await remove(confirming: confirmation)
+            Issue.record("Expected the changed note to require confirmation again")
+            return
+        } catch let impact as LecturePDFRemovalImpact {
+            updatedConfirmation = impact
+        }
+
+        let edited = try await remove(confirming: updatedConfirmation)
+        #expect(widths(source) == [200, 201])
+        #expect(edited.editablePDFParts == [parts[1]])
+        #expect(edited.sourceFilename == "Second.pdf")
+        #expect(edited.slides.map(\.note) == ["", "Keep this note"])
+        #expect(edited.cards.map(\.id) == [sharedCard.id])
+        #expect(edited.cards.first?.sourcePages == [2])
+        #expect(edited.cards.first?.allowedSourcePages == [2])
+        #expect(edited.viewPreferences.focusedPageIndex == 1)
+        #expect(edited.viewPreferences.selectedCardID == nil)
+        #expect(edited.jobs.count == 1 && edited.jobs.first?.pages.isEmpty == true)
+        #expect(edited.skippedSlides.map(\.slide) == [2])
+        #expect(edited.currentChat.messages.first?.text == "See [S2] and (slide removed).")
+        #expect(edited.currentChat.messages.first?.context == [.slide(2)])
+        #expect(try await store.loadLecture(moduleID: module.id, lectureID: lecture.id).cards == edited.cards)
+    }
+
+    @Test func removingLastPDFWithoutAttachedContentKeepsLectureAndAllowsAddingAnotherPDF() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let first = try writePDF("First.pdf", pages: 1, width: 100, in: root)
+        let second = try writePDF("Second.pdf", pages: 1, width: 200, in: root)
+        let store = LibraryStore(rootURL: root.appendingPathComponent("library"))
+        let module = try await store.createModule(name: "Statistics")
+        let lecture = try await store.importPDF(from: first, moduleID: module.id)
+        let source = store.sourceURL(moduleID: module.id, lectureID: lecture.id)
+        let parts = lecture.editablePDFParts
+        let unsourcedCard = Card(front: "Keep", back: "No source")
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.cards = [unsourcedCard]
+            $0.viewPreferences.focusedPageIndex = 0
+            $0.jobs = [Job(kind: .generate, pages: [1])]
+        }
+        await #expect(throws: LibraryError.self) {
+            try await store.editPDFs([], removing: [0..<1], basedOn: parts, moduleID: module.id, lectureID: lecture.id)
+        }
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { $0.jobs[0].state = .cancelled }
+        await #expect(throws: LibraryError.self) {
+            try await store.editPDFs([], basedOn: parts, moduleID: module.id, lectureID: lecture.id)
+        }
+
+        let empty = try await store.editPDFs([], removing: [0..<1], basedOn: parts, moduleID: module.id, lectureID: lecture.id)
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(empty.pageCount == 0 && empty.editablePDFParts.isEmpty)
+        #expect(empty.viewPreferences.focusedPageIndex == nil && empty.viewPreferences.mode == .review)
+        #expect(empty.cards.map(\.id) == [unsourcedCard.id])
+
+        // Replay the removal marker after the PDF was already unlinked.
+        let pending = source.deletingLastPathComponent().appendingPathComponent(".pending-pdf-edit")
+        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: false)
+        try Data().write(to: pending.appendingPathComponent("remove-source"))
+        #expect(try await store.loadLecture(moduleID: module.id, lectureID: lecture.id).pageCount == 0)
+        #expect(!FileManager.default.fileExists(atPath: pending.path))
+
+        let restored = try await store.editPDFs([.add(second)], basedOn: [], moduleID: module.id, lectureID: lecture.id)
+        #expect(restored.id == lecture.id)
+        #expect(restored.cards.map(\.id) == [unsourcedCard.id])
+        #expect(restored.editablePDFParts.map(\.filename) == ["Second.pdf"])
+        #expect(widths(source) == [200])
+    }
 }

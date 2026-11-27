@@ -94,6 +94,7 @@ struct LectureWorkspace: View {
                     .animation(.easeInOut(duration: reduceMotion ? 0.15 : 0.4), value: model.runningGenerate?.id)
                 }
             }
+            .id(model.lecture.pdfParts?.map(\.id))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             JobBar(model: model)
         }
@@ -134,6 +135,12 @@ struct LectureWorkspace: View {
         guard !app.showSettings else { return false }
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
+        if event.keyCode == Key.escape, modifiers.isEmpty, SolveOrderingDragCancellation.cancel(in: event.window) {
+            return true
+        }
+        let askActivityVisible = model.isAskVisible && !generationOverlayVisible
+        if askActivityVisible, !editing || ChatComposerTextView.owns(NSApp.keyWindow?.firstResponder),
+           model.handleWaitTowerKey(event) { return true }
         if modifiers == .command, letter == "n" {
             // Coverage has no chat pane to show the new chat in.
             guard !generationOverlayVisible, model.mode != .coverage else { return true }
@@ -147,8 +154,12 @@ struct LectureWorkspace: View {
             return true
         }
         if modifiers == [.command, .shift], letter == "s", model.mode == .review {
-            guard !generationOverlayVisible, !model.answerHidden, model.selectedCard != nil else { return true }
-            model.reviewSourcesVisible.toggle()
+            guard !generationOverlayVisible else { return true }
+            if model.rightPaneVisible && model.reviewShowsSources {
+                model.rightPaneVisible = false
+            } else {
+                showReviewSources()
+            }
             return true
         }
         // Native focus is authoritative: SwiftUI's FocusState can lag while
@@ -156,11 +167,14 @@ struct LectureWorkspace: View {
         if ChatComposerTextView.owns(NSApp.keyWindow?.firstResponder), Key.isReturn(event) || event.keyCode == Key.escape {
             return false
         }
+        if !editing, askActivityVisible,
+           model.handleAskFlashcardKey(event) { return true }
         if model.titleDraft != nil && editing { return false }
         if model.panes.focusedDivider != nil && (event.keyCode == Key.left || event.keyCode == Key.right) { return false }
         if modifiers == [.command, .option], letter == "b" {
             guard !generationOverlayVisible, model.mode != .coverage else { return true }
-            toggleChat()
+            model.rightPaneVisible.toggle()
+            if !model.rightPaneVisible { clearAskFocus() }
             return true
         }
 
@@ -196,7 +210,7 @@ struct LectureWorkspace: View {
         // Coverage is view-only: no card or slide shortcuts, and arrows scroll the map.
         if model.mode == .coverage { return false }
         if modifiers.isEmpty, letter == "a" {
-            model.askVisible = true
+            model.showAsk()
             focus = .ask
             return true
         }
@@ -204,10 +218,23 @@ struct LectureWorkspace: View {
     }
 
     private func toggleChat() {
-        model.askVisible.toggle()
-        if model.askVisible {
+        if model.isAskVisible {
+            model.rightPaneVisible = false
+            clearAskFocus()
+        } else {
+            model.showAsk()
             focus = .ask
-        } else if focus == .ask {
+        }
+    }
+
+    private func showReviewSources() {
+        clearAskFocus()
+        model.reviewShowsSources = true
+        model.rightPaneVisible = true
+    }
+
+    private func clearAskFocus() {
+        if focus == .ask || ChatComposerTextView.owns(NSApp.keyWindow?.firstResponder) {
             focus = nil
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
@@ -233,6 +260,8 @@ struct LectureWorkspace: View {
     private func handleReviewKey(_ event: NSEvent, modifiers: NSEvent.ModifierFlags, letter: String) -> Bool {
         if Key.isReturn(event) {
             guard !model.answerHidden, model.selectedCard?.proposal?.state == .ready else { return false }
+            let hasSolveDraft = model.selectedCard?.proposal?.cards.contains { $0.solve != nil } == true
+            guard modifiers != .shift || !hasSolveDraft else { return false }
             Task { await model.acceptProposal(approve: modifiers == .shift) }
             return true
         }
@@ -242,6 +271,7 @@ struct LectureWorkspace: View {
         case Key.right, Key.down: model.stepCard(1); return true
         case Key.space:
             if model.answerHidden { model.revealAnswer(); return true }
+            guard model.selectedCard?.solve == nil else { return false }
             guard let card = model.selectedCard, !card.sourcePages.isEmpty else { return false }
             let pages = card.sourcePages
             model.enlargedPage = pages[min(model.sourceIndex, pages.count - 1)]
@@ -249,7 +279,9 @@ struct LectureWorkspace: View {
         default: break
         }
         // In Test, a verdict only counts after the answer was shown.
-        if model.answerHidden, ["1", "2", "x", "s", "g"].contains(letter) { return true }
+        if model.answerHidden, ["1", "2", "x", "s", "g"].contains(letter) {
+            return model.selectedCard?.solve == nil || (letter != "1" && letter != "2")
+        }
         switch letter {
         case "t": model.setTestMode(!model.testMode); return true
         case "1": Task { await model.setVerdict(.good) }; return true
@@ -260,10 +292,10 @@ struct LectureWorkspace: View {
         case "k": model.stepCard(1); return true
         case "s":
             guard let card = model.selectedCard else { return false }
-            if model.reviewSourcesVisible, !card.sourcePages.isEmpty {
+            if model.rightPaneVisible && model.reviewShowsSources, !card.sourcePages.isEmpty {
                 model.sourceIndex = (model.sourceIndex + 1) % card.sourcePages.count
             }
-            model.reviewSourcesVisible = true
+            showReviewSources()
             return true
         case "g":
             guard let card = model.selectedCard, !card.sourcePages.isEmpty else { return false }
@@ -362,14 +394,14 @@ struct LectureTopBar: View {
             .accessibilityLabel(leftVisible ? "Hide \(leftName)" : "Show \(leftName)")
             .help(model.mode == .prepare ? "Toggle slides · ⌘B" : "Toggle card list")
             Button {
-                model.askVisible.toggle()
-                if !model.askVisible, focus.wrappedValue == .ask { focus.wrappedValue = nil }
+                model.rightPaneVisible.toggle()
+                if !model.rightPaneVisible, focus.wrappedValue == .ask { focus.wrappedValue = nil }
             } label: {
                 Image(systemName: "sidebar.right").frame(width: 14, height: 16)
             }
             .buttonStyle(SecondaryButtonStyle())
-            .accessibilityLabel(model.askVisible ? "Hide AI chat" : "Show AI chat")
-            .help("Toggle AI chat · ⌘⇧A")
+            .accessibilityLabel(model.rightPaneVisible ? "Hide right pane" : "Show right pane")
+            .help("Toggle right pane · ⌘⌥B")
         }
     }
 
@@ -470,9 +502,43 @@ struct LectureTopBar: View {
     @ViewBuilder private var reviewTrailing: some View {
         Text("\(model.reviewedCount) of \(model.activeCards.count) reviewed")
             .font(Theme.small).foregroundStyle(Theme.quiet).monospacedDigit()
-        Button("Export to Anki") {
-            Task { await app.returnToLibrary(destination: .export(model.ref.moduleID, lectureID: model.ref.lectureID)) }
+        let scopes = model.reviewScopes
+        if scopes.count > 1 {
+            let title = scopes.first(where: { $0.scope == model.reviewCardScope })?.title ?? "All cards"
+            Menu {
+                Picker("Card set", selection: Binding(get: { model.reviewCardScope }, set: { model.setReviewScope($0) })) {
+                    ForEach(scopes, id: \.scope) { option in
+                        Text(option.title).tag(option.scope)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "rectangle.on.rectangle")
+                        .foregroundStyle(Theme.quiet)
+                        .accessibilityHidden(true)
+                    Text(title).foregroundStyle(Theme.ink)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.quiet)
+                        .accessibilityHidden(true)
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong))
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .combine)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Card set")
+            .accessibilityValue(title)
+            .accessibilityIdentifier("reviewCardSet")
+            .help("Switch card sets")
         }
-        .buttonStyle(SecondaryButtonStyle())
     }
 }

@@ -29,6 +29,11 @@ enum Theme {
     static let bad = dynamic(light: 0xB3412E, dark: 0xE88E7D)
     static let badWash = dynamic(light: 0xF8E6E2, dark: 0x3C2520)
 
+    static let solveGreen = dynamic(light: 0x3E5C41, dark: 0x7FA884)
+    static let solveGreenInk = dynamic(light: 0x2D4430, dark: 0xA9CBAD)
+    static let solveRedInk = dynamic(light: 0x7E2A1B, dark: 0xF0AE9E)
+    static let onSolveGreen = dynamic(light: 0xFFFFFF, dark: 0x10170F)
+
     static let diffRemovedText = dynamic(light: 0xA9661A, dark: 0xF0B072)
     static let diffRemovedWash = dynamic(light: 0xFBE6D5, dark: 0x45301C)
     static let diffAddedText = dynamic(light: 0x244A70, dark: 0xA9CBEE)
@@ -193,6 +198,7 @@ struct SegmentedControl<Value: Hashable>: View {
     @Binding var selection: Value
     var activeFill: Color = Theme.accent
     var activeText: Color = Theme.onAccent
+    var fillsWidth = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -202,7 +208,8 @@ struct SegmentedControl<Value: Hashable>: View {
                     Text(option.label)
                         .font(.system(size: 13, weight: active ? .semibold : .regular))
                         .foregroundStyle(active ? activeText : Theme.ink)
-                        .padding(.horizontal, 13).padding(.vertical, 6)
+                        .padding(.horizontal, fillsWidth ? 0 : 13).padding(.vertical, 6)
+                        .frame(maxWidth: fillsWidth ? .infinity : nil)
                         .background(active ? activeFill : Color.clear)
                         .contentShape(Rectangle())
                 }
@@ -211,7 +218,7 @@ struct SegmentedControl<Value: Hashable>: View {
                 if index < options.count - 1 { Rectangle().fill(Theme.border).frame(width: 1) }
             }
         }
-        .fixedSize()
+        .fixedSize(horizontal: !fillsWidth, vertical: true)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong, lineWidth: 1))

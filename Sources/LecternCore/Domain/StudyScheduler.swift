@@ -95,7 +95,7 @@ public enum StudyScheduler {
 
     public static func review(
         _ previous: StudyMemoryState?, rating: StudyRating, at date: Date,
-        configuration: StudyConfiguration, cardID: UUID?
+        configuration: StudyConfiguration, cardID: UUID?, isSolve: Bool = false
     ) throws -> StudyMemoryState {
         let stability: Double
         let difficulty: Double
@@ -125,7 +125,7 @@ public enum StudyScheduler {
         case (.good, _):
             let isLearning = previous == nil || previous?.phase == .learning
             if isLearning, previous?.awaitingLearningRepeat != true,
-               case .repeatAfter(let minutes) = configuration.flipFirstCorrect {
+               case .repeatAfter(let minutes) = isSolve ? configuration.solveFirstCorrect : configuration.flipFirstCorrect {
                 phase = .learning
                 delay = TimeInterval(minutes) * 60
                 awaitingLearningRepeat = true
@@ -146,7 +146,7 @@ public enum StudyScheduler {
 
     /// Recompute the due date from the last committed review, preserving memory and its phase.
     public static func reschedule(
-        _ state: StudyMemoryState, configuration: StudyConfiguration, cardID: UUID
+        _ state: StudyMemoryState, configuration: StudyConfiguration, cardID: UUID, isSolve: Bool = false
     ) -> StudyMemoryState {
         let delay: TimeInterval
         switch state.phase {
@@ -156,7 +156,7 @@ public enum StudyScheduler {
             delay = TimeInterval(configuration.establishedRetryMinutes) * 60
         case .learning:
             if state.awaitingLearningRepeat == true {
-                switch configuration.flipFirstCorrect {
+                switch isSolve ? configuration.solveFirstCorrect : configuration.flipFirstCorrect {
                 case .repeatAfter(let minutes): delay = TimeInterval(minutes) * 60
                 case .startSpacedReviews:
                     delay = reviewDelay(state.stability, configuration: configuration, cardID: cardID, reps: state.reps)

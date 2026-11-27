@@ -35,7 +35,7 @@ struct ChatMessageView: View {
                     HStack(spacing: 14) {
                         action("Copy", "doc.on.doc") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string) }
                             .opacity(hovering ? 1 : 0).accessibilityHidden(!hovering)
-                        if isLectureChatAnswer {
+                        if lectureChatJob != nil {
                             Button { Task { await model.toggleClicked(message) } } label: {
                                 Label("Clicked", systemImage: message.clicked ? "checkmark.circle.fill" : "checkmark.circle").font(.system(size: 10.5, weight: message.clicked ? .semibold : .regular))
                             }
@@ -46,19 +46,24 @@ struct ChatMessageView: View {
                         }
                         if message.createdCardIDs?.isEmpty != false,
                            message.deletionRequests?.contains(where: { $0.state == .deleted }) != true,
-                           isLectureChatAnswer {
+                           canRetryAnswer {
                             action("Retry", "arrow.clockwise") { Task { await model.retryChatAnswer(message) } }
                                 .opacity(hovering ? 1 : 0).accessibilityHidden(!hovering)
-                                .disabled(model.readOnly || model.runningChat != nil)
+                                .disabled(model.readOnly || model.runningChat != nil || model.isShowingAskActivity)
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).onHover { hovering = $0 }
             }
         }
     }
-    private var isLectureChatAnswer: Bool {
-        guard let id = message.editJobID else { return false }
-        return model.lecture.jobs.contains { $0.id == id && $0.kind == .chat && $0.isLectureChat == true }
+    private var lectureChatJob: Job? {
+        guard let id = message.editJobID else { return nil }
+        return model.lecture.jobs.first { $0.id == id && $0.kind == .chat && $0.isLectureChat == true }
+    }
+    private var canRetryAnswer: Bool {
+        guard let job = lectureChatJob else { return false }
+        guard model.chatEditHasFlipReplacement(job) else { return true }
+        return (job.chatEditDisposition != .applied || job.chatEditsUndoneAt != nil) && !model.chatEditConflicted(job)
     }
     private func action(_ title: String, _ symbol: String, perform: @escaping () -> Void) -> some View {
         Button(action: perform) { Label(title, systemImage: symbol).font(.system(size: 10.5)) }.buttonStyle(.plain).foregroundStyle(Theme.faint)
@@ -111,27 +116,83 @@ struct ChatEditBlock: View {
     let job: Job
     @State private var expanded = false
     var body: some View {
+        let diffs = model.chatEditDiffs(job)
+        let hasReplacement = model.chatEditHasFlipReplacement(job)
+        let showsDiffs = diffs.count <= 3 || (hasReplacement ? !expanded : expanded)
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Image(systemName: "rectangle.and.pencil.and.ellipsis").foregroundStyle(Theme.ai)
                 Text(model.chatEditTitle(job)).font(.system(size: 12, weight: .semibold))
                 Spacer()
-                Button { expanded.toggle() } label: { Image(systemName: expanded ? "chevron.up" : "chevron.down") }.buttonStyle(.plain)
+                if diffs.count > 3 {
+                    Button { expanded.toggle() } label: { Image(systemName: showsDiffs ? "chevron.up" : "chevron.down") }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(showsDiffs ? "Hide changes" : "Show changes")
+                }
             }
-            if expanded || model.chatEditDiffs(job).count <= 3 {
-                ForEach(model.chatEditDiffs(job)) { diff in
+            if showsDiffs {
+                ForEach(diffs) { diff in
                     VStack(alignment: .leading, spacing: 5) {
                         Button("Card \(diff.number)") { model.openChatCard(diff.cardID) }.buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ai)
-                        if diff.oldFront != diff.newFront { ChatWordDiff(before: diff.oldFront, after: diff.newFront) }
-                        if diff.oldBack != diff.newBack { ChatWordDiff(before: diff.oldBack, after: diff.newBack) }
+                        if let edit = job.chatEdits?.first(where: { $0.cardID == diff.cardID && $0.replacesFlipCard }),
+                           let solve = edit.solve {
+                            replacementPreview(solve, diff: diff)
+                        } else if diff.caseEdits.isEmpty {
+                            if diff.oldFront != diff.newFront { ChatWordDiff(before: diff.oldFront, after: diff.newFront) }
+                            if diff.oldBack != diff.newBack { ChatWordDiff(before: diff.oldBack, after: diff.newBack) }
+                            if diff.solveChanged && diff.oldFront == diff.newFront && diff.oldBack == diff.newBack {
+                                Text("Exercise settings changed").font(Theme.caption).foregroundStyle(Theme.quiet)
+                            }
+                        } else {
+                            ForEach(diff.caseEdits) { change in
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(change.ordinal.map { "Case \($0)" } ?? "Case variation")
+                                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.quiet)
+                                    if let oldQuestion = change.oldQuestion, oldQuestion != change.newQuestion {
+                                        Text("Question").font(Theme.caption).foregroundStyle(Theme.faint)
+                                        ChatWordDiff(before: oldQuestion, after: change.newQuestion)
+                                    } else if change.oldQuestion == nil {
+                                        Text("Original case unavailable. Proposed question:").font(Theme.caption).foregroundStyle(Theme.bad)
+                                        Text(change.newQuestion).font(Theme.caption).textSelection(.enabled)
+                                    }
+                                    if let oldAnswer = change.oldAnswer, oldAnswer != change.newAnswer {
+                                        Text("Answer").font(Theme.caption).foregroundStyle(Theme.faint)
+                                        ChatWordDiff(before: oldAnswer, after: change.newAnswer)
+                                    } else if change.oldAnswer == nil {
+                                        Text("Proposed answer:").font(Theme.caption).foregroundStyle(Theme.faint)
+                                        Text(change.newAnswer).font(Theme.caption).textSelection(.enabled)
+                                    }
+                                    ForEach(change.controlChanges, id: \.self) { setting in
+                                        Text(setting).font(Theme.caption).foregroundStyle(Theme.quiet)
+                                    }
+                                    if change.controlChanges.isEmpty && change.controlsChanged,
+                                       change.oldQuestion == change.newQuestion, change.oldAnswer == change.newAnswer {
+                                        Text("Answer checking or exercise settings changed.")
+                                            .font(Theme.caption).foregroundStyle(Theme.quiet)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 5)
+                            }
+                        }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            if hasReplacement && model.chatEditPending(job) {
+                Label("Study starts fresh, with previous reviews kept in history.", systemImage: "clock.arrow.circlepath")
+                    .font(Theme.caption).foregroundStyle(Theme.quiet)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if model.chatEditPending(job) {
-                HStack {
-                    Button(model.chatEditConflicted(job) ? "Apply anyway" : "Apply all") { Task { await model.resolveChatEdits(job, apply: true) } }.buttonStyle(SecondaryButtonStyle())
-                    Button("Dismiss") { Task { await model.resolveChatEdits(job, apply: false) } }.buttonStyle(.plain)
-                }.disabled(model.readOnly)
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        pendingActions
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        pendingActions
+                    }
+                }
+                .disabled(model.readOnly)
             } else if job.chatEditsUndoneAt == nil, job.chatEditUndo?.isEmpty == false {
                 Button("Undo") { Task { await model.undoChatEdits(jobID: job.id) } }
                     .buttonStyle(.plain).font(Theme.caption).foregroundStyle(Theme.ai)
@@ -139,6 +200,49 @@ struct ChatEditBlock: View {
             }
         }.padding(11).background(Theme.aiWash.opacity(0.6), in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.ai.opacity(0.2)))
+    }
+
+    @ViewBuilder private var pendingActions: some View {
+        if model.chatEditHasCaseConflict(job) {
+            Text("A targeted case changed. Dismiss this proposal and ask again.")
+                .font(Theme.caption).foregroundStyle(Theme.bad)
+        } else if model.chatEditHasFlipReplacement(job) {
+            if model.chatEditConflicted(job) {
+                Text(job.pdfLayoutRevision != model.lecture.pdfLayoutRevision
+                    ? "The slide order changed. Dismiss this proposal and ask again."
+                    : "A card changed. Dismiss this proposal and ask again.")
+                    .font(Theme.caption).foregroundStyle(Theme.bad)
+            } else {
+                let edits = job.chatEdits ?? []
+                let replacementCount = edits.filter(\.replacesFlipCard).count
+                let hasOtherEdits = edits.contains { !$0.replacesFlipCard }
+                let title = hasOtherEdits ? "Replace and apply edits" : replacementCount == 1 ? "Replace card" : "Replace cards"
+                Button(title) {
+                    Task { await model.resolveChatEdits(job, apply: true) }
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            Button(model.chatEditConflicted(job) ? "Apply anyway" : "Apply all") {
+                Task { await model.resolveChatEdits(job, apply: true) }
+            }
+            .buttonStyle(SecondaryButtonStyle())
+        }
+        Button("Dismiss") { Task { await model.resolveChatEdits(job, apply: false) } }
+            .buttonStyle(.plain)
+    }
+
+    private func replacementPreview(_ solve: SolveDraft, diff: ChatEditDiff) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Proposed solve exercise").eyebrow()
+            SolveExerciseView(content: solve.sample, mode: .browse, showsMistakeMessages: true)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+                .id("\(job.id)-\(diff.cardID)")
+        }
+        .padding(10)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -337,5 +441,19 @@ struct ChatEditDiff: Identifiable {
     let oldBack: String
     let newFront: String
     let newBack: String
+    let solveChanged: Bool
+    let caseEdits: [ChatSolveCaseChangeDiff]
     var id: UUID { cardID }
+}
+
+struct ChatSolveCaseChangeDiff: Identifiable {
+    let caseID: UUID
+    let ordinal: Int?
+    let oldQuestion: String?
+    let oldAnswer: String?
+    let newQuestion: String
+    let newAnswer: String
+    let controlsChanged: Bool
+    let controlChanges: [String]
+    var id: UUID { caseID }
 }

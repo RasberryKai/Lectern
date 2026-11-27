@@ -15,7 +15,8 @@ struct KeyboardShortcutsTab: View {
                         section("Lecture workspace", [
                             ("Prepare / Coverage / Review", "⌘1  ⌘2  ⌘3"),
                             ("Generate cards", "⌘ G"),
-                            ("Toggle AI chat", "⌘ ⇧ A  /  ⌘ ⌥ B"),
+                            ("Toggle AI chat", "⌘ ⇧ A"),
+                            ("Toggle right pane", "⌘ ⌥ B"),
                             ("New chat", "⌘ N")
                         ])
                         section("Prepare", [

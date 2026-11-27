@@ -105,11 +105,11 @@ public final class LectureSession {
         eventTask?.cancel(); eventTask = nil
     }
     public func generate(backend: AIBackend = .claudeCLI, model: String = "opus", regenerateAll: Bool = false,
-                         additionalInstructions: String = "", replaceExistingCards: Bool = false) async throws -> UUID {
+                         additionalInstructions: String = "", createNewSet: Bool = false) async throws -> UUID {
         try await flushEdits()
         return try await runner.generate(moduleID: lecture.moduleID, lectureID: lecture.id, backend: backend, model: model,
                                          regenerateAll: regenerateAll, additionalInstructions: additionalInstructions,
-                                         replaceExistingCards: replaceExistingCards)
+                                         createNewSet: createNewSet)
     }
     public func revise(cardID: UUID, feedback: String, backend: AIBackend = .claudeCLI, model: String = "opus") async throws -> UUID {
         try await flushEdits()

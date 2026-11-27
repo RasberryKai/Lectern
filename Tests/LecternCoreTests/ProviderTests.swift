@@ -527,6 +527,40 @@ struct ProviderTests {
         #expect(!json.contains("history"))
     }
 
+    @Test func messagesChatDispatchesOnDemandSolveCaseLookup() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        var request = try chatRequest(in: root)
+        request.chatSnapshot!.initialRefs = []
+        let content = SolveCaseContent(prompt: "Frozen case question", fields: [
+            SolveField(prompt: "Value", input: SolveInput(kind: .number, answers: ["42"]))
+        ], explanation: "Frozen explanation")
+        var card = Card(front: content.prompt, back: content.explanation)
+        try card.setSolveDraft(SolveDraft(skill: "Calculate", reason: "Apply the rule", variation: "Change inputs", sample: content))
+        var variant = content
+        variant.prompt = "Frozen second case"
+        card.solve?.cases.append(SolveCase(content: variant))
+        request.chatSnapshot!.cards = [card]
+        let first = sseChat(blocks: [
+            ["type": "tool_use", "id": "cases", "name": "get_solve_cases", "input": ["ids": ["C1"]]]
+        ], stop: "tool_use", input: 10, output: 3)
+        let second = sseChat(blocks: [["type": "text", "text": #"{"message":"I reviewed both cases.","edits":[],"quiz":[]}"#]], stop: "end_turn", input: 20, output: 9)
+        let session = URLSessionStub.makeSession(status: 200, body: first)
+        URLSessionStub.state.enqueue(second)
+        let provider = MessagesAPIProvider(apiKey: { "fixture" }, session: session, endpoint: URL(string: "https://api.example.test/v1/messages")!)
+        let result = try await provider.execute(request, onEvent: { _ in })
+        #expect(result.read == [.card(card.id)])
+        #expect(result.searchedLecture)
+        let body = try #require(URLSessionStub.state.lastRequest()?.httpBody)
+        let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try #require(object["messages"] as? [[String: Any]])
+        let messageContent = try #require(messages.last?["content"] as? [[String: Any]])
+        let toolContent = try #require(messageContent.first?["content"] as? [[String: Any]])
+        let payload = try #require(toolContent.first?["text"] as? String)
+        #expect(payload.contains("Frozen second case"))
+        #expect(payload.contains(ChatSolveCaseEdit.contentHash(variant)))
+        #expect(payload.contains("\"editable\":true"))
+    }
+
     @Test func messagesChatCanReadMoreThan100CardsForBulkEdits() async throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         var request = try chatRequest(in: root)

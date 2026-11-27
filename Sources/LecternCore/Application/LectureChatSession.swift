@@ -2,9 +2,9 @@ import Foundation
 
 extension LectureSession {
     @discardableResult
-    public func chat(question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], messageID: UUID = UUID(), backend: AIBackend = .claudeCLI, model: String = "opus", allowsCardCreation: Bool = false) async throws -> UUID {
+    public func chat(question: String, contextRefs: [ContextRef], attachments: [ChatAttachment] = [], messageID: UUID = UUID(), backend: AIBackend = .claudeCLI, model: String = "opus", allowsCardCreation: Bool = false, studyExerciseContext: String? = nil) async throws -> UUID {
         try await flushEdits()
-        let id = try await runner.chat(moduleID: lecture.moduleID, lectureID: lecture.id, question: question, contextRefs: contextRefs, attachments: attachments, messageID: messageID, backend: backend, model: model, allowsCardCreation: allowsCardCreation)
+        let id = try await runner.chat(moduleID: lecture.moduleID, lectureID: lecture.id, question: question, contextRefs: contextRefs, attachments: attachments, messageID: messageID, backend: backend, model: model, allowsCardCreation: allowsCardCreation, studyExerciseContext: studyExerciseContext)
         try await refresh(); return id
     }
     public func setChatDraft(_ text: String, attachments: [ChatAttachment]? = nil, chatID expectedChatID: UUID? = nil) async throws {
@@ -60,18 +60,36 @@ extension LectureSession {
     }
     public func resolveChatEdits(messageID: UUID, apply: Bool, force: Bool = false) async throws {
         _ = try await store.updateLecture(moduleID: lecture.moduleID, lectureID: lecture.id) { latest in
-            guard let m = latest.currentChat.messages.firstIndex(where: { $0.id == messageID }), let id = latest.currentChat.messages[m].editJobID, let j = latest.jobs.firstIndex(where: { $0.id == id }), latest.jobs[j].chatEditDisposition == .proposed else { return }
+            guard let m = latest.currentChat.messages.firstIndex(where: { $0.id == messageID && $0.role == .assistant }),
+                  let id = latest.currentChat.messages[m].editJobID,
+                  let j = latest.jobs.firstIndex(where: { $0.id == id }),
+                  latest.jobs[j].chatEditDisposition == .proposed else { return }
             if apply {
                 var edits = latest.jobs[j].chatEdits ?? []
+                let hasReplacements = edits.contains(where: \.replacesFlipCard)
                 if force {
-                    for i in edits.indices { guard let card = latest.cards.first(where: { $0.id == edits[i].cardID && !$0.isSuperseded }), let revision = card.currentRevisionID else { throw LectureError.missingCard(edits[i].cardID) }; edits[i].baseRevisionID = revision }
+                    guard !hasReplacements else {
+                        throw LectureError.invalidMetadata("A card changed after this replacement was proposed. Ask chat for a fresh proposal.")
+                    }
+                    for i in edits.indices {
+                        guard let card = latest.cards.first(where: { $0.id == edits[i].cardID && !$0.isSuperseded }),
+                              let revision = card.currentRevisionID else { throw LectureError.missingCard(edits[i].cardID) }
+                        if edits[i].caseEdits != nil {
+                            guard edits[i].baseRevisionID == revision else {
+                                throw LectureError.invalidMetadata("A solve card changed after its case proposal. Request a fresh case edit instead of force-applying it.")
+                            }
+                        } else {
+                            edits[i].baseRevisionID = revision
+                        }
+                    }
                     if latest.jobs[j].chatCitationCardIDs == nil {
                         latest.jobs[j].chatCitationCardIDs = latest.jobs[j].chatCardVersions?.map(\.cardID)
                     }
                     latest.jobs[j].chatCardVersions = latest.cards.compactMap { c in c.currentRevisionID.map { ChatCardVersion(cardID: c.id, revisionID: $0, verdict: c.verdict, mathInterpretations: c.mathInterpretations) } }
                 }
                 latest.jobs[j].state = .running
-                try LectureReducer.reduce(&latest, action: .applyChatEdits(jobID: id, edits: edits))
+                try LectureReducer.reduce(&latest, action: .applyChatEdits(jobID: id, edits: edits,
+                    confirmsFlipReplacement: hasReplacements))
                 latest.jobs[j].state = .succeeded; latest.jobs[j].chatEditDisposition = .applied
             } else { latest.jobs[j].chatEditDisposition = .dismissed }
             latest.currentChat.messages[m].pendingEdits = []; latest.currentChat.messages[m].conflictingCardIDs = []

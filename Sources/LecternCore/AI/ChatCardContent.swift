@@ -9,6 +9,9 @@ struct ChatCardContent: Codable, Equatable, Sendable {
     let mathInterpretations: [String: MathInterpretation]?
     let cardID: UUID?
     let baseRevisionID: UUID?
+    let solve: SolveDraft?
+    /// Total frozen solve-case count; optional so older serialized card payloads still decode.
+    let caseCount: Int?
 
     init(_ card: Card, number: Int, includeEditIDs: Bool = false) {
         self.number = number
@@ -18,6 +21,8 @@ struct ChatCardContent: Codable, Equatable, Sendable {
         mathInterpretations = card.mathInterpretations.isEmpty ? nil : card.mathInterpretations
         cardID = includeEditIDs ? card.id : nil
         baseRevisionID = includeEditIDs ? card.currentRevisionID : nil
+        solve = card.solve?.draft
+        caseCount = card.solve?.cases.count
     }
 
     static func deck(_ cards: [Card]) -> [Self] {
@@ -41,5 +46,11 @@ extension ChatSnapshot {
 
     func cardPath(for id: UUID) -> String? {
         cards.firstIndex(where: { $0.id == id }).map { cardPath(at: $0) }
+    }
+
+    /// New retries expose per-card case pools only when the frozen manifest version
+    /// explicitly includes those files.
+    func solveCasePath(at index: Int) -> String {
+        "cases/C\(index + 1).json"
     }
 }

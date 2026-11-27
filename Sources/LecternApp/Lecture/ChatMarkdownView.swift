@@ -23,10 +23,12 @@ enum ChatCitation: Equatable {
 struct ChatMarkdownView: View {
     let text: String
     var streaming = false
+    var textSize = 13.5
     let onCitation: (ChatCitation) -> Void
     @State private var height: CGFloat = 28
     var body: some View {
-        ChatMarkdownWeb(html: ChatMarkdown.html(streaming ? ChatMarkdown.finishedBlocks(text) : text), streaming: streaming, height: $height,
+        ChatMarkdownWeb(html: ChatMarkdown.html(streaming ? ChatMarkdown.finishedBlocks(text) : text), streaming: streaming,
+                        textSize: textSize, height: $height,
                         onCitation: onCitation)
             .frame(height: max(28, height))
             .accessibilityLabel(text)
@@ -37,6 +39,7 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
     @Environment(\.colorScheme) private var scheme
     let html: String
     var streaming = false
+    let textSize: Double
     @Binding var height: CGFloat
     let onCitation: (ChatCitation) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -52,7 +55,7 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
     }
     func updateNSView(_ view: WKWebView, context: Context) {
         context.coordinator.parent = self
-        let key = "\(scheme)\(streaming)\(html)"
+        let key = "\(scheme)\(streaming)\(textSize)\(html)"
         guard context.coordinator.key != key else { return }
         context.coordinator.key = key
         #if SWIFT_PACKAGE
@@ -96,7 +99,7 @@ private struct ChatMarkdownWeb: NSViewRepresentable {
         <style>
         :root{color-scheme:\(scheme == .dark ? "dark" : "light")}
         html,body{margin:0;padding:0;overflow:hidden}
-        body{margin:0;background:transparent;color:CanvasText;font:13.5px/1.55 -apple-system;overflow-wrap:anywhere}
+        body{margin:0;background:transparent;color:CanvasText;font:\(textSize)px/1.55 -apple-system;overflow-wrap:anywhere}
         #content{display:flow-root;width:100%;min-width:0}
         p{margin:0 0 10px}h4{font-size:14px;margin:15px 0 6px}ul,ol{padding-left:23px;margin:6px 0 12px}li>ul,li>ol{margin:2px 0}
         blockquote{margin:10px 0;padding:5px 12px;border-left:3px solid #8ba0b3;color:\(scheme == .dark ? "#c0bbb0" : "#666258")}

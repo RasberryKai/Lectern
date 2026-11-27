@@ -85,15 +85,21 @@ struct SettingsView: View {
         .foregroundStyle(Theme.ink)
         .tint(Theme.accentText)
         .navigationTitle(selected.rawValue)
-        .onAppear { selectStudyIfRequested() }
-        .onChange(of: model.showStudySettingsOnOpen) { _, _ in selectStudyIfRequested() }
+        .onAppear { selectRequestedSection() }
+        .onChange(of: model.showStudySettingsOnOpen) { _, _ in selectRequestedSection() }
+        .onChange(of: model.showLibrarySettingsOnOpen) { _, _ in selectRequestedSection() }
     }
 
-    private func selectStudyIfRequested() {
-        guard model.showStudySettingsOnOpen else { return }
-        visited.insert(.study)
-        selected = .study
-        model.showStudySettingsOnOpen = false
+    private func selectRequestedSection() {
+        if model.showLibrarySettingsOnOpen {
+            visited.insert(.library)
+            selected = .library
+            model.showLibrarySettingsOnOpen = false
+        } else if model.showStudySettingsOnOpen {
+            visited.insert(.study)
+            selected = .study
+            model.showStudySettingsOnOpen = false
+        }
     }
 
     @ViewBuilder
@@ -136,6 +142,7 @@ private struct AISettingsTab: View {
     @State private var codexBusy = false
 
     var body: some View {
+        @Bindable var model = model
         ScrollView {
             HStack(alignment: .top, spacing: 32) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -145,6 +152,20 @@ private struct AISettingsTab: View {
                     backendButton(.messagesAPI, "Anthropic API", "API key, billed per token")
                     Text("Applies to new jobs. Running jobs keep their original backend and model. Lectern never switches backend on its own.")
                         .font(Theme.small).foregroundStyle(Theme.quiet).padding(.top, 8)
+                    Divider().padding(.vertical, 8)
+                    Toggle("ADHD mode", isOn: $model.adhdModeEnabled)
+                        .toggleStyle(.switch)
+                        .font(Theme.body.weight(.semibold))
+                    Picker("Ask AI activity", selection: $model.adhdModeActivity) {
+                        ForEach(AskWaitPreference.allCases, id: \.self) { preference in
+                            Text(preference.title).tag(preference)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(!model.adhdModeEnabled)
+                    Text("Random gives both activities an equal chance. Press Esc to return to chat.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
                     if let error { ErrorBanner(message: error) }
                 }
                 .frame(width: 340, alignment: .leading)
@@ -558,7 +579,12 @@ private struct LibraryTab: View {
                         .font(Theme.small).foregroundStyle(Theme.quiet)
                     HStack(spacing: 10) {
                         Button("Download backup…") { saveBackup() }
-                            .buttonStyle(PrimaryButtonStyle()).disabled(model.backupStatus == .saving)
+                            .buttonStyle(PrimaryButtonStyle())
+                            .disabled(model.backupStatus == .saving || model.backupImportStatus == .preparing)
+                        Button("Import backup…") { selectBackup() }
+                            .buttonStyle(SecondaryButtonStyle())
+                            .disabled(model.backupStatus == .saving || model.backupImportStatus == .preparing ||
+                                      model.backupImportStatus == .readyToRestore)
                         if model.backupStatus == .saving {
                             ProgressView().controlSize(.small)
                             Text("Creating backup…").font(Theme.small).foregroundStyle(Theme.quiet)
@@ -575,6 +601,7 @@ private struct LibraryTab: View {
                     if case .failed(let message) = model.backupStatus {
                         ErrorBanner(message: message)
                     }
+                    backupImportFeedback
                 }
                 .frame(maxWidth: .infinity, alignment: .leading).panel()
                 VStack(alignment: .leading, spacing: 12) {
@@ -605,6 +632,52 @@ private struct LibraryTab: View {
         panel.prompt = "Save Backup"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task { await model.exportLibraryBackup(to: url) }
+    }
+
+    private func selectBackup() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.zip]
+        panel.message = "Choose a ZIP made with Download backup in Lectern."
+        panel.prompt = "Choose Backup"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let confirmation = NSAlert()
+        confirmation.alertStyle = .warning
+        confirmation.messageText = "Import \(url.lastPathComponent)?"
+        confirmation.informativeText = "The backup replaces your library and app preferences the next time you open Lectern. A copy of your current library and preferences is kept beside the library folder."
+        confirmation.addButton(withTitle: "Import Backup")
+        confirmation.addButton(withTitle: "Cancel")
+        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+
+        Task { await model.prepareBackupImport(from: url) }
+    }
+
+    @ViewBuilder private var backupImportFeedback: some View {
+        switch model.backupImportStatus {
+        case .preparing:
+            HStack {
+                ProgressView().controlSize(.small)
+                Text("Checking backup…").font(Theme.small).foregroundStyle(Theme.quiet)
+            }
+        case .readyToRestore:
+            HStack {
+                Text("Backup is ready. Quit and reopen Lectern to import it.")
+                    .font(Theme.small).foregroundStyle(Theme.quiet)
+                Button("Quit Lectern") { NSApp.terminate(nil) }
+                    .buttonStyle(LinkButtonStyle())
+            }
+        case .restored(let previousLibrary):
+            HStack {
+                Label("Backup imported", systemImage: "checkmark.circle")
+                    .font(Theme.small).foregroundStyle(Theme.good)
+                Button("Show previous library") { NSWorkspace.shared.activateFileViewerSelecting([previousLibrary]) }
+                    .buttonStyle(LinkButtonStyle())
+            }
+        case .failed(let message):
+            ErrorBanner(message: message)
+        case nil:
+            EmptyView()
+        }
     }
 
     private func importSlides() async {

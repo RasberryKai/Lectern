@@ -4,8 +4,10 @@ public struct ExportEntry: Codable, Equatable, Sendable {
     public var lectureID: UUID
     public var cardID: UUID
     public var revisionID: UUID
-    public init(lectureID: UUID, cardID: UUID, revisionID: UUID) {
+    public var solveCaseID: UUID?
+    public init(lectureID: UUID, cardID: UUID, revisionID: UUID, solveCaseID: UUID? = nil) {
         self.lectureID = lectureID; self.cardID = cardID; self.revisionID = revisionID
+        self.solveCaseID = solveCaseID
     }
     public var lecternID: String { lectureID.uuidString + ":" + cardID.uuidString }
 }
@@ -38,10 +40,19 @@ public enum AnkiExporter {
             _ = try lecture.validated()
             for card in lecture.cards where card.verdict == .good && !card.isSuperseded && (!changedOnly || card.exported == nil || card.changedSinceExport) {
                 guard lecture.issues(for: card).isEmpty else { throw LectureError.invalidApproval(card.id) }
-                let front = try FlashcardMathFormatter.formatForAnki(card.front, interpretations: card.mathInterpretations)
-                let back = try FlashcardMathFormatter.formatForAnki(card.back, interpretations: card.mathInterpretations)
+                let front: String
+                let back: String
+                let sampleCase = card.verifiedSolveExample
+                if card.solve != nil {
+                    guard let sample = sampleCase?.content.checkedContent else { continue }
+                    front = (try? FlashcardMathFormatter.formatForAnki(sample.staticQuestion)) ?? sample.staticQuestion
+                    back = (try? FlashcardMathFormatter.formatForAnki(sample.staticAnswer)) ?? sample.staticAnswer
+                } else {
+                    front = try FlashcardMathFormatter.formatForAnki(card.front, interpretations: card.mathInterpretations)
+                    back = try FlashcardMathFormatter.formatForAnki(card.back, interpretations: card.mathInterpretations)
+                }
                 guard let revisionID = card.currentRevisionID else { throw LectureError.invalidApproval(card.id) }
-                let entry = ExportEntry(lectureID: lecture.id, cardID: card.id, revisionID: revisionID)
+                let entry = ExportEntry(lectureID: lecture.id, cardID: card.id, revisionID: revisionID, solveCaseID: sampleCase?.id)
                 rows.append([entry.lecternID, field(front), field(back), tag(moduleName) + "::" + tag(lecture.name)].joined(separator: "\t"))
                 entries.append(entry)
                 ids.append(card.id)

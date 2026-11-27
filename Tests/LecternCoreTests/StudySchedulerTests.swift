@@ -176,7 +176,9 @@ struct StudySchedulerTests {
         #expect(plan.startingCount == 1)
         #expect(plan.dueRemaining == 0)
         opts.cardTypes = .solve
-        #expect(catalog.plan(options: opts, now: now).cards.isEmpty)
-        #expect(catalog.plan(options: opts, now: now).dueRemaining == 1)
+        let solveOnly = catalog.plan(options: opts, now: now)
+        #expect(solveOnly.cards.isEmpty)
+        #expect(solveOnly.dueRemaining == 0)
+        #expect(solveOnly.approvedCount == 0)
     }
 }

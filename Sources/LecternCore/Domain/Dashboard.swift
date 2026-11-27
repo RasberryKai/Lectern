@@ -139,7 +139,8 @@ public enum DashboardBuilder {
                 review += 1
             }
             if card.proposal != nil { proposals += 1 }
-            if card.verdict == .good && valid && card.currentRevisionID != nil && (card.exported == nil || card.changedSinceExport) {
+            if card.verdict == .good && valid && (card.solve == nil || card.verifiedSolveExample != nil)
+                && card.currentRevisionID != nil && (card.exported == nil || card.changedSinceExport) {
                 ready += 1
                 if card.exported != nil { changed += 1 }
             }

@@ -52,9 +52,7 @@ private struct RunningJobRow: View {
                 if stage == "Queued" { Text("Waiting for a free slot").font(Theme.small).foregroundStyle(Theme.quiet) }
                 else if !Self.stages.contains(stage) { Text(stage).font(Theme.small).foregroundStyle(Theme.quiet) }
             }
-            Text(job.replacesExistingCards == true
-                 ? "Review cards will be replaced when generation succeeds."
-                 : "You can keep editing; the job uses a snapshot.")
+            Text("New cards will appear in their own set.")
                 .font(Theme.small).foregroundStyle(Theme.quiet).lineLimit(1)
             Spacer(minLength: 8)
             if let warning = model.progress(job.id)?.warning {
@@ -126,8 +124,8 @@ struct GenerateSheet: View {
             Text("Generate from \(Format.count(selected.count, "selected slide")).")
                 .font(Theme.body)
             if !lecture.cards.isEmpty {
-                Text("This replaces all \(model.activeCards.count) cards in Review when generation succeeds, including reviewed and edited cards.")
-                    .font(Theme.small).foregroundStyle(Theme.amber)
+                Text("This adds a new set in Review. You can switch between sets to compare cards.")
+                    .font(Theme.small).foregroundStyle(Theme.quiet)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -186,7 +184,7 @@ struct GenerateSheet: View {
         .task { await loadContext() }
     }
 
-    private var chatDrafts: [PromptBuilder.ChatCardDraft] { PromptBuilder.chatCardDrafts(lecture: lecture, pages: scope, replacesExistingCards: true) }
+    private var chatDrafts: [PromptBuilder.ChatCardDraft] { PromptBuilder.chatCardDrafts(lecture: lecture, pages: scope, includeLinkedDrafts: true) }
     private var chatPoints: [LearningPoint] {
         var seen = Set<UUID>()
         return (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints)).filter {
@@ -219,7 +217,7 @@ struct GenerateSheet: View {
             }
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border))
-            Text("Each becomes a card. These explanations guide Generate’s wording and coverage, taking precedence over the slide’s wording.")
+            Text("These explanations guide the new set’s wording and coverage.")
                 .font(Theme.caption).foregroundStyle(Theme.quiet).fixedSize(horizontal: false, vertical: true)
         }
     }

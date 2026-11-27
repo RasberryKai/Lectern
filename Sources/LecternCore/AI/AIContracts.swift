@@ -15,13 +15,19 @@ public struct AIRequest: Codable, Equatable, Sendable {
     public var chatSnapshot: ChatSnapshot? = nil
     public var pdf: Data?
     public var workingDirectory: URL
-    /// Background chat distillation uses its own contract: concept-level points in Prepare, card suggestions in Review.
+    /// Background operations can use a more specific contract than the job kind's default.
     public var outputSchemaOverride: String? = nil
     /// Diagnostic attribution only; never sent as study content to a provider.
     public var diagnosticContext: [String: String]? = nil
     var outputSchema: String? {
-        outputSchemaOverride ?? AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true,
-                                                    allowsCardDeletion: chatSnapshot?.allowsCardDeletion == true)
+        if let outputSchemaOverride { return outputSchemaOverride }
+        // The output contract is part of the frozen Generate and Revise prompt.
+        // Replaying it keeps snapshots written before solve cards compatible.
+        if (kind == .generate || kind == .revise), let schema = PromptBuilder.frozenCardSchema(in: prompt) { return schema }
+        return AIOutputSchema.json(for: kind, allowsCardCreation: chatSnapshot?.allowsCardCreation == true,
+                                  allowsCardDeletion: chatSnapshot?.allowsCardDeletion == true,
+                                  allowsSolveCardEdits: chatSnapshot?.allowsSolveCardEdits == true,
+                                  allowsSolveCaseEdits: chatSnapshot?.allowsSolveCardEdits == true && chatSnapshot?.solveCaseContextVersion == 1)
     }
     var allowsWebSearch: Bool { kind == .chat }
     var cliSystemPrompt: String {
@@ -76,10 +82,12 @@ public struct WireCard: Codable, Equatable, Sendable {
     public var flag: String?
     /// Generate only: the chat card draft this card realises.
     public var point: String? = nil
-    public init(front: String, back: String, sourceSlides: [Int], flag: String? = nil, point: String? = nil) {
+    public var solve: SolveDraft? = nil
+    public init(front: String, back: String, sourceSlides: [Int], flag: String? = nil, point: String? = nil, solve: SolveDraft? = nil) {
         self.front = front; self.back = back; self.sourceSlides = sourceSlides; self.flag = flag; self.point = point
+        self.solve = solve
     }
-    public var draft: CardDraft { CardDraft(front: front, back: back, sourcePages: sourceSlides, flag: flag) }
+    public var draft: CardDraft { CardDraft(front: front, back: back, sourcePages: sourceSlides, flag: flag, solve: solve) }
 }
 public struct DistilledPoints: Codable, Equatable, Sendable {
     public struct Point: Codable, Equatable, Sendable {
@@ -144,12 +152,61 @@ public struct ChatCardEdit: Codable, Equatable, Sendable {
     public var baseRevisionID: UUID
     public var front: String
     public var back: String
+    public var solve: SolveDraft?
+    public var caseEdits: [ChatSolveCaseEdit]?
+    private var flipReplacement: Bool? = nil
+    public var replacesFlipCard: Bool { flipReplacement == true }
 
-    public init(cardID: UUID, baseRevisionID: UUID, front: String, back: String) {
+    public init(cardID: UUID, baseRevisionID: UUID, front: String, back: String, solve: SolveDraft? = nil,
+                caseEdits: [ChatSolveCaseEdit]? = nil) {
         self.cardID = cardID
         self.baseRevisionID = baseRevisionID
         self.front = front
         self.back = back
+        self.solve = solve
+        self.caseEdits = caseEdits
+    }
+
+    func validated(for card: Card, allowsFlipReplacement: Bool = false) -> Self? {
+        guard !replacesFlipCard || (card.solve == nil && solve != nil && caseEdits == nil) else { return nil }
+        if let caseEdits {
+            guard solve == nil, !caseEdits.isEmpty, let solveCard = card.solve,
+                  baseRevisionID == card.currentRevisionID,
+                  Set(caseEdits.map(\.caseID)).count == caseEdits.count else { return nil }
+            var normalized: [ChatSolveCaseEdit] = []
+            for edit in caseEdits {
+                guard let existing = solveCard.cases.first(where: { $0.id == edit.caseID }),
+                      !existing.retired,
+                      ChatSolveCaseEdit.contentHash(existing.content) == edit.baseContentHash,
+                      let content = edit.content.checkedContent else { return nil }
+                normalized.append(ChatSolveCaseEdit(caseID: edit.caseID, baseContentHash: edit.baseContentHash, content: content))
+            }
+            if let sampleID = solveCard.cases.first?.id,
+               let revisedSample = normalized.first(where: { $0.caseID == sampleID })?.content {
+                var revisedDraft = solveCard.draft
+                revisedDraft.sample = revisedSample
+                guard revisedDraft.validated != nil else { return nil }
+            }
+            return Self(cardID: cardID, baseRevisionID: baseRevisionID, front: card.front,
+                        back: card.back, solve: nil, caseEdits: normalized)
+        }
+        switch (card.solve, solve) {
+        case (.some, .some(let draft)):
+            guard let draft = draft.validated else { return nil }
+            return Self(cardID: cardID, baseRevisionID: baseRevisionID, front: draft.sample.prompt,
+                        back: draft.sample.explanation, solve: draft)
+        case (nil, .some(let draft)):
+            guard allowsFlipReplacement, !card.sourcePages.isEmpty, let draft = draft.validated else { return nil }
+            var replacement = Self(cardID: cardID, baseRevisionID: baseRevisionID, front: draft.sample.prompt,
+                                   back: draft.sample.explanation, solve: draft)
+            replacement.flipReplacement = true
+            return replacement
+        case (nil, nil):
+            guard !front.solveTrimmed.isEmpty, !back.solveTrimmed.isEmpty else { return nil }
+            return self
+        default:
+            return nil
+        }
     }
 }
 
@@ -191,28 +248,40 @@ public struct ChatReply: Codable, Equatable, Sendable {
 }
 
 public enum AIOutputSchema {
-    public static func json(for kind: JobKind, allowsCardCreation: Bool = false, allowsCardDeletion: Bool = false) -> String? {
+    public static func json(for kind: JobKind, allowsCardCreation: Bool = false, allowsCardDeletion: Bool = false,
+                            allowsSolveCardEdits: Bool = false, allowsSolveCaseEdits: Bool = false) -> String? {
         switch kind {
         case .ask: return nil
         case .chat:
             let extraRequired = (allowsCardCreation ? #","newCards""# : "") + (allowsCardDeletion ? #","deletions""# : "")
             let extraProperties = (allowsCardCreation ? #""newCards":{"type":"array","items":\#(newChatCard)},"# : "")
                 + (allowsCardDeletion ? #""deletions":{"type":"array","items":\#(chatCardDeletion)},"# : "")
-            return #"{"type":"object","additionalProperties":false,"required":["message","edits","quiz"\#(extraRequired)],"properties":{\#(extraProperties)"quiz":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["question","answer"],"properties":{"question":{"type":"string"},"answer":{"type":"string"}}}},"message":{"type":"string"},"edits":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID","front","back"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"},"front":{"type":"string"},"back":{"type":"string"}}}}}}"#
+            let solveKey = allowsSolveCardEdits ? #","solve""# : ""
+            let solveProperty = allowsSolveCardEdits ? "," + solveDraftProperty : ""
+            let caseEditsKey = allowsSolveCaseEdits ? #","caseEdits""# : ""
+            let caseEditsProperty = allowsSolveCaseEdits ? "," + solveCaseEditsProperty : ""
+            let definitions = allowsSolveCardEdits || allowsSolveCaseEdits ? #","$defs":\#(solveDefinitions)"# : ""
+            let edit = #"{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID","front","back"\#(solveKey)\#(caseEditsKey)],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"},"front":{"type":"string"},"back":{"type":"string"}\#(solveProperty)\#(caseEditsProperty)}}"#
+            return #"{"type":"object","additionalProperties":false,"required":["message","edits","quiz"\#(extraRequired)],"properties":{\#(extraProperties)"quiz":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["question","answer"],"properties":{"question":{"type":"string"},"answer":{"type":"string"}}}},"message":{"type":"string"},"edits":{"type":"array","items":\#(edit)}}\#(definitions)}"#
         case .generate:
-            return #"{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":CARD},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}}}"#.replacingOccurrences(of: "CARD", with: generatedCard)
+            return #"{"type":"object","additionalProperties":false,"required":["cards","skipped"],"properties":{"cards":{"type":"array","items":\#(cardSchema(generated: true))},"skipped":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["slide","reason"],"properties":{"slide":{"type":"integer"},"reason":{"type":"string"}}}}},"$defs":\#(solveDefinitions)}"#
         case .revise:
-            return #"{"type":"object","additionalProperties":false,"required":["cards","rationale"],"properties":{"cards":{"type":"array","minItems":1,"maxItems":3,"items":CARD},"rationale":{"type":"string"}}}"#.replacingOccurrences(of: "CARD", with: card)
+            return #"{"type":"object","additionalProperties":false,"required":["cards","rationale"],"properties":{"cards":{"type":"array","minItems":1,"maxItems":3,"items":\#(cardSchema(generated: false))},"rationale":{"type":"string"}},"$defs":\#(solveDefinitions)}"#
         case .distil:
             return #"{"type":"object","additionalProperties":false,"required":["learningPoints","summary"],"properties":{"summary":{"type":"string"},"learningPoints":{"type":"array","maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["text","pages"],"properties":{"text":{"type":"string"},"pages":{"type":"array","items":{"type":"integer"}}}}}}}"#
         }
     }
     public static let chatDistillation = #"{"type":"object","additionalProperties":false,"required":["summary","closedThroughMessageID","learningPoints"],"properties":{"summary":{"type":"string"},"closedThroughMessageID":{"type":["string","null"]},"learningPoints":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["text","pages","kind","difficulty","evidence","front","back","replacesCardID","mergesPointID","endMessageID"],"properties":{"text":{"type":"string"},"pages":{"type":"array","items":{"type":"integer"}},"kind":{"type":"string","enum":["ownWords","misconception","understood"]},"difficulty":{"type":"integer","minimum":0,"maximum":3},"evidence":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["messageID","quote"],"properties":{"messageID":{"type":"string"},"quote":{"type":"string"}}}},"front":{"type":"string"},"back":{"type":"string"},"replacesCardID":{"type":["string","null"]},"mergesPointID":{"type":["string","null"]},"endMessageID":{"type":"string"}}}}}}"#
     public static let reviewDistillation = #"{"type":"object","additionalProperties":false,"required":["summary","suggestion"],"properties":{"summary":{"type":"string"},"suggestion":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["reason","cardID","baseRevisionID","front","back","sourceSlides"],"properties":{"reason":{"type":"string"},"cardID":{"type":["string","null"]},"baseRevisionID":{"type":["string","null"]},"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}}}}]}}}"#
-    private static let generatedCard = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag","point"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]},"point":{"type":["string","null"]}}}"#
     private static let newChatCard = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}}}}"#
     private static let chatCardDeletion = #"{"type":"object","additionalProperties":false,"required":["cardID","baseRevisionID"],"properties":{"cardID":{"type":"string","format":"uuid"},"baseRevisionID":{"type":"string","format":"uuid"}}}"#
-    private static let card = #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag"],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]}}}"#
+    private static let solveDraftProperty = ##""solve":{"anyOf":[{"type":"null"},{"$ref":"#/$defs/solveDraft"}]}"##
+    private static let solveCaseEditsProperty = ##""caseEdits":{"anyOf":[{"type":"null"},{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["caseID","baseContentHash","content"],"properties":{"caseID":{"type":"string","format":"uuid"},"baseContentHash":{"type":"string","minLength":1},"content":{"$ref":"#/$defs/case"}}}}]}"##
+    private static func cardSchema(generated: Bool) -> String {
+        let pointKey = generated ? #","point""# : ""
+        let pointProperty = generated ? #","point":{"type":["string","null"]}"# : ""
+        return #"{"type":"object","additionalProperties":false,"required":["front","back","sourceSlides","flag","solve"\#(pointKey)],"properties":{"front":{"type":"string"},"back":{"type":"string"},"sourceSlides":{"type":"array","items":{"type":"integer"}},"flag":{"type":["string","null"]},\#(solveDraftProperty)\#(pointProperty)}}"#
+    }
 }
 
 /// Deterministic offline provider for frontend previews and integration tests.
@@ -241,6 +310,8 @@ public struct ChatSlide: Codable, Equatable, Sendable {
 public struct ChatSnapshot: Codable, Equatable, Sendable {
     /// Nil preserves the original model payload and asset paths for frozen retries.
     public var cardContextVersion: Int? = nil
+    /// Enables frozen individual case lookup and edit contracts; nil preserves older retries.
+    public var solveCaseContextVersion: Int? = nil
     /// SHA-256 digests of every frozen file. Nil on snapshots written before asset verification.
     public var assetHashes: [String: String]? = nil
     /// Upload metadata only; image bytes live in immutable, hash-verified job assets.
@@ -252,6 +323,8 @@ public struct ChatSnapshot: Codable, Equatable, Sendable {
     public var allowsCardCreation: Bool? = nil
     /// Nil on older snapshots, which keep their original contract when retried.
     var allowsCardDeletion: Bool? = nil
+    /// Nil for snapshots with the earlier text-only contract.
+    var allowsSolveCardEdits: Bool? = nil
     public init(slides: [ChatSlide], cards: [Card], initialRefs: [ContextRef]) { self.slides = slides; self.cards = cards; self.initialRefs = initialRefs }
 }
 

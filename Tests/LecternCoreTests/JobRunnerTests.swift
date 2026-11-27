@@ -51,6 +51,57 @@ private actor RetriedAskProvider: AIProvider {
 }
 
 @Suite struct JobRunnerTests {
+    @Test func generateAndReviseCarryASolveDraftThroughNormalReview() async throws {
+        let (store, module, lecture, root) = try await setup()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            $0.slides[0].note = "Practice with discrete probability tables."
+        }
+        let first = SolveDraft(skill: "Variance", reason: "Practice mapping a distribution to its moments.",
+                               variation: "Change outcome weights.", sample: SolveCaseContent(
+                                prompt: "", fields: [], explanation: "",
+                                variance: SolveVariance(outcomes: [0, 1], weights: [1, 3])))
+        var revised = first
+        revised.sample.variance?.weights = [3, 2]
+        var invalid = first
+        invalid.sample.variance?.weights = [0, 2]
+        let generatedCards = GeneratedCards(cards: [
+            WireCard(front: "Variance exercise", back: "Compute all three values.", sourceSlides: [1], solve: first),
+            WireCard(front: "Broken case", back: "Invalid key.", sourceSlides: [1], solve: invalid),
+            WireCard(front: "Define variance.", back: "Expected squared deviation from the mean.", sourceSlides: [2])
+        ])
+        let revision = RevisedCards(cards: [
+            WireCard(front: "Revised variance exercise", back: "Compute all three values.", sourceSlides: [1], solve: revised)
+        ], rationale: "Changed the probability weights.")
+        let provider = try FakeAIProvider(responses: [
+            AIResponse(content: String(decoding: JSONEncoder().encode(generatedCards), as: UTF8.self)),
+            AIResponse(content: String(decoding: JSONEncoder().encode(revision), as: UTF8.self))
+        ])
+        let runner = JobRunner(store: store, providers: [provider])
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id)
+        await runner.waitUntilIdle()
+        let generated = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(generated.cards.count == 2)
+        #expect(generated.cards.contains { $0.solve == nil })
+        let card = try #require(generated.cards.first { $0.solve != nil })
+        #expect(card.verdict == .unreviewed)
+        #expect(card.solve?.cases.count == 1)
+        #expect(card.solve?.draft.sample.fields.count == 3)
+
+        _ = try await runner.revise(moduleID: module.id, lectureID: lecture.id, cardID: card.id, feedback: "Change the probability weights.")
+        await runner.waitUntilIdle()
+        let updated = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        let current = try #require(updated.cards.first { $0.id == card.id })
+        #expect(current.solve == card.solve)
+        #expect(current.proposal?.cards.first?.solve?.sample.variance == revised.sample.variance)
+        let requests = await provider.requests
+        #expect(requests.count == 2)
+        #expect(requests[0].prompt.contains("Practice with discrete probability tables."))
+        #expect(requests[0].pdf != nil)
+        #expect(requests[1].prompt.contains("CURRENT SOLVE DESIGN"))
+        #expect(requests[1].prompt.contains("Change the probability weights."))
+    }
+
     @Test(arguments: [ThreadContext.none, .slide, .lecture], [FlashcardContext.none, .all, .current])
     func chatIncludesOnlySelectedSlideAndFlashcardContext(slides: ThreadContext, cards: FlashcardContext) async throws {
         let (store, module, lecture, root) = try await setup()
@@ -106,14 +157,20 @@ private actor RetriedAskProvider: AIProvider {
         #expect(result.threads.first?.anchorPage == 0)
     }
 
-    @Test func replacementGeneratesFromAllSelectedSlidesAndReplacesReviewOnlyOnSuccess() async throws {
+    @Test func newSetGeneratesFromAllSelectedSlidesAndRetainsOldCards() async throws {
         let (store, module, lecture, root) = try await setup()
         defer { try? FileManager.default.removeItem(at: root) }
-        let old = Card(sourcePages: [1], front: "Old approved card", back: "Old answer", verdict: .good)
+        let oldJob = Job(kind: .generate, pages: [1, 2], state: .succeeded)
+        let old = Card(sourcePages: [1], front: "Old approved card", back: "Old answer", verdict: .good,
+                       origin: .generated(jobID: oldJob.id))
+        let draft = Card(sourcePages: [2], front: "Old edited card", back: "Edited answer",
+                         origin: .generated(jobID: oldJob.id))
         _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
-            $0.cards = [old, Card(sourcePages: [2], front: "Old edited card", back: "Edited answer")]
+            $0.jobs = [oldJob]
+            $0.cards = [old, draft]
             $0.skippedSlides = [SkippedSlide(slide: 2, reason: "Old skip")]
-            $0.viewPreferences.selectedCardID = old.id
+            $0.viewPreferences.selectedCardID = draft.id
+            $0.viewPreferences.reviewCardScope = .generation(oldJob.id)
         }
         let other = try await store.importPDF(from: root.appendingPathComponent("test.pdf"), moduleID: module.id)
         let otherCard = Card(sourcePages: [1], front: "Other lecture card", back: "Keep")
@@ -122,7 +179,7 @@ private actor RetriedAskProvider: AIProvider {
         let provider = GateProvider()
         let runner = JobRunner(store: store, providers: [provider])
         let id = try await runner.generate(moduleID: module.id, lectureID: lecture.id,
-            additionalInstructions: "Cover every vocabulary entry. Prefer definitions.", replaceExistingCards: true)
+            additionalInstructions: "Cover every vocabulary entry. Prefer definitions.", createNewSet: true)
         for _ in 0..<100 { if await provider.count() > 0 { break }; try await Task.sleep(for: .milliseconds(5)) }
         let pending = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(pending.cards.count == 2)
@@ -138,24 +195,36 @@ private actor RetriedAskProvider: AIProvider {
         var controller = LectureController(lecture: pending)
         try controller.receive(result)
         #expect(controller.lecture.cards == result.cards)
-        #expect(result.cards.map(\.front) == ["Why?"])
-        #expect(result.cards.first?.origin == .generated(jobID: id))
-        #expect(result.viewPreferences.selectedCardID == nil)
+        #expect(Array(result.cards.prefix(2)) == pending.cards)
+        let newCard = try #require(result.cards.last)
+        #expect(newCard.front == "Why?")
+        #expect(newCard.origin == .generated(jobID: id))
+        #expect(result.viewPreferences.selectedCardID == draft.id)
+        #expect(result.viewPreferences.reviewCardScope == .generation(oldJob.id))
+        let generationIDs = result.cardGenerationIDs
+        #expect(result.cards.filter { ReviewCardScope.generation(oldJob.id).contains($0, generationID: generationIDs[$0.id]) }.map(\.id) == [draft.id])
+        #expect(result.cards.filter { ReviewCardScope.generation(id).contains($0, generationID: generationIDs[$0.id]) }.map(\.id) == [newCard.id])
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) {
+            try LectureReducer.reduce(&$0, action: .setVerdict(cardID: newCard.id, .good))
+        }
+        let approved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
+        #expect(approved.cards.filter { ReviewCardScope.approved.contains($0, generationID: generationIDs[$0.id]) }.map(\.id) == [old.id, newCard.id])
+        #expect(!approved.cards.contains { ReviewCardScope.generation(id).contains($0, generationID: generationIDs[$0.id]) })
         #expect(!result.skippedSlides.contains { $0.reason == "Old skip" })
         #expect(try await store.loadLecture(moduleID: module.id, lectureID: other.id).cards == savedOther.cards)
     }
 
-    @Test func failedReplacementKeepsCardsAndRetryRetainsReplacementBehavior() async throws {
+    @Test func failedGenerationKeepsCardsAndRetryAddsOneSet() async throws {
         let (store, module, lecture, root) = try await setup()
         defer { try? FileManager.default.removeItem(at: root) }
         let old = Card(sourcePages: [1], front: "Keep until success", back: "Original")
         _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { $0.cards = [old] }
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         let provider = FakeAIProvider(responses: [AIResponse(content: "invalid JSON"),
-            AIResponse(content: #"{"cards":[{"front":"Replacement","back":"New","sourceSlides":[1],"flag":null}],"skipped":[]}"#)])
+            AIResponse(content: #"{"cards":[{"front":"Alternative","back":"New","sourceSlides":[1],"flag":null}],"skipped":[]}"#)])
         let runner = JobRunner(store: store, providers: [provider])
         let id = try await runner.generate(moduleID: module.id, lectureID: lecture.id,
-            additionalInstructions: "My retry instructions", replaceExistingCards: true)
+            additionalInstructions: "My retry instructions", createNewSet: true)
         await runner.waitUntilIdle()
         let failed = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(failed.cards == saved.cards)
@@ -164,7 +233,8 @@ private actor RetriedAskProvider: AIProvider {
         try await restarted.retry(moduleID: module.id, lectureID: lecture.id, jobID: id)
         await restarted.waitUntilIdle()
         let result = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
-        #expect(result.cards.map(\.front) == ["Replacement"])
+        #expect(result.cards.map(\.front) == [old.front, "Alternative"])
+        #expect(result.cards.last?.origin == .generated(jobID: id))
         #expect(result.jobs.last?.state == .succeeded)
         #expect(await provider.requests.last?.prompt.contains("My retry instructions") == true)
     }

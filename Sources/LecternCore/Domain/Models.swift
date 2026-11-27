@@ -72,6 +72,19 @@ public struct SlideState: Codable, Equatable, Identifiable, Sendable {
 public enum SlideFilter: String, Codable, CaseIterable, Sendable { case all, selected }
 public enum ThumbnailSize: String, Codable, CaseIterable, Sendable { case compact, regular, large }
 public enum ReviewFilter: String, Codable, CaseIterable, Sendable { case all, unreviewed, good, bad, needsAdjustment, aiFlagged, proposals }
+public enum ReviewCardScope: Codable, Hashable, Sendable {
+    case all, generation(UUID), other, approved
+
+    public func contains(_ card: Card, generationID: UUID?) -> Bool {
+        guard !card.isSuperseded else { return false }
+        switch self {
+        case .all: return true
+        case .generation(let id): return generationID == id && card.verdict != .good
+        case .other: return generationID == nil && card.verdict != .good
+        case .approved: return card.verdict == .good
+        }
+    }
+}
 public enum LectureMode: String, Codable, Sendable { case prepare, coverage, review }
 public struct ViewPreferences: Codable, Equatable, Sendable {
     public var focusedPageIndex: Int?
@@ -81,13 +94,14 @@ public struct ViewPreferences: Codable, Equatable, Sendable {
     public var filter: SlideFilter
     public var selectedCardID: UUID?
     public var reviewFilter: ReviewFilter
+    public var reviewCardScope: ReviewCardScope? = nil
     public var mode: LectureMode
     /// Coverage shows each card's back under its front.
     public var coverageShowsBacks: Bool
     public init(focusedPageIndex: Int? = nil, inspectorVisible: Bool = true, sidebarVisible: Bool = true, thumbnailSize: ThumbnailSize = .regular, filter: SlideFilter = .all, selectedCardID: UUID? = nil, reviewFilter: ReviewFilter = .all, mode: LectureMode = .prepare, coverageShowsBacks: Bool = false) {
         self.focusedPageIndex = focusedPageIndex; self.inspectorVisible = inspectorVisible; self.sidebarVisible = sidebarVisible; self.thumbnailSize = thumbnailSize; self.filter = filter; self.selectedCardID = selectedCardID; self.reviewFilter = reviewFilter; self.mode = mode; self.coverageShowsBacks = coverageShowsBacks
     }
-    private enum CodingKeys: String, CodingKey { case focusedPageIndex, inspectorVisible, sidebarVisible, thumbnailSize, filter, selectedCardID, reviewFilter, mode, coverageShowsBacks }
+    private enum CodingKeys: String, CodingKey { case focusedPageIndex, inspectorVisible, sidebarVisible, thumbnailSize, filter, selectedCardID, reviewFilter, reviewCardScope, mode, coverageShowsBacks }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         focusedPageIndex = try c.decodeIfPresent(Int.self, forKey: .focusedPageIndex)
@@ -98,6 +112,7 @@ public struct ViewPreferences: Codable, Equatable, Sendable {
         selectedCardID = try c.decodeIfPresent(UUID.self, forKey: .selectedCardID)
         let savedReviewFilter = try c.decode(ReviewFilter.self, forKey: .reviewFilter)
         reviewFilter = savedReviewFilter == .needsAdjustment ? .unreviewed : savedReviewFilter
+        reviewCardScope = try c.decodeIfPresent(ReviewCardScope.self, forKey: .reviewCardScope)
         // A mode this build doesn't know (written by a newer one) must not make the lecture unreadable.
         mode = (try? c.decode(LectureMode.self, forKey: .mode)) ?? .prepare
         // Lectures saved before Coverage existed have no key.
@@ -112,6 +127,7 @@ public struct CardRevision: Codable, Equatable, Identifiable, Sendable {
     public var back: String
     public var author: RevisionAuthor
     public var reason: String?
+    public var solve: SolveDraft? = nil
     public var at: Date
     public init(id: UUID = UUID(), front: String, back: String, author: RevisionAuthor = .user, reason: String? = nil, at: Date = Date()) { self.id = id; self.front = front; self.back = back; self.author = author; self.reason = reason; self.at = at }
 }
@@ -121,7 +137,7 @@ public struct ExportMark: Codable, Equatable, Sendable {
     public var date: Date
     public init(revisionID: UUID, date: Date = Date()) { self.revisionID = revisionID; self.date = date }
 }
-public enum CardIssueKind: String, Codable, Sendable { case importSyntax, emptySide, invalidSource, unresolvedMath }
+public enum CardIssueKind: String, Codable, Sendable { case importSyntax, emptySide, invalidSource, unresolvedMath, invalidSolve }
 public struct CardIssue: Codable, Equatable, Sendable {
     public var kind: CardIssueKind
     public var message: String
@@ -133,7 +149,10 @@ public struct CardDraft: Codable, Equatable, Sendable {
     public var sourcePages: [Int]
     public var flag: String?
     public var learningPointID: UUID? = nil
-    public init(front: String, back: String, sourcePages: [Int] = [], flag: String? = nil, learningPointID: UUID? = nil) { self.front = front; self.back = back; self.sourcePages = sourcePages; self.flag = flag; self.learningPointID = learningPointID }
+    public var solve: SolveDraft? = nil
+    public init(front: String, back: String, sourcePages: [Int] = [], flag: String? = nil, learningPointID: UUID? = nil, solve: SolveDraft? = nil) {
+        self.front = front; self.back = back; self.sourcePages = sourcePages; self.flag = flag; self.learningPointID = learningPointID; self.solve = solve
+    }
 }
 public enum ProposalState: String, Codable, Sendable { case pending, ready, failed }
 public struct Proposal: Codable, Equatable, Identifiable, Sendable {
@@ -159,12 +178,19 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
     public var history: [CardRevision]
     public var proposal: Proposal?
     public var origin: CardOrigin
+    /// Retains the set if the parent of a split card is removed with its source slides.
+    var inheritedGenerationJobID: UUID? = nil
     public var supersededBy: [UUID]?
     public var exported: ExportMark?
     /// Explicit job scope is retained so invalid model citations are never silently discarded.
     public var allowedSourcePages: [Int]?
     /// The chat learning point this card was written from.
     public var learningPointID: UUID? = nil
+    public var solve: SolveCard? = nil
+    var hasApprovedSolve: Bool? = nil
+    /// A confirmed replacement keeps the card ID and selects a new history for Study.
+    var solveStudyScheduleID: UUID? = nil
+    public var studyScheduleID: UUID? { solve == nil ? nil : solveStudyScheduleID }
     public init(id: UUID = UUID(), sourcePages: [Int] = [], front: String, back: String, verdict: CardVerdict = .unreviewed, feedback: String = "", flag: String? = nil, issue: CardIssue? = nil, mathInterpretations: [String: MathInterpretation] = [:], history: [CardRevision]? = nil, proposal: Proposal? = nil, origin: CardOrigin = .manual, supersededBy: [UUID]? = nil, exported: ExportMark? = nil, allowedSourcePages: [Int]? = nil) {
         self.id = id; self.sourcePages = sourcePages; self.front = front; self.back = back; self.verdict = verdict; self.feedback = feedback; self.flag = flag; self.issue = issue; self.mathInterpretations = mathInterpretations; self.history = history ?? [CardRevision(front: front, back: back, author: origin == .manual ? .user : .ai)]; self.proposal = proposal; self.origin = origin; self.supersededBy = supersededBy; self.exported = exported; self.allowedSourcePages = allowedSourcePages
     }
@@ -179,7 +205,41 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
         case .splitFrom: allowedSourcePages?.isEmpty != true
         }
     }
-    public var canBeApproved: Bool { (!requiresSourcePages || !sourcePages.isEmpty) && sourcePages.allSatisfy { $0 > 0 && (allowedSourcePages?.contains($0) ?? true) } && issue == nil && !front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && [front, back].allSatisfy { (try? FlashcardMathFormatter.formatForAnki($0, interpretations: mathInterpretations)) != nil } }
+    public var canBeApproved: Bool {
+        guard issue == nil, (!(requiresSourcePages || solve != nil) || !sourcePages.isEmpty),
+              sourcePages.allSatisfy({ $0 > 0 && (allowedSourcePages?.contains($0) ?? true) }),
+              !front.solveTrimmed.isEmpty, !back.solveTrimmed.isEmpty else { return false }
+        if let solve { return solve.draft.validated != nil }
+        return [front, back].allSatisfy { (try? FlashcardMathFormatter.formatForAnki($0, interpretations: mathInterpretations)) != nil }
+    }
+
+    var verifiedSolveExample: SolveCase? {
+        solve?.availableCases(excluding: []).first
+    }
+
+    mutating func setSolveDraft(_ draft: SolveDraft?) throws {
+        guard let draft else { solve = nil; return }
+        guard let validated = draft.validated else {
+            throw LectureError.invalidMetadata("The solve exercise is missing a valid question, answer key, or explanation.")
+        }
+        front = validated.sample.prompt
+        back = validated.sample.explanation
+        guard solve?.draft != validated else { return }
+        var replacement = SolveCard(draft: validated)
+        for var former in solve?.cases ?? [] {
+            if former.content.signature == validated.sample.signature {
+                // A revised key or explanation does not make the same exercise unseen.
+                var sample = replacement.cases[0]
+                sample.id = former.id
+                sample.retired = former.retired && former.content == sample.content
+                replacement.cases[0] = sample
+            } else {
+                former.retired = true
+                replacement.cases.append(former)
+            }
+        }
+        solve = replacement
+    }
 }
 public enum ThreadContext: Codable, Equatable, Hashable, Sendable { case none, slide, neighbours(Int), lecture }
 public enum FlashcardContext: String, Codable, CaseIterable, Sendable { case none, all, current }
@@ -345,10 +405,22 @@ public struct ChatEditUndo: Codable, Equatable, Sendable {
     public var mathInterpretations: [String: MathInterpretation]
     public var appliedVerdict: CardVerdict? = nil
     public var appliedMathInterpretations: [String: MathInterpretation]? = nil
+    public var solve: SolveCard? = nil
+    public var appliedSolve: SolveCard? = nil
+    var priorSolveStudyScheduleID: UUID? = nil
+    var priorSolveApproval: Bool? = nil
     public func matches(_ card: Card) -> Bool {
-        card.id == cardID && !card.isSuperseded && card.currentRevisionID == appliedRevisionID &&
+        let solveMatches: Bool
+        if card.studyScheduleID == appliedRevisionID, let current = card.solve, let appliedSolve {
+            // Background refill can append cases without changing the approved replacement.
+            solveMatches = current.draft == appliedSolve.draft && current.cases.starts(with: appliedSolve.cases)
+        } else {
+            solveMatches = card.solve == appliedSolve
+        }
+        return card.id == cardID && !card.isSuperseded && card.currentRevisionID == appliedRevisionID &&
             card.verdict == (appliedVerdict ?? (verdict == .good ? .unreviewed : verdict)) &&
-            card.mathInterpretations == (appliedMathInterpretations ?? [:])
+            card.mathInterpretations == (appliedMathInterpretations ?? [:]) &&
+            solveMatches
     }
 }
 public struct Job: Codable, Equatable, Identifiable, Sendable {
@@ -368,8 +440,6 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var baseRevisionID: UUID?
     public var prompt: String
     public var model: String
-    /// Absent on older jobs, which keep their original additive behavior.
-    public var replacesExistingCards: Bool? = nil
     public var isLectureChat: Bool? = nil
     /// True for Review chat. Nil on older jobs.
     public var allowsCardCreation: Bool? = nil
@@ -381,7 +451,7 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var chatEditUndo: [ChatEditUndo]? = nil
     public var chatEditsUndoneAt: Date? = nil
     /// Page numbering used by the immutable request snapshot.
-    var pdfLayoutRevision: UUID? = nil
+    public internal(set) var pdfLayoutRevision: UUID? = nil
     public init(id: UUID = UUID(), kind: JobKind, pages: [Int], inputHash: String = "", rulesVersion: String = "1", backend: AIBackend = .claudeCLI, state: JobState = .running, error: String? = nil, usage: AIUsage? = nil, startedAt: Date = Date(), finishedAt: Date? = nil, targetCardID: UUID? = nil, threadID: UUID? = nil, baseRevisionID: UUID? = nil, prompt: String = "", model: String = "opus") {
         self.id = id; self.kind = kind; self.pages = pages; self.inputHash = inputHash; self.rulesVersion = rulesVersion; self.backend = backend; self.state = state; self.error = error; self.usage = usage; self.startedAt = startedAt; self.finishedAt = finishedAt; self.targetCardID = targetCardID; self.threadID = threadID; self.baseRevisionID = baseRevisionID; self.prompt = prompt; self.model = model
     }

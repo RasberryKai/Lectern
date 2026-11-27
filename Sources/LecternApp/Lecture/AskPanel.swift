@@ -9,6 +9,7 @@ struct AskPanel: View {
     let page: Int
     let cardID: UUID?
     var focus: FocusState<EditorField?>.Binding
+    var offersAskActivity = false
     @State private var composerHeight: CGFloat = 76
     @State private var mentionSelection = 0
     @State private var dismissedMentionDraft: String?
@@ -21,36 +22,89 @@ struct AskPanel: View {
         return query.contains("\n") ? nil : query
     }
     private var mentions: [ChatMention] { model.chatMentions.filter { mentionQuery?.isEmpty == true || $0.label.localizedCaseInsensitiveContains(mentionQuery ?? "") } }
+    private var waitingFlashcard: AskFlashcardReview? { model.currentAskFlashcard }
+    private var waitingJobID: UUID? { waitingFlashcard == nil ? nil : model.askFlashcardJobID }
+    private var answerReady: Bool {
+        guard let waitingJobID else { return false }
+        return model.chatMessages.contains { $0.role == .assistant && $0.editJobID == waitingJobID && !$0.stopped }
+    }
+    private var visibleMessages: [ChatMessage] {
+        guard let waitingJobID else { return model.chatMessages }
+        return model.chatMessages.filter { $0.role != .assistant || $0.editJobID != waitingJobID }
+    }
+
     var body: some View {
+        Group {
+            if let tower = model.currentWaitTower {
+                let status = model.waitTowerStatus(tower)
+                WaitTowerView(round: tower.round, status: status.text, answerReady: status.ready)
+                    .accessibilityAction(.escape) { model.leaveWaitTower() }
+            } else {
+                transcript
+            }
+        }
+        .task(id: model.displayedChat.id) {
+            guard model.currentWaitTower == nil, !model.readOnly,
+                  !(model.mode == .review && model.runningGenerate != nil) else { return }
+            focus.wrappedValue = .ask
+        }
+        .onChange(of: model.currentWaitTower != nil) { _, showing in
+            if showing {
+                if focus.wrappedValue == .ask { focus.wrappedValue = nil }
+            } else if !model.readOnly, !model.app.showSettings, focus.wrappedValue == nil {
+                focus.wrappedValue = .ask
+            }
+        }
+    }
+
+    private var transcript: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 22) {
                             if model.chatMessages.isEmpty && model.runningChat == nil { emptyState }
-                            ForEach(model.chatMessages) { message in
+                            ForEach(visibleMessages) { message in
                                 ChatMessageView(model: model, message: message).id(message.id)
                                 let ended = model.pointsEnding(at: message.id)
                                 if !ended.isEmpty { ConceptEndLine(points: ended) }
+                                if let review = waitingFlashcard, review.questionID == message.id {
+                                    flashcard(review)
+                                } else if let receipt = model.askFlashcardReceipts[message.id] {
+                                    Text(receipt.summary).font(Theme.caption).foregroundStyle(Theme.quiet)
+                                } else if let receipt = model.waitTowerReceipts[message.id] {
+                                    Text(receipt).font(Theme.caption).foregroundStyle(Theme.quiet)
+                                }
                             }
-                            runningAnswer
+                            if waitingFlashcard == nil { runningAnswer }
                             errors
                             Color.clear.frame(height: 1).id("chat-end")
                         }.padding(.horizontal, 18).padding(.vertical, 18)
                     }
-                    .onChange(of: model.chatMessages.count) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
-                    .onChange(of: model.runningChat.flatMap { model.progress($0.id)?.streamedText.count }) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
+                    .onChange(of: visibleMessages.count) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
+                    .onChange(of: waitingFlashcard == nil ? model.runningChat.flatMap { model.progress($0.id)?.streamedText.count } : nil) { _, _ in
+                        proxy.scrollTo("chat-end", anchor: .bottom)
+                    }
+                    .onChange(of: waitingFlashcard?.questionID) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
                     .onChange(of: model.chatScrollTarget, initial: true) { _, target in
-                        if let target { withAnimation { proxy.scrollTo(target, anchor: .top) } }
+                        if let target { withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(target, anchor: .top) } }
                     }
                     .onChange(of: model.displayedChat.id) { _, _ in proxy.scrollTo("chat-end", anchor: .bottom) }
                 }
                 composer(maximumHeight: max(100, geometry.size.height * 0.45))
             }
         }
-        .task(id: model.displayedChat.id) {
-            guard !model.readOnly, !(model.mode == .review && model.runningGenerate != nil) else { return }
-            focus.wrappedValue = .ask
+    }
+
+    private func flashcard(_ review: AskFlashcardReview) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !answerReady {
+                let hint = model.chatWorkingHint(waitingJobID.flatMap { model.progress($0) })
+                ChatWorkingIndicator(doing: hint.doing, done: hint.done)
+            }
+            AskFlashcardView(review: review, answerReady: answerReady, reveal: model.revealAskFlashcard) { rating in
+                Task { await model.gradeAskFlashcard(rating) }
+            }
         }
     }
     private var emptyTitle: String {
@@ -124,7 +178,7 @@ struct AskPanel: View {
                     Button("Try again") { Task { await model.sendChat(retrying: failure) } }.buttonStyle(SecondaryButtonStyle())
                     if needsSettings(failure.message) { Button("Open Settings") { model.app.showSettings = true }.buttonStyle(SecondaryButtonStyle()) }
                     Button("Dismiss") { model.chatPreparationFailure = nil }.buttonStyle(.plain)
-                }.disabled(model.readOnly || model.isStartingChat || model.runningChat != nil)
+                }.disabled(model.readOnly || model.isStartingChat || model.runningChat != nil || waitingFlashcard != nil)
             }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Theme.badWash, in: RoundedRectangle(cornerRadius: 9))
         }
         ForEach(model.chatFailures) { job in
@@ -137,7 +191,7 @@ struct AskPanel: View {
                         Button("Open Settings") { model.app.showSettings = true }.buttonStyle(SecondaryButtonStyle())
                     }
                     Button("Dismiss") { model.dismissedJobIDs.insert(job.id) }.buttonStyle(.plain)
-                }.disabled(model.readOnly)
+                }.disabled(model.readOnly || waitingFlashcard != nil)
             }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Theme.badWash, in: RoundedRectangle(cornerRadius: 9))
         }
     }
@@ -152,7 +206,7 @@ struct AskPanel: View {
                 .allowsHitTesting(mentionQuery != nil)
                 .accessibilityHidden(mentionQuery == nil)
             VStack(spacing: 0) {
-                if mentionQuery == nil && !model.newChatLearningPoints.isEmpty {
+                if mentionQuery == nil && waitingFlashcard == nil && !model.newChatLearningPoints.isEmpty {
                     LearningPointDrawer(model: model, expanded: $learningPointsExpanded)
                         .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                         .zIndex(0)
@@ -187,6 +241,7 @@ struct AskPanel: View {
                 ChatComposerTextView(text: Binding(get: { model.chatDraft }, set: { model.setChatDraft($0) }), height: $composerHeight,
                                      focused: focus.wrappedValue == .ask, editable: !model.readOnly, maximumHeight: max(76, maximumHeight - 80),
                                      onFocus: { focus.wrappedValue = $0 ? .ask : nil }, onSend: send, onMenuKey: menuKey,
+                                     onFlashcardKey: model.handleAskFlashcardKey,
                                      onImages: { images in Task { await model.importChatImages(images) }; focus.wrappedValue = .ask })
                     .focused(focus, equals: .ask)
                     .frame(height: composerHeight).padding(.horizontal, 5)
@@ -204,7 +259,7 @@ struct AskPanel: View {
                         .buttonStyle(.plain).foregroundStyle(Theme.ai).help("Stop and keep the partial answer")
                 } else {
                     Button(action: send) { Image(systemName: "arrow.up").font(.system(size: 13, weight: .semibold)).frame(width: 27, height: 27).background(Theme.ai, in: Circle()).foregroundStyle(.white) }
-                        .buttonStyle(.plain).disabled((model.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.chatDraftAttachments.isEmpty) || model.readOnly || model.isStartingChat || model.isImportingChatImages).help("Send")
+                        .buttonStyle(.plain).disabled((model.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.chatDraftAttachments.isEmpty) || model.readOnly || model.isStartingChat || model.isImportingChatImages || waitingFlashcard != nil).help("Send")
                 }
             }.padding(.horizontal, 12).padding(.bottom, 9)
         }
@@ -263,7 +318,10 @@ struct AskPanel: View {
         if let at = model.chatDraft.range(of: "@", options: .backwards) { model.setChatDraft(String(model.chatDraft[..<at.lowerBound])) }
         focus.wrappedValue = .ask
     }
-    private func send() { guard model.runningChat == nil else { return }; Task { await model.sendChat() } }
+    private func send() {
+        guard model.runningChat == nil, waitingFlashcard == nil else { return }
+        Task { await model.sendChat(offersAskActivity: offersAskActivity) }
+    }
 }
 
 /// Marks where a discussion ended and what it left for the cards.
@@ -298,7 +356,7 @@ struct ChatHistoryControls: View {
                 .help("Earlier chats").popover(isPresented: $history, arrowEdge: .bottom) { historyList }
             Button { Task { await model.newChat() } } label: { Image(systemName: "square.and.pencil") }
                 .help("New chat · ⌘N").accessibilityLabel("New chat")
-                .disabled(model.readOnly || model.runningChat != nil || model.isStartingChat || model.isImportingChatImages)
+                .disabled(model.readOnly || model.runningChat != nil || model.isStartingChat || model.isImportingChatImages || model.isShowingAskActivity)
         }.buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Theme.quiet)
     }
     private var historyList: some View {
@@ -315,7 +373,7 @@ struct ChatHistoryControls: View {
                                         Text(chat.title.isEmpty ? "Untitled chat" : chat.title).font(.system(size: 12.5, weight: .medium)).lineLimit(2)
                                         Text("\(chat.updatedAt.formatted(date: .abbreviated, time: .omitted)) · \(chat.messages.count) messages").font(Theme.caption).foregroundStyle(Theme.faint)
                                     }.frame(maxWidth: .infinity, alignment: .leading)
-                                }.buttonStyle(.plain).disabled(model.runningChat != nil || model.isStartingChat || model.isImportingChatImages)
+                                }.buttonStyle(.plain).disabled(model.runningChat != nil || model.isStartingChat || model.isImportingChatImages || model.isShowingAskActivity)
                                 Button { deleting = chat.id } label: { Image(systemName: "trash").foregroundStyle(Theme.faint) }.buttonStyle(.plain).help("Delete chat").disabled(model.readOnly)
                             }
                             if deleting == chat.id {

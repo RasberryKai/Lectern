@@ -26,16 +26,21 @@ public struct StudyCard: Identifiable, Equatable, Sendable {
     public let moduleName: String
     public var card: Card
     public var memory: StudyMemoryState?
+    public var seenSolveCaseIDs: Set<UUID>
     public var id: UUID { card.id }
+    public var availableSolveCases: [SolveCase] {
+        card.solve?.availableCases(excluding: seenSolveCaseIDs) ?? []
+    }
 
     public init(moduleID: UUID, lectureID: UUID, lectureName: String, moduleName: String,
-                card: Card, memory: StudyMemoryState?) {
+                card: Card, memory: StudyMemoryState?, seenSolveCaseIDs: Set<UUID> = []) {
         self.moduleID = moduleID
         self.lectureID = lectureID
         self.lectureName = lectureName
         self.moduleName = moduleName
         self.card = card
         self.memory = memory
+        self.seenSolveCaseIDs = seenSolveCaseIDs
     }
 
     public func isRelated(to other: StudyCard) -> Bool {
@@ -51,21 +56,35 @@ public struct StudyCard: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct StudySolveResponse: Codable, Equatable, Sendable {
+    public let presentationID: UUID
+    public let caseID: UUID
+    public let answers: [SolveAnswer]
+
+    public init(presentationID: UUID, caseID: UUID, answers: [SolveAnswer]) {
+        self.presentationID = presentationID
+        self.caseID = caseID
+        self.answers = answers
+    }
+}
+
 public struct StudyDeck: Identifiable, Equatable, Sendable {
     public let module: Module
     public let lectures: [Lecture]
     public let memory: [UUID: StudyMemoryState]
     public let overrides: StudyOverrides
     public let introducedToday: Int
+    public let seenSolveCases: [UUID: Set<UUID>]
     public var id: UUID { module.id }
 
     public init(module: Module, lectures: [Lecture], memory: [UUID: StudyMemoryState],
-                overrides: StudyOverrides, introducedToday: Int) {
+                overrides: StudyOverrides, introducedToday: Int, seenSolveCases: [UUID: Set<UUID>] = [:]) {
         self.module = module
         self.lectures = lectures
         self.memory = memory
         self.overrides = overrides
         self.introducedToday = introducedToday
+        self.seenSolveCases = seenSolveCases
     }
 
     public var approvedCards: [StudyCard] {
@@ -73,13 +92,54 @@ public struct StudyDeck: Identifiable, Equatable, Sendable {
         return lectures.filter { !$0.isArchived && $0.moduleID == id }.flatMap { lecture in
             lecture.cards.filter { $0.verdict == .good && !$0.isSuperseded }.map { card in
                 StudyCard(moduleID: id, lectureID: lecture.id, lectureName: lecture.name, moduleName: module.name,
-                          card: card, memory: memory[card.id])
+                          card: card, memory: memory[card.id], seenSolveCaseIDs: seenSolveCases[card.id, default: []])
             }
         }
     }
 
     public var approvedCount: Int { approvedCards.count }
     public var seenCount: Int { approvedCards.filter { $0.memory != nil }.count }
+
+    func askFlashcard(lectureID: UUID, sourcePage: Int?, now: Date, timeZone: TimeZone,
+                      permitsNewCard: () throws -> Bool) rethrows -> StudyCard? {
+        let cards = approvedCards.filter { $0.card.solve == nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+
+        func slideDistance(_ card: StudyCard) -> Int {
+            guard card.lectureID == lectureID, let sourcePage, sourcePage > 0 else { return .max }
+            return card.card.sourcePages.lazy.filter { $0 > 0 }.map { abs($0 - sourcePage) }.min() ?? .max
+        }
+
+        let reviewed = cards.lazy.compactMap { card -> (card: StudyCard, memory: StudyMemoryState)? in
+            card.memory.map { (card, $0) }
+        }
+        let due = reviewed.filter { $0.memory.due <= now }.min { lhs, rhs in
+            let leftLocal = lhs.card.lectureID == lectureID
+            let rightLocal = rhs.card.lectureID == lectureID
+            if leftLocal != rightLocal { return leftLocal }
+            if leftLocal && calendar.isDate(lhs.memory.due, inSameDayAs: rhs.memory.due) {
+                let leftDistance = slideDistance(lhs.card)
+                let rightDistance = slideDistance(rhs.card)
+                if leftDistance != rightDistance { return leftDistance < rightDistance }
+            }
+            return (lhs.memory.due, lhs.card.id.uuidString) < (rhs.memory.due, rhs.card.id.uuidString)
+        }
+        if let due { return due.card }
+
+        let unseen = cards.lazy.filter { $0.memory == nil }.min { lhs, rhs in
+            let leftLocal = lhs.lectureID == lectureID
+            let rightLocal = rhs.lectureID == lectureID
+            if leftLocal != rightLocal { return leftLocal }
+            return (slideDistance(lhs), lhs.id.uuidString) < (slideDistance(rhs), rhs.id.uuidString)
+        }
+        if let unseen, try permitsNewCard() { return unseen }
+
+        return reviewed.min { lhs, rhs in
+            (lhs.memory.lastReview, lhs.memory.due, lhs.card.id.uuidString) <
+                (rhs.memory.lastReview, rhs.memory.due, rhs.card.id.uuidString)
+        }?.card
+    }
 
     public func neededPerDay(now: Date = Date(), timeZone: TimeZone = .current) -> Int? {
         guard let exam = module.examDate else { return nil }
@@ -101,6 +161,7 @@ public struct StudyPlan: Sendable {
     public let approvedCount: Int
     public let totalUnseen: Int
     public let dueRemaining: Int
+    public let deferredSolveCount: Int
 }
 
 public struct StudyCatalog: Equatable, Sendable {
@@ -136,7 +197,15 @@ public struct StudyCatalog: Equatable, Sendable {
                      now: Date = Date()) -> StudyPlan {
         let options = options ?? configuration(moduleID: scope.moduleID).session
         let scopedDecks = decks.filter { scope.moduleID == nil || $0.id == scope.moduleID }
-        let scoped = scopedDecks.flatMap(\.approvedCards).filter(scope.includes)
+        let approved = scopedDecks.flatMap(\.approvedCards).filter { entry in
+            guard scope.includes(entry) else { return false }
+            switch options.cardTypes {
+            case .all: return true
+            case .flip: return entry.card.solve == nil
+            case .solve: return entry.card.solve != nil
+            }
+        }
+        let scoped = approved.filter { $0.card.solve == nil || !$0.availableSolveCases.isEmpty }
         let due = scoped.filter { $0.memory.map { $0.due <= now } ?? false }
             .sorted { ($0.memory?.due ?? now, $0.id.uuidString) < ($1.memory?.due ?? now, $1.id.uuidString) }
         let future = scoped.filter { $0.memory.map { $0.due > now } ?? false }
@@ -149,17 +218,18 @@ public struct StudyCatalog: Equatable, Sendable {
             let limit = deck.overrides.newCardLimit ?? preferences.defaults.newCardLimit
             return (deck.id, Self.remainingNewCards(limit: limit, introduced: deck.introducedToday, extra: extraNewPerModule))
         })
-        let limit = options.cardTypes == .solve ? 0 : min(overall, max(0, limitNewInSession ?? Int.max))
+        let limit = min(overall, max(0, limitNewInSession ?? Int.max))
         let new = limit > 0 ? Self.orderNew(unseen.filter { budgets[$0.moduleID, default: 0] > 0 },
                                             by: options.newCardOrder, seed: shuffleSeed) : []
-        let ordered = Self.order(due: options.cardTypes == .solve ? [] : due,
+        let ordered = Self.order(due: due,
                                  new: new,
-                                 future: includeFuture && options.cardTypes != .solve ? future : [],
+                                 future: includeFuture ? future : [],
                                  newLimit: limit, moduleBudgets: budgets, options: options)
         let count = options.estimatedCount(for: ordered.count)
         let coveredDue = ordered.prefix(count).filter { $0.memory.map { $0.due <= now } ?? false }.count
         return StudyPlan(cards: ordered, dueCount: due.count, startingCount: count, nextDue: future.first?.memory?.due,
-                         approvedCount: scoped.count, totalUnseen: unseen.count, dueRemaining: due.count - coveredDue)
+                         approvedCount: approved.count, totalUnseen: unseen.count, dueRemaining: due.count - coveredDue,
+                         deferredSolveCount: approved.count - scoped.count)
     }
 
     private static func orderNew(_ cards: [StudyCard], by order: StudyNewCardOrder, seed: UInt64) -> [StudyCard] {
