@@ -26,7 +26,7 @@ struct StudyJournalEvent: Codable {
         case grade(rating: StudyRating, answeringTime: TimeInterval, configuration: StudyConfiguration)
         case undo(gradeID: UUID)
         case reschedule(configuration: StudyConfiguration, cardIDs: [UUID], solveIDs: Set<UUID>? = nil)
-        case present(caseID: UUID)
+        case present(caseID: UUID, reusable: Bool? = nil)
     }
 
     static let modelVersion = "FSRS-6/Py-FSRS-6.3.2"
@@ -78,8 +78,8 @@ struct StudyJournalState: Codable {
             throw LibraryError.invalid("A study event ID was used more than once.")
         }
         switch (event.source, event.payload) {
-        case (.presentation, .present(let caseID)):
-            guard let cardID = event.cardID, seenSolveCases?[cardID]?.contains(caseID) != true else {
+        case (.presentation, .present(let caseID, let reusable)):
+            guard let cardID = event.cardID, reusable == true || seenSolveCases?[cardID]?.contains(caseID) != true else {
                 throw LibraryError.invalid("This solve case has already been presented.")
             }
             if presentations == nil { presentations = [:]; seenSolveCases = [:] }

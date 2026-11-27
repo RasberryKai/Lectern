@@ -1,3 +1,4 @@
+import AppKit
 import LecternCore
 import SwiftUI
 
@@ -204,11 +205,16 @@ private struct SolveCardDetail: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Solve sample").eyebrow()
-                SolveExerciseView(content: solve.draft.sample, canReveal: !model.testMode, canRetry: true) { _ in
-                    if model.answerHidden { model.revealAnswer() }
+                if solve.draft.sample.checkedContent != nil {
+                    SolveExerciseView(content: solve.draft.sample, canReveal: !model.testMode, canRetry: true) { _ in
+                        if model.answerHidden { model.revealAnswer() }
+                    }
+                    .id(solve.cases.first?.id ?? card.id)
+                    .id(model.testMode)
+                } else {
+                    Text("This exercise needs a valid answer key.").foregroundStyle(Theme.bad)
+                    if model.answerHidden { VerdictBar(model: model, solve: true) }
                 }
-                .id(solve.cases.first?.id ?? card.id)
-                .id(model.testMode)
                 if !model.answerHidden {
                     Divider()
                     draftDetails(solve.draft)
@@ -232,7 +238,7 @@ private struct SolveCardDetail: View {
             .panel(padding: 20)
             if !model.answerHidden {
                 if let proposal = card.proposal { ProposalCard(model: model, card: card, proposal: proposal) }
-                if card.verdict == .good { casePool }
+                if card.verdict == .good && !solve.draft.reusesSample { casePool }
             }
         }
         .sheet(isPresented: $showRequest) {
@@ -254,8 +260,10 @@ private struct SolveCardDetail: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(draft.skill).font(Theme.heading(16, weight: .semibold))
             Text(draft.reason).font(Theme.body)
-            Text("What varies").eyebrow().padding(.top, 3)
-            Text(draft.variation).font(Theme.body).foregroundStyle(Theme.quiet)
+            if !draft.reusesSample {
+                Text("What varies").eyebrow().padding(.top, 3)
+                Text(draft.variation).font(Theme.body).foregroundStyle(Theme.quiet)
+            }
         }
     }
 
@@ -617,7 +625,9 @@ private struct ProposalCard: View {
                     if let solve = draft.solve {
                         Text(solve.skill).font(Theme.heading(16, weight: .semibold))
                         Text(solve.reason).font(Theme.body)
-                        Text(solve.variation).font(Theme.small).foregroundStyle(Theme.quiet)
+                        if !solve.reusesSample {
+                            Text(solve.variation).font(Theme.small).foregroundStyle(Theme.quiet)
+                        }
                         SolveExerciseView(content: solve.sample, canReveal: true, canRetry: true)
                             .id(proposal.id)
                     } else {
@@ -730,23 +740,37 @@ struct DiffText: View {
 
 struct ReviewSourcePane: View {
     let model: LectureWindowModel
+    @State private var scrollerStyle = NSScroller.preferredScrollerStyle
 
     var body: some View {
-        ScrollView {
-            Group {
-                if let card = model.selectedCard {
-                    if model.answerHidden {
-                        Text("Show the answer to see its source slides.").foregroundStyle(Theme.quiet)
+        GeometryReader { viewport in
+            // A legacy scroller takes up width only on overflow. Reserve that width
+            // so resizing a tall slide cannot make the scroller toggle repeatedly.
+            let gutter = scrollerStyle == .legacy
+                ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
+                : 0
+
+            ScrollView {
+                Group {
+                    if let card = model.selectedCard {
+                        if model.answerHidden {
+                            Text("Show the answer to see its source slides.").foregroundStyle(Theme.quiet)
+                        } else {
+                            ReviewSourceSection(model: model, card: card)
+                        }
                     } else {
-                        ReviewSourceSection(model: model, card: card)
+                        Text("Select a card to see its source slides.").foregroundStyle(Theme.quiet)
                     }
-                } else {
-                    Text("Select a card to see its source slides.").foregroundStyle(Theme.quiet)
                 }
+                .font(Theme.body)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .frame(width: max(0, viewport.size.width - gutter), alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .font(Theme.body)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
+            scrollerStyle = NSScroller.preferredScrollerStyle
         }
     }
 }

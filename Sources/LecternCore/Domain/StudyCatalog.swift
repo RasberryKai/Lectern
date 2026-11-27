@@ -29,7 +29,7 @@ public struct StudyCard: Identifiable, Equatable, Sendable {
     public var seenSolveCaseIDs: Set<UUID>
     public var id: UUID { card.id }
     public var availableSolveCases: [SolveCase] {
-        card.solve?.activeCases.filter { !seenSolveCaseIDs.contains($0.id) && $0.content.checkedContent != nil } ?? []
+        card.solve?.availableCases(excluding: seenSolveCaseIDs) ?? []
     }
 
     public init(moduleID: UUID, lectureID: UUID, lectureName: String, moduleName: String,

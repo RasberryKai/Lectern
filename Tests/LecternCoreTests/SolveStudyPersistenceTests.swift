@@ -108,4 +108,96 @@ struct SolveStudyPersistenceTests {
         #expect(exported.text.contains("Var(X)"))
         #expect(exported.text.contains("4.0"))
     }
+
+    @Test(arguments: [false, true])
+    func orderingCardsReuseTheSampleAcrossSavedAttempts(withLegacyHistory: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("Lectern-Ordering-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LibraryStore(rootURL: root)
+        let module = try await store.createModule(name: "Accounting")
+        let pdf = root.appendingPathComponent("Closing.pdf")
+        var mediaBox = CGRect(x: 0, y: 0, width: 300, height: 200)
+        let context = try #require(CGContext(pdf as CFURL, mediaBox: &mediaBox, nil))
+        context.beginPDFPage(nil)
+        context.endPDFPage()
+        context.closePDF()
+        let lecture = try await store.importPDF(from: pdf, moduleID: module.id)
+        let sequence = ["Adjust", "Close", "Verify"]
+        let sample = SolveCaseContent(prompt: "Put the closing stages in order.", fields: [
+            SolveField(prompt: "Closing stages", order: SolveOrder(items: sequence, sequences: [sequence]))
+        ], explanation: "Adjust the balances, close temporary accounts, then verify the post-closing balances.")
+        let draft = SolveDraft(skill: "Closing sequence", reason: "Recall the steps", variation: "Shuffle the steps", sample: sample)
+        var variant = sample
+        variant.prompt = "Reorder the month-end closing stages."
+        let legacyVariant = SolveCase(content: variant)
+        var solve = SolveCard(draft: draft)
+        let sampleCase = try #require(solve.cases.first)
+        if withLegacyHistory { solve.cases.append(legacyVariant) }
+        var orderingCard = Card(sourcePages: [1], front: sample.prompt, back: sample.explanation, verdict: .good)
+        orderingCard.solve = solve
+        let card = orderingCard
+        _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { $0.cards = [card] }
+
+        let at = Date(timeIntervalSince1970: 1_767_312_000)
+        let directory = store.moduleDirectory(module.id)
+        let snapshot = directory.appendingPathComponent(StudyJournal.snapshotName)
+        if withLegacyHistory {
+            var journal = try StudyJournal(directory: directory)
+            try journal.append(StudyJournalEvent(
+                id: UUID(), cardID: card.id, at: at, studyDay: StudyCatalog.studyDay(at: at, timeZone: .current),
+                source: .presentation, payload: .present(caseID: sampleCase.id)
+            ))
+            try FileManager.default.removeItem(at: snapshot)
+        }
+
+        let catalog = try await store.studyCatalog(now: at)
+        let entry = try #require(catalog.plan(now: at).cards.first)
+        #expect(entry.seenSolveCaseIDs.contains(sampleCase.id) == withLegacyHistory)
+        #expect(entry.availableSolveCases.map(\.id) == [sampleCase.id])
+        #expect(try await store.solveRefillCandidate(entry) == nil)
+        #expect(try await store.appendSolveCases([variant], to: entry) == 0)
+
+        let firstID = UUID()
+        #expect(try await store.presentSolveCase(entry, presentationID: firstID, now: at) == sampleCase)
+        #expect(try await store.presentSolveCase(entry, presentationID: firstID, now: at) == sampleCase)
+        let firstResponse = StudySolveResponse(presentationID: firstID, caseID: sampleCase.id, answers: [.order(sequence)])
+        let firstGrade = try await store.gradeStudyCard(entry, rating: .again, eventID: UUID(), now: at,
+                                                     answeringTime: 1, permitEarly: false, extraNewPerModule: 0,
+                                                     solveResponse: firstResponse)
+        let due = firstGrade.due
+        let review = try #require(try await store.studyCatalog(now: due).plan(now: due).cards.first)
+        let secondID = UUID()
+        #expect(try await store.presentSolveCase(review, presentationID: secondID, now: due) == sampleCase)
+        let secondResponse = StudySolveResponse(presentationID: secondID, caseID: sampleCase.id, answers: [.order(sequence)])
+        let gradeID = UUID()
+        let secondGrade = try await store.gradeStudyCard(review, rating: .good, eventID: gradeID, now: due,
+                                                       answeringTime: 1, permitEarly: false, extraNewPerModule: 0,
+                                                       solveResponse: secondResponse)
+        try FileManager.default.removeItem(at: snapshot)
+
+        let reopened = LibraryStore(rootURL: root)
+        let replayed = try #require(try await reopened.studyCatalog(now: due).decks.first?.approvedCards.first)
+        #expect(replayed.memory == secondGrade)
+        #expect(replayed.seenSolveCaseIDs == [sampleCase.id])
+        #expect(try await reopened.presentSolveCase(review, presentationID: secondID, now: due) == sampleCase)
+        #expect(try await reopened.gradeStudyCard(review, rating: .good, eventID: gradeID, now: due,
+                                                answeringTime: 1, permitEarly: false, extraNewPerModule: 0,
+                                                solveResponse: secondResponse) == secondGrade)
+        await #expect(throws: LibraryError.self) {
+            try await reopened.gradeStudyCard(replayed, rating: .again, eventID: UUID(), now: due,
+                                             answeringTime: 1, permitEarly: true, extraNewPerModule: 0,
+                                             solveResponse: secondResponse)
+        }
+        try await reopened.undoStudyGrade(moduleID: module.id, eventID: gradeID)
+        let correctedGrade = try await reopened.gradeStudyCard(review, rating: .again, eventID: UUID(), now: due,
+                                                              answeringTime: 1, permitEarly: false, extraNewPerModule: 0,
+                                                              solveResponse: secondResponse)
+        #expect(correctedGrade.reps == 2)
+
+        let retired = try await reopened.retireSolveCase(review, caseID: sampleCase.id)
+        #expect(retired.solve?.activeCases.map(\.id) == (withLegacyHistory ? [legacyVariant.id] : []))
+        let deferred = try await reopened.studyCatalog(now: correctedGrade.due).plan(now: correctedGrade.due)
+        #expect(deferred.cards.isEmpty)
+        #expect(deferred.deferredSolveCount == 1)
+    }
 }

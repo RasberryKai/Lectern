@@ -131,7 +131,7 @@ extension LibraryStore {
         }
     }
 
-    /// A case is spent once shown, even when the learner leaves without a grade.
+    /// Presentation spends a generated case even when the learner leaves without a grade.
     public func presentSolveCase(_ entry: StudyCard, presentationID: UUID, now: Date = Date(),
                                  timeZone: TimeZone = .current) throws -> SolveCase? {
         try locked {
@@ -149,12 +149,10 @@ extension LibraryStore {
                 throw LibraryError.invalid("This card's schedule changed. Refresh the session before studying it.")
             }
             let seen = journal.state.seenSolveCases?[entry.id] ?? []
-            guard let exercise = solve.activeCases.first(where: {
-                !seen.contains($0.id) && $0.content.checkedContent != nil
-            }) else { return nil }
+            guard let exercise = solve.availableCases(excluding: seen).first else { return nil }
             try journal.append(StudyJournalEvent(
                 id: presentationID, cardID: entry.id, at: now, studyDay: StudyCatalog.studyDay(at: now, timeZone: timeZone),
-                source: .presentation, payload: .present(caseID: exercise.id)
+                source: .presentation, payload: .present(caseID: exercise.id, reusable: solve.draft.reusesSample ? true : nil)
             ))
             return exercise
         }
@@ -180,7 +178,7 @@ extension LibraryStore {
             let lecture = try readLecture(entry.moduleID, entry.lectureID)
             guard let index = try? Self.studyCardIndex(entry, in: lecture, verdict: .good) else { return nil }
             let card = lecture.cards[index]
-            guard card.solve?.draft.validated != nil else { return nil }
+            guard let draft = card.solve?.draft, !draft.reusesSample, draft.validated != nil else { return nil }
             let journal = try StudyJournal(directory: moduleDirectory(entry.moduleID))
             return StudyCard(moduleID: entry.moduleID, lectureID: entry.lectureID, lectureName: lecture.name,
                              moduleName: module.name, card: card, memory: journal.state.memory[entry.id],
@@ -192,7 +190,7 @@ extension LibraryStore {
     public func appendSolveCases(_ contents: [SolveCaseContent], to entry: StudyCard) throws -> Int {
         try transaction(moduleID: entry.moduleID, lectureID: entry.lectureID) { lecture in
             guard let index = try? Self.studyCardIndex(entry, in: lecture, verdict: .good),
-                  var solve = lecture.cards[index].solve else { return 0 }
+                  var solve = lecture.cards[index].solve, !solve.draft.reusesSample else { return 0 }
             let added = solve.append(contents)
             lecture.cards[index].solve = solve
             return added

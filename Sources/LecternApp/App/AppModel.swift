@@ -289,7 +289,7 @@ final class AppModel {
 
     func prepareSolveCases(for entry: StudyCard, requested: Bool = false, checkLatest: Bool = false) {
         let key = SolveRefillKey(entry)
-        guard entry.card.solve != nil, solveRefillTasks[key] == nil else { return }
+        guard let solve = entry.card.solve, !solve.draft.reusesSample, solveRefillTasks[key] == nil else { return }
         if !requested {
             guard checkLatest || entry.availableSolveCases.count < SolveCard.refillThreshold,
                   solveRefillFailures[key].map({ Date().timeIntervalSince($0.date) >= 900 }) != false else { return }

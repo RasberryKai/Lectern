@@ -170,7 +170,7 @@ struct StudySessionView: View {
                 SolveExerciseView(content: exercise.content, answers: session.currentSolveAnswers) { answers in
                     session.checkSolve(answers: answers)
                 }
-                .id(exercise.id)
+                .id(session.turnID)
                 .disabled(session.isBusy)
                 if session.revealed {
                     HStack(spacing: 12) {
@@ -319,8 +319,10 @@ struct StudySessionView: View {
     private var cardTools: some View {
         HStack(spacing: 10) {
             if let exercise = session.currentSolveCase {
-                Button("Remove case") { caseToRemove = exercise.id }
-                    .buttonStyle(.plain).font(Theme.small).foregroundStyle(Theme.quiet)
+                if session.current?.card.solve?.draft.reusesSample != true {
+                    Button("Remove case") { caseToRemove = exercise.id }
+                        .buttonStyle(.plain).font(Theme.small).foregroundStyle(Theme.quiet)
+                }
             } else {
                 toolButton("Edit", key: "E", action: session.beginEdit)
             }

@@ -194,7 +194,7 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
     }
 
     var verifiedSolveExample: SolveCase? {
-        solve?.cases.first { !$0.retired && $0.content.checkedContent != nil }
+        solve?.availableCases(excluding: []).first
     }
 
     mutating func setSolveDraft(_ draft: SolveDraft?) throws {

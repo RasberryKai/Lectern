@@ -75,6 +75,31 @@ public struct SolveChoice: Codable, Equatable, Sendable {
 public struct SolveOrder: Codable, Equatable, Sendable {
     public var items: [String]
     public var sequences: [[String]]
+
+    public func shuffledIncorrectly() -> [String]? {
+        let accepted = Set(sequences)
+        guard hasIncorrectSequence(accepted) else { return nil }
+        var shuffled = items.shuffled()
+
+        // Visit permutations in the shuffled item order. Stop at the first one outside the key.
+        func findIncorrectSequence(from index: Int) -> [String]? {
+            if index == shuffled.count { return accepted.contains(shuffled) ? nil : shuffled }
+            for candidate in index..<shuffled.count {
+                shuffled.swapAt(index, candidate)
+                if let result = findIncorrectSequence(from: index + 1) { return result }
+                shuffled.swapAt(index, candidate)
+            }
+            return nil
+        }
+
+        return findIncorrectSequence(from: 0)
+    }
+
+    fileprivate func hasIncorrectSequence(_ accepted: Set<[String]>) -> Bool {
+        // Valid Order fields have at most twelve distinct items, so the factorial fits in Int.
+        guard (2...12).contains(items.count) else { return false }
+        return accepted.count < (2...items.count).reduce(1, *)
+    }
 }
 
 public struct SolveGrid: Codable, Equatable, Sendable {
@@ -169,8 +194,13 @@ public struct SolveDraft: Codable, Equatable, Sendable {
     public var variation: String
     public var sample: SolveCaseContent
 
+    public var reusesSample: Bool {
+        sample.variance == nil && !sample.fields.isEmpty && sample.fields.allSatisfy { $0.order != nil }
+    }
+
     var validated: Self? {
-        guard [skill, reason, variation].allSatisfy({ !$0.solveTrimmed.isEmpty }),
+        guard !skill.solveTrimmed.isEmpty, !reason.solveTrimmed.isEmpty,
+              reusesSample || !variation.solveTrimmed.isEmpty,
               let sample = sample.checkedContent else { return nil }
         var draft = self
         draft.sample = sample
@@ -191,6 +221,14 @@ public struct SolveCard: Codable, Equatable, Sendable {
     }
 
     public var activeCases: [SolveCase] { cases.filter { !$0.retired } }
+
+    func availableCases(excluding seenCaseIDs: Set<UUID>) -> [SolveCase] {
+        if draft.reusesSample {
+            guard let sample = cases.first, !sample.retired, sample.content.checkedContent != nil else { return [] }
+            return [sample]
+        }
+        return activeCases.filter { !seenCaseIDs.contains($0.id) && $0.content.checkedContent != nil }
+    }
 
     /// Retired content stays in the deduplication set so refill cannot bring it back.
     mutating func append(_ contents: [SolveCaseContent]) -> Int {
@@ -253,7 +291,7 @@ private extension SolveField {
         }
         if let order {
             return (2...12).contains(order.items.count) && order.items.solveUnique &&
-                !order.sequences.isEmpty && order.sequences.allSatisfy {
+                !order.sequences.isEmpty && order.hasIncorrectSequence(Set(order.sequences)) && order.sequences.allSatisfy {
                     $0.count == order.items.count && Set($0) == Set(order.items)
                 }
         }

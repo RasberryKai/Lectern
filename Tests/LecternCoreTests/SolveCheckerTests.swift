@@ -149,6 +149,20 @@ import Testing
         #expect(check(field, answer: .order(["A", "A", "B"])).status == .invalid)
     }
 
+    @Test func orderingStartsOutsideEveryAcceptedSequence() {
+        let items = ["A", "B", "C"]
+        let accepted = [["A", "B", "C"], ["A", "C", "B"], ["B", "A", "C"], ["B", "C", "A"], ["C", "A", "B"]]
+        var order = SolveOrder(items: items, sequences: accepted)
+        for _ in 0..<30 {
+            #expect(order.shuffledIncorrectly() == ["C", "B", "A"])
+        }
+        order.sequences.append(["C", "B", "A"])
+        #expect(order.shuffledIncorrectly() == nil)
+        let sample = SolveCaseContent(prompt: "Arrange the items.", fields: [SolveField(prompt: "Order", order: order)],
+                                      explanation: "Every order is accepted.", variance: nil)
+        #expect(sample.checkedContent == nil)
+    }
+
     @Test func unorderedGridAssignsFullRowsAndCountsDuplicatesOnceEach() {
         func row(_ labels: [String], _ amount: String) -> [SolveInput] {
             [.init(kind: .option, answers: labels), .init(kind: .number, answers: [amount])]

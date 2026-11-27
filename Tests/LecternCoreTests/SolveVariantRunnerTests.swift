@@ -3,6 +3,21 @@ import Testing
 @testable import LecternCore
 
 @Suite struct SolveVariantRunnerTests {
+    @Test func orderingDraftsDoNotRequestVariants() async throws {
+        let items = ["Identify the contract", "Identify performance obligations"]
+        let sample = SolveCaseContent(prompt: "Arrange the steps.", fields: [
+            SolveField(prompt: "Order", order: SolveOrder(items: items, sequences: [items]))
+        ], explanation: "Start by identifying the contract.", variance: nil)
+        let draft = SolveDraft(skill: "Recall the workflow", reason: "Arrange the steps", variation: "", sample: sample)
+        #expect(draft.validated != nil)
+        let provider = FakeAIProvider(responses: [])
+        let runner = JobRunner(store: LibraryStore(rootURL: FileManager.default.temporaryDirectory), providers: [provider])
+        let cases = try await runner.prepareSolveVariants(draft: draft, existingCases: [], count: 4,
+                                                          backend: .claudeCLI, model: "opus")
+        #expect(cases.isEmpty)
+        #expect(await provider.requests.isEmpty)
+    }
+
     @Test func variantKeysNeedAgreementFromAnIndependentSolve() async throws {
         let sample = exercise("Bag A has two red balls and two blue balls. Find the probability of red.", key: "1/2")
         let repeated = exercise(sample.prompt, key: "9")

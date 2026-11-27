@@ -390,7 +390,7 @@ struct SolveExerciseView: View {
             }
             self.answers = answers ?? content.fields.map { field in
                 if field.choice != nil { return .choice([], none: false) }
-                if let order = field.order { return .order(order.items.shuffled()) }
+                if let order = field.order { return .order(order.shuffledIncorrectly() ?? []) }
                 if let grid = field.grid {
                     return .grid(grid.rows.map { $0.map { _ in "" } })
                 }

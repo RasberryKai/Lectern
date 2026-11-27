@@ -8,7 +8,7 @@ extension JobRunner {
                                      backend: AIBackend, model: String, sourceContext: String = "",
                                      moduleID: UUID? = nil, lectureID: UUID? = nil, sourcePages: [Int] = [],
                                      isStillApproved: (@Sendable () async throws -> Bool)? = nil) async throws -> [SolveCaseContent] {
-        guard count > 0, let draft = draft.validated, draft.sample.variance == nil else { return [] }
+        guard count > 0, !draft.reusesSample, let draft = draft.validated, draft.sample.variance == nil else { return [] }
         guard let provider = providers[backend] else { throw AIError.configuration("Provider unavailable.") }
         try await acquireSolveVariantSlot()
         defer { solveVariantSlotBusy = false; schedule() }
