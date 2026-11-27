@@ -32,6 +32,28 @@ extension LibraryStore {
         }
     }
 
+    public func askFlashcard(moduleID: UUID, lectureID: UUID, sourcePage: Int?,
+                             now: Date = Date(), timeZone: TimeZone = .current) throws -> StudyCard? {
+        try locked {
+            let module = try moduleUnlocked(moduleID)
+            guard !module.isArchived else { return nil }
+            let journal = try StudyJournal(directory: moduleDirectory(moduleID))
+            let preferences = try studyPreferencesUnlocked()
+            let overrides = try studyOverridesUnlocked(in: moduleID)
+            let configuration = overrides.applying(to: preferences.defaults)
+            try configuration.validated()
+            let today = StudyCatalog.studyDay(at: now, timeZone: timeZone)
+            let deck = StudyDeck(module: module, lectures: try lectureListUnlocked(in: module),
+                                 memory: journal.state.memory, overrides: overrides,
+                                 introducedToday: journal.state.introductions[today, default: 0])
+            return try deck.askFlashcard(lectureID: lectureID, sourcePage: sourcePage, now: now, timeZone: timeZone) {
+                try studyIntroductionBlockedReason(moduleID: moduleID, today: today, introducedHere: deck.introducedToday,
+                                                   moduleLimit: configuration.newCardLimit,
+                                                   overallLimit: preferences.overallNewLimit, extra: 0) == nil
+            }
+        }
+    }
+
     public func saveStudyPreferences(_ preferences: StudyPreferences) throws {
         try locked {
             try preferences.validated()
@@ -93,11 +115,11 @@ extension LibraryStore {
             let preferences = try studyPreferencesUnlocked()
             let configuration = try studyOverridesUnlocked(in: entry.moduleID).applying(to: preferences.defaults)
             let today = StudyCatalog.studyDay(at: now, timeZone: timeZone)
-            if previous == nil {
-                try checkStudyIntroduction(moduleID: entry.moduleID, today: today,
-                                           introducedHere: journal.state.introductions[today, default: 0],
-                                           moduleLimit: configuration.newCardLimit, overallLimit: preferences.overallNewLimit,
-                                           extra: extraNewPerModule)
+            if previous == nil, let reason = try studyIntroductionBlockedReason(
+                moduleID: entry.moduleID, today: today, introducedHere: journal.state.introductions[today, default: 0],
+                moduleLimit: configuration.newCardLimit, overallLimit: preferences.overallNewLimit, extra: extraNewPerModule
+            ) {
+                throw LibraryError.invalid(reason)
             }
             try journal.append(StudyJournalEvent(
                 id: eventID, cardID: entry.id, at: now, studyDay: today, source: .study,
@@ -271,22 +293,24 @@ extension LibraryStore {
         return index
     }
 
-    private func checkStudyIntroduction(
+    private func studyIntroductionBlockedReason(
         moduleID: UUID, today: String, introducedHere: Int, moduleLimit: Int, overallLimit: Int?, extra: Int
-    ) throws {
+    ) throws -> String? {
         guard StudyCatalog.remainingNewCards(limit: moduleLimit, introduced: introducedHere, extra: extra) > 0 else {
-            throw LibraryError.invalid("This module has reached today's new card limit.")
+            return "This module has reached today's new card limit."
         }
-        if let overallLimit {
-            var total = introducedHere
-            for other in try modulesUnlocked() where other.id != moduleID {
-                let journal = try StudyJournal(directory: moduleDirectory(other.id))
-                total += journal.state.introductions[today, default: 0]
-            }
-            guard StudyCatalog.remainingNewCards(limit: overallLimit, introduced: total, extra: extra) > 0 else {
-                throw LibraryError.invalid("You have reached today's overall new card limit.")
-            }
+        guard let overallLimit else { return nil }
+
+        let overallLimitMessage = "You have reached today's overall new card limit."
+        var remaining = StudyCatalog.remainingNewCards(limit: overallLimit, introduced: introducedHere, extra: extra)
+        guard remaining > 0 else { return overallLimitMessage }
+        for id in try moduleIDsUnlocked() where id != moduleID {
+            // Overall usage includes archived modules and only needs their study journals.
+            let journal = try StudyJournal(directory: moduleDirectory(id))
+            remaining = StudyCatalog.remainingNewCards(limit: remaining, introduced: journal.state.introductions[today, default: 0], extra: 0)
+            if remaining == 0 { return overallLimitMessage }
         }
+        return nil
     }
 
     private func previewStudyRescheduleUnlocked(moduleID: UUID?) throws -> StudyReschedulePreview {

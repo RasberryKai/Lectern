@@ -22,6 +22,44 @@ public enum LecturePDFEdit: Equatable, Sendable {
     case add(URL)
 }
 
+public struct LecturePDFRemovalImpact: LocalizedError, Equatable, Sendable {
+    fileprivate let pages: Set<Int>
+    fileprivate let notes: [Int: String]
+    fileprivate let deletedCards: [Card]
+    fileprivate let sharedCards: [Card]
+    fileprivate let slideThreads: [SlideThread]
+
+    public var noteCount: Int { notes.count }
+    public var deletedCardCount: Int { deletedCards.count }
+    public var sharedCardCount: Int { sharedCards.count }
+    public var slideThreadCount: Int { slideThreads.count }
+    public var errorDescription: String? { "Confirm removal of the selected PDFs and their attached content." }
+
+    fileprivate var needsConfirmation: Bool {
+        !notes.isEmpty || !deletedCards.isEmpty || !sharedCards.isEmpty || !slideThreads.isEmpty
+    }
+
+    fileprivate init(lecture: Lecture, pages: Set<Int>) {
+        self.pages = pages
+        notes = Dictionary(uniqueKeysWithValues: pages.compactMap { page in
+            let note = lecture.slides[page - 1].note
+            return note.isEmpty ? nil : (page, note)
+        })
+        var deleted: [Card] = []
+        var shared: [Card] = []
+        for card in lecture.cards where card.sourcePages.contains(where: pages.contains) {
+            if card.sourcePages.contains(where: { $0 > 0 && $0 <= lecture.pageCount && !pages.contains($0) }) {
+                shared.append(card)
+            } else {
+                deleted.append(card)
+            }
+        }
+        deletedCards = deleted
+        sharedCards = shared
+        slideThreads = lecture.threads.filter { pages.contains($0.anchorPage) && (!$0.messages.isEmpty || !$0.learningPoints.isEmpty) }
+    }
+}
+
 public extension Lecture {
     var editablePDFParts: [LecturePDFPart] {
         if let pdfParts { return pdfParts }
@@ -32,51 +70,58 @@ public extension Lecture {
 }
 
 extension LibraryStore {
-    public func editPDFs(_ edits: [LecturePDFEdit], basedOn expectedParts: [LecturePDFPart], moduleID: UUID, lectureID: UUID) throws -> Lecture { try locked {
+    public func editPDFs(_ edits: [LecturePDFEdit], removing removedRanges: [Range<Int>] = [],
+                         confirming confirmation: LecturePDFRemovalImpact? = nil,
+                         basedOn expectedParts: [LecturePDFPart], moduleID: UUID, lectureID: UUID) throws -> Lecture { try locked {
         try requireEditable(moduleUnlocked(moduleID))
         let lecture = try readLecture(moduleID, lectureID)
         guard lecture.editablePDFParts == expectedParts else {
             throw LibraryError.invalid("The lecture's PDFs changed. Reopen Edit PDFs to get the latest order.")
         }
-        return try editPDFsUnlocked(lecture, edits: edits)
+        return try editPDFsUnlocked(lecture, edits: edits, removing: removedRanges, confirming: confirmation)
     } }
 
-    func editPDFsUnlocked(_ previous: Lecture, edits: [LecturePDFEdit]) throws -> Lecture {
+    func editPDFsUnlocked(_ previous: Lecture, edits: [LecturePDFEdit], removing removedRanges: [Range<Int>] = [],
+                          confirming confirmation: LecturePDFRemovalImpact? = nil) throws -> Lecture {
         guard !previous.isArchived else { throw LibraryError.invalid("Restore this lecture before editing its PDFs.") }
-        guard previous.pageCount > 0 else {
-            throw LibraryError.invalid("This lecture has no slides. Import the PDFs as a new lecture instead.")
-        }
+        if previous.pageCount == 0 && edits.isEmpty && removedRanges.isEmpty { return previous }
         let existingRanges = edits.compactMap { edit -> Range<Int>? in
             if case .existing(_, let pages) = edit { return pages }
             return nil
         }
         let originalOrder = existingRanges.sorted { $0.lowerBound < $1.lowerBound }
+        let allRanges = (existingRanges + removedRanges).sorted { $0.lowerBound < $1.lowerBound }
         var nextPage = 0
-        for range in originalOrder {
+        for range in allRanges {
             guard !range.isEmpty, range.lowerBound == nextPage, range.upperBound <= previous.pageCount else {
-                throw LibraryError.invalid("Every existing slide must appear exactly once.")
+                throw LibraryError.invalid("Every existing slide must be kept or removed exactly once.")
             }
             nextPage = range.upperBound
         }
         guard nextPage == previous.pageCount else {
-            throw LibraryError.invalid("Every existing slide must appear exactly once.")
+            throw LibraryError.invalid("Every existing slide must be kept or removed exactly once.")
         }
 
         let source = sourceURL(moduleID: previous.moduleID, lectureID: previous.id)
-        guard try PDFMerge.pageCount(of: source) == previous.pageCount else {
+        let changesSlideLayout = !removedRanges.isEmpty || existingRanges != originalOrder
+            || edits.prefix(existingRanges.count).contains { if case .add = $0 { return true }; return false }
+        if changesSlideLayout, previous.jobs.contains(where: { $0.state == .running }) {
+            throw LibraryError.invalid("Wait for this lecture's AI jobs to finish, or stop them before moving or removing slides.")
+        }
+        if previous.pageCount > 0, try PDFMerge.pageCount(of: source) != previous.pageCount {
             throw LibraryError.invalid("The lecture's PDF doesn't match its slide count.")
         }
-        let renumbersSlides = existingRanges != originalOrder
-            || edits.prefix(existingRanges.count).contains { if case .add = $0 { return true }; return false }
-        if renumbersSlides, previous.jobs.contains(where: { $0.state == .running }) {
-            throw LibraryError.invalid("Wait for this lecture's AI jobs to finish, or stop them before moving slides.")
+        let removedPages = Set(removedRanges.flatMap { $0.map { $0 + 1 } })
+        let impact = removedPages.isEmpty ? nil : LecturePDFRemovalImpact(lecture: previous, pages: removedPages)
+        if let impact, impact.needsConfirmation, impact != confirmation {
+            throw impact
         }
 
         let directory = source.deletingLastPathComponent()
         let staging = directory.appendingPathComponent(".stage-pdf-edit-\(UUID())")
         defer { try? FileManager.default.removeItem(at: staging) }
         let hasNewFiles = edits.count != existingRanges.count
-        let rewritesSource = renumbersSlides || hasNewFiles
+        let rewritesSource = changesSlideLayout || hasNewFiles
         let counts: [Int]
         if rewritesSource {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
@@ -86,10 +131,15 @@ extension LibraryStore {
                 case .add(let url): (url, nil)
                 }
             }
-            let merged = staging.appendingPathComponent("source.pdf")
-            counts = try PDFMerge.assemble(pieces, to: merged)
-            guard try PDFMerge.pageCount(of: merged) == counts.reduce(0, +) else {
-                throw LibraryError.invalid("The updated PDF has the wrong slide count.")
+            if pieces.isEmpty {
+                try Data().write(to: staging.appendingPathComponent("remove-source"))
+                counts = []
+            } else {
+                let merged = staging.appendingPathComponent("source.pdf")
+                counts = try PDFMerge.assemble(pieces, to: merged)
+                guard try PDFMerge.pageCount(of: merged) == counts.reduce(0, +) else {
+                    throw LibraryError.invalid("The updated PDF has the wrong slide count.")
+                }
             }
         } else {
             counts = existingRanges.map(\.count)
@@ -119,12 +169,16 @@ extension LibraryStore {
         }
         lecture.slides = slides
         lecture.pageCount = slides.count
-        if renumbersSlides {
-            lecture.remapPDFReferences(oldToNew)
+        if changesSlideLayout {
+            lecture.remapPDFReferences(oldToNew, removing: removedPages, deletingCards: Set(impact?.deletedCards.map(\.id) ?? []))
             lecture.pdfLayoutRevision = UUID()
         } else if let firstNewPage {
             lecture.viewPreferences.focusedPageIndex = firstNewPage
         }
+        if !removedPages.isEmpty || previous.pageCount == 0 {
+            lecture.sourceFilename = lecture.pdfParts?.first?.filename ?? ""
+        }
+        if lecture.pageCount == 0 { lecture.viewPreferences.mode = .review }
         if !rewritesSource && lecture.pdfParts == previous.pdfParts { return previous }
 
         let now = Date()
@@ -148,6 +202,12 @@ extension LibraryStore {
     func finishPDFEdit(in directory: URL) throws {
         let pending = directory.appendingPathComponent(".pending-pdf-edit")
         guard FileManager.default.fileExists(atPath: pending.path) else { return }
+        if FileManager.default.fileExists(atPath: pending.appendingPathComponent("remove-source").path) {
+            let source = directory.appendingPathComponent("source.pdf")
+            if unlink(source.path) != 0, errno != ENOENT {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
         for filename in ["source.pdf", "lecture.json.bak", "lecture.json"] {
             let staged = pending.appendingPathComponent(filename)
             guard FileManager.default.fileExists(atPath: staged.path) else { continue }

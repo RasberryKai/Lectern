@@ -20,7 +20,7 @@ struct PrepareView: View {
         } stage: {
             center
         } right: {
-            LectureChatSidebar(model: model, focus: focus)
+            LectureSidebar(model: model, focus: focus)
         }
         .onChange(of: model.filteredSlides.map(\.pageIndex), initial: true) { _, _ in
             model.reconcilePrepareFocus()

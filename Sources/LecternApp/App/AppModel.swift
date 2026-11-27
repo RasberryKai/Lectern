@@ -83,6 +83,18 @@ final class AppModel {
     var showSettings = false
     var showStudySettingsOnOpen = false
     var showLibrarySettingsOnOpen = false
+    var adhdModeEnabled = UserDefaults.standard.bool(forKey: "lectern.adhdMode") {
+        didSet {
+            UserDefaults.standard.set(adhdModeEnabled, forKey: "lectern.adhdMode")
+            if !adhdModeEnabled {
+                for window in lectureWindows.values { window.clearAskActivity() }
+            }
+        }
+    }
+    var adhdModeActivity = UserDefaults.standard.string(forKey: "lectern.adhdModeActivity")
+        .flatMap(AskWaitPreference.init(rawValue:)) ?? .random {
+        didSet { UserDefaults.standard.set(adhdModeActivity.rawValue, forKey: "lectern.adhdModeActivity") }
+    }
     var showNewModule = false
     var settingsModuleID: UUID? = nil
     var showModuleStudySettingsOnOpen = false
@@ -461,7 +473,6 @@ final class AppModel {
         guard urls.isEmpty || !pdfs.isEmpty else { errorMessage = "Only PDF files can be added."; return }
         do {
             let lecture = try await store.loadLecture(moduleID: ref.moduleID, lectureID: ref.lectureID)
-            guard lecture.pageCount > 0 else { return }
             let parts = lecture.editablePDFParts
             var offset = 0
             let existing = parts.map { part in
@@ -478,10 +489,12 @@ final class AppModel {
         } catch { errorMessage = error.localizedDescription }
     }
 
-    func savePDFEdits(_ edits: [LecturePDFEdit], basedOn parts: [LecturePDFPart], for ref: LectureRef) async throws {
+    func savePDFEdits(_ edits: [LecturePDFEdit], removing removedRanges: [Range<Int>],
+                      confirming confirmation: LecturePDFRemovalImpact?, basedOn parts: [LecturePDFPart], for ref: LectureRef) async throws {
         let workspace = lectureWindows[ref.lectureID]
         try await workspace?.flushAllThrowing()
-        let lecture = try await store.editPDFs(edits, basedOn: parts, moduleID: ref.moduleID, lectureID: ref.lectureID)
+        let lecture = try await store.editPDFs(edits, removing: removedRanges, confirming: confirmation,
+                                               basedOn: parts, moduleID: ref.moduleID, lectureID: ref.lectureID)
         await workspace?.reloadAfterExternalChange()
         try? await reloadNow()
         if lecture.pageCount > parts.reduce(0, { $0 + $1.pageCount }) {

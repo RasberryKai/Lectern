@@ -77,6 +77,8 @@ struct SolveStudyPersistenceTests {
         let rerecorded = try await reopened.gradeStudyCard(entry, rating: .again, eventID: UUID(), now: at,
                                                         answeringTime: 1, permitEarly: false, extraNewPerModule: 0, solveResponse: response)
         #expect(rerecorded.phase == .learning)
+        #expect(try await reopened.askFlashcard(moduleID: module.id, lectureID: lecture.id, sourcePage: 1,
+                                                now: rerecorded.due)?.id == flip.id)
         let retry = try #require(try await reopened.studyCatalog(now: at).decks.first?.approvedCards.last)
         let next = try #require(try await reopened.presentSolveCase(retry, presentationID: UUID(), now: at))
         #expect(next.id != exercise.id && next.content == variant)

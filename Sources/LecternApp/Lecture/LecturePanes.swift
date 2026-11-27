@@ -40,7 +40,7 @@ struct LecturePanes<Left: View, Stage: View, Right: View>: View {
         GeometryReader { geometry in
             let available = max(360, geometry.size.width)
             let showLeft = leftVisible && available >= 516
-            let showRight = model.askVisible && available >= (showLeft ? 822 : 666)
+            let showRight = model.rightPaneVisible && available >= (showLeft ? 822 : 666)
             let budget = available - 360 - (showLeft ? 6 : 0) - (showRight ? 6 : 0)
             let desiredLeft = model.panes.width(.left, mode: model.mode)
             let desiredRight = model.panes.width(.right, mode: model.mode)
@@ -67,7 +67,7 @@ struct LecturePanes<Left: View, Stage: View, Right: View>: View {
         } focusChanged: { active in
             model.panes.focusedDivider = active ? side : nil
         } collapse: {
-            if side == .right { model.askVisible = false }
+            if side == .right { model.rightPaneVisible = false }
             else if model.mode == .prepare { model.thumbnailsVisible = false }
             else { model.panes.reviewLeftVisible = false }
         }
@@ -129,30 +129,45 @@ struct ShortcutKey: View {
     }
 }
 
-struct LectureChatSidebar: View {
+struct LectureSidebar: View {
     @Bindable var model: LectureWindowModel
     var focus: FocusState<EditorField?>.Binding
     @State private var imageDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label("Ask AI", systemImage: "sparkles")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 0)
-                ChatHistoryControls(model: model)
+            if model.mode == .review {
+                HStack(spacing: 6) {
+                    reviewTab("Ask AI", icon: "sparkles", showsSources: false)
+                    reviewTab("Source slides", icon: "display", showsSources: true)
+                    Spacer(minLength: 0)
+                    if model.isAskVisible && model.currentWaitTower == nil { ChatHistoryControls(model: model) }
+                }
+                .padding(.horizontal, 10).padding(.top, 4)
+                Divider().overlay(Theme.border)
+            } else if model.currentWaitTower == nil {
+                HStack {
+                    Label("Ask AI", systemImage: "sparkles")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 0)
+                    ChatHistoryControls(model: model)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                Divider().overlay(Theme.border)
             }
-            .padding(.horizontal, 16).padding(.vertical, 10)
-            Divider().overlay(Theme.border)
-            AskPanel(model: model, page: model.mode == .prepare ? (model.focusedPage ?? 0) : (model.selectedCard?.sourcePages.first ?? 0), cardID: model.mode == .review ? model.selectedCardID : nil, focus: focus)
+            if model.isAskVisible {
+                AskPanel(model: model, page: model.mode == .prepare ? (model.focusedPage ?? 0) : (model.selectedCard?.sourcePages.first ?? 0), cardID: model.mode == .review ? model.selectedCardID : nil, focus: focus, offersAskActivity: true)
+            } else {
+                ReviewSourcePane(model: model)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
-            ChatImageDropOverlay(enabled: model.canAttachChatImages, isTargeted: $imageDropTargeted) { images in
-                guard model.canAttachChatImages, !images.isEmpty else { return false }
+            ChatImageDropOverlay(enabled: acceptsChatImages, isTargeted: $imageDropTargeted) { images in
+                guard acceptsChatImages, !images.isEmpty else { return false }
                 Task {
-                    if await model.importChatImages(images) {
+                    if await model.importChatImages(images), model.isAskVisible {
                         focus.wrappedValue = .ask
                     }
                 }
@@ -160,11 +175,33 @@ struct LectureChatSidebar: View {
             }
         }
         .overlay {
-            if imageDropTargeted && model.canAttachChatImages {
+            if imageDropTargeted && acceptsChatImages {
                 RoundedRectangle(cornerRadius: 10).fill(Theme.aiWash.opacity(0.4))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.ai, style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])))
                     .padding(6).allowsHitTesting(false)
             }
         }
+    }
+
+    private var acceptsChatImages: Bool {
+        model.isAskVisible && model.canAttachChatImages && model.currentWaitTower == nil
+    }
+
+    private func reviewTab(_ title: String, icon: String, showsSources: Bool) -> some View {
+        let selected = model.reviewShowsSources == showsSources
+        return Button {
+            model.reviewShowsSources = showsSources
+            if showsSources, focus.wrappedValue == .ask { focus.wrappedValue = nil }
+        } label: {
+            Label(title, systemImage: icon)
+                .font(Theme.small.weight(.semibold))
+                .foregroundStyle(selected ? Theme.ink : Theme.quiet)
+                .padding(.horizontal, 6).padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .overlay(alignment: .bottom) { Rectangle().fill(selected ? Theme.ink : .clear).frame(height: 2) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(showsSources ? "Source slides · ⌘⇧S" : "Ask AI · ⌘⇧A")
     }
 }

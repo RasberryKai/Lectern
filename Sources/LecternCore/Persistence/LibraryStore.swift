@@ -35,10 +35,14 @@ public actor LibraryStore {
     }
     public func modules() throws -> [Module] { try locked { try modulesUnlocked() } }
     func modulesUnlocked() throws -> [Module] {
+        try moduleIDsUnlocked().map { try moduleUnlocked($0) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+    func moduleIDsUnlocked() throws -> [UUID] {
         try directories(rootURL.appendingPathComponent("Modules")).map { directory in
             guard let id = UUID(uuidString: directory.lastPathComponent) else { throw LibraryError.invalid("Invalid module directory identity.") }
-            return try moduleUnlocked(id)
-        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            return id
+        }
     }
     /// A single lock makes all Overview totals describe the same library snapshot.
     public func dashboard(now: Date = Date(), timeZone: TimeZone = .current) throws -> DashboardSnapshot { try locked {
@@ -355,6 +359,9 @@ public actor LibraryStore {
         guard !urls.isEmpty else { throw LibraryError.invalid("Choose at least one PDF.") }
         try requireEditable(moduleUnlocked(moduleID))
         let lecture = try readLecture(moduleID, lectureID)
+        guard lecture.pageCount > 0 else {
+            throw LibraryError.invalid("This lecture has no slides. Import the PDFs as a new lecture instead.")
+        }
         var offset = 0
         let existing = lecture.editablePDFParts.map { part in
             let start = offset

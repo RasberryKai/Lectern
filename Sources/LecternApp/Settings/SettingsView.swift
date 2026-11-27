@@ -142,6 +142,7 @@ private struct AISettingsTab: View {
     @State private var codexBusy = false
 
     var body: some View {
+        @Bindable var model = model
         ScrollView {
             HStack(alignment: .top, spacing: 32) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -151,6 +152,20 @@ private struct AISettingsTab: View {
                     backendButton(.messagesAPI, "Anthropic API", "API key, billed per token")
                     Text("Applies to new jobs. Running jobs keep their original backend and model. Lectern never switches backend on its own.")
                         .font(Theme.small).foregroundStyle(Theme.quiet).padding(.top, 8)
+                    Divider().padding(.vertical, 8)
+                    Toggle("ADHD mode", isOn: $model.adhdModeEnabled)
+                        .toggleStyle(.switch)
+                        .font(Theme.body.weight(.semibold))
+                    Picker("Ask AI activity", selection: $model.adhdModeActivity) {
+                        ForEach(AskWaitPreference.allCases, id: \.self) { preference in
+                            Text(preference.title).tag(preference)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(!model.adhdModeEnabled)
+                    Text("Random gives both activities an equal chance. Press Esc to return to chat.")
+                        .font(Theme.small).foregroundStyle(Theme.quiet)
                     if let error { ErrorBanner(message: error) }
                 }
                 .frame(width: 340, alignment: .leading)

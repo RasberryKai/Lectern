@@ -29,7 +29,8 @@ final class LectureWindowModel {
     var thumbnailsVisible: Bool
     /// Coverage shows card backs under the fronts. Saved per lecture.
     var coverageShowsBacks: Bool
-    var askVisible = false
+    var rightPaneVisible = false
+    var reviewShowsSources = false
     var panes = LecturePaneState()
     var chatContext = ChatContext()
     var chatScrollTarget: UUID?
@@ -41,6 +42,11 @@ final class LectureWindowModel {
     var chatPreparationFailure: ChatPreparationFailure?
     var pendingChatMessage: PendingChatMessage?
     var isStartingChat = false
+    var askFlashcard: AskFlashcardReview?
+    var askFlashcardReceipts: [UUID: AskFlashcardReceipt] = [:]
+    var waitTower: AskWaitTower?
+    var waitTowerReceipts: [UUID: String] = [:]
+    @ObservationIgnored var waitTowerTask: Task<Void, Never>?
     @ObservationIgnored var chatDraftSaveTask: Task<Void, Never>?
     var titleDraft: String?
     private(set) var isSavingTitle = false
@@ -63,7 +69,6 @@ final class LectureWindowModel {
     var dismissedSessionError: String? = nil
     var showGenerateSheet = false
     var enlargedPage: Int? = nil
-    var reviewSourcesVisible = false
     var sourceIndex = 0
     var dismissedJobIDs: Set<UUID> = []
     var proposeResult: String? = nil
@@ -112,6 +117,12 @@ final class LectureWindowModel {
     var readOnly: Bool { app.isArchived(ref.moduleID) || isClosing }
     var moduleName: String { app.module(ref.moduleID)?.name ?? "" }
     var settings: AISettings { app.settings }
+    var isAskVisible: Bool { rightPaneVisible && mode != .coverage && !(mode == .review && reviewShowsSources) }
+
+    func showAsk() {
+        if mode == .review { reviewShowsSources = false }
+        rightPaneVisible = true
+    }
 
     // MARK: Errors
 
@@ -205,7 +216,7 @@ final class LectureWindowModel {
 
     func setMode(_ new: LectureMode) {
         guard new != mode else { return }
-        if new != .review && lecture.pageCount == 0 { errorMessage = "This lecture has no slides. It was imported from the reviewer."; return }
+        if new != .review && lecture.pageCount == 0 { errorMessage = "This lecture has no slides."; return }
         Task { await flushAll() }
         mode = new
         if new == .review, selectedCardID == nil || selectedCard == nil { selectedCardID = visibleCards.first?.id; loadEditor() }
@@ -630,7 +641,8 @@ final class LectureWindowModel {
     }
 
     func retry(_ jobID: UUID) async {
-        guard !readOnly else { return }
+        guard !readOnly, !isShowingAskActivity || lecture.jobs.first(where: { $0.id == jobID })?.kind != .chat else { return }
+        if askFlashcardJobID == jobID { askFlashcard = nil }
         await run {
             try await app.runner.retry(moduleID: ref.moduleID, lectureID: ref.lectureID, jobID: jobID)
             try await session.refresh()
@@ -641,7 +653,15 @@ final class LectureWindowModel {
     // MARK: Lifecycle
 
     func reloadAfterExternalChange() async {
+        let previousLayout = lecture.pdfLayoutRevision
         await run { try await session.refresh() }
+        if lecture.pdfLayoutRevision != previousLayout {
+            focusedPageIndex = lecture.pageCount > 0 ? (lecture.viewPreferences.focusedPageIndex ?? 0) : nil
+            if lecture.pageCount == 0 { mode = .review }
+            enlargedPage = nil
+            sourceIndex = 0
+            chatContext.pins.removeAll { if case .slide = $0 { return true }; return false }
+        }
         syncEditor()
     }
 

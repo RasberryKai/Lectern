@@ -100,23 +100,31 @@ extension LectureWindowModel {
             } catch is CancellationError {} catch { self?.errorMessage = Self.describe(error) }
         }
     }
-    func sendChat(retrying failure: ChatPreparationFailure? = nil) async {
-        guard !readOnly, runningChat == nil, !isStartingChat, !isImportingChatImages else { return }
+    func sendChat(retrying failure: ChatPreparationFailure? = nil, offersAskActivity: Bool = false) async {
+        guard !readOnly, runningChat == nil, !isStartingChat, !isImportingChatImages, !isShowingAskActivity else { return }
         let question = failure?.question ?? chatDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let refs = failure?.refs ?? resolvedChatContext
         let attachments = failure?.attachments ?? chatDraftAttachments
         let allowsCardCreation = failure?.allowsCardCreation ?? (mode == .review && studySolveContext == nil)
         let studyContext = studySolveContext
         let chatID = lecture.currentChat.id
+        let sourcePage = screenChatContext.compactMap { ref -> Int? in
+            if case .slide(let page) = ref { return page }
+            return nil
+        }.first
         guard failure == nil || failure?.chatID == chatID else { return }
         guard !question.isEmpty || !attachments.isEmpty else { return }
         let messageID = failure?.messageID ?? UUID()
+        let turn = AskTurn(chatID: chatID, questionID: messageID)
+        let activity = offersAskActivity && failure == nil && app.adhdModeEnabled ? app.adhdModeActivity.activity() : nil
         var message = ChatMessage(id: messageID, role: .user, text: question)
         message.context = refs
         message.attachments = attachments
         pendingChatMessage = PendingChatMessage(chatID: chatID, message: message)
         chatPreparationFailure = nil
         isStartingChat = true
+        waitTowerTask?.cancel()
+        if activity == .tower { scheduleWaitTower(for: turn) }
         defer { isStartingChat = false; pendingChatMessage = nil }
         chatDraftSaveTask?.cancel()
         let submittedDraft = chatDraft
@@ -126,6 +134,9 @@ extension LectureWindowModel {
         chatDraftAttachments.removeAll { sentIDs.contains($0.id) }
         do {
             try await flushAllThrowing()
+            if activity == .flashcard, app.adhdModeEnabled {
+                await beginAskFlashcard(turn: turn, sourcePage: sourcePage)
+            }
             _ = try await session.chat(question: question, contextRefs: refs, attachments: attachments,
                                        messageID: messageID, backend: settings.backend, model: settings.selectedModel,
                                        allowsCardCreation: allowsCardCreation, studyExerciseContext: studyContext)
@@ -135,6 +146,8 @@ extension LectureWindowModel {
             if lecture.currentChat.messages.contains(where: { $0.id == messageID }) {
                 errorMessage = Self.describe(error)
             } else {
+                askFlashcard = nil
+                waitTowerTask?.cancel()
                 chatPreparationFailure = ChatPreparationFailure(chatID: chatID, messageID: messageID, question: question, refs: refs, attachments: attachments, allowsCardCreation: allowsCardCreation, message: Self.describe(error))
                 // Keep a newer draft intact; the failure retains the original request for retry.
                 if chatDraft.isEmpty && chatDraftAttachments.isEmpty {
@@ -149,24 +162,28 @@ extension LectureWindowModel {
         app.scheduleReload()
     }
     func newChat() async {
-        guard !readOnly, runningChat == nil, !isStartingChat, !isImportingChatImages else { return }
+        guard !readOnly, runningChat == nil, !isStartingChat, !isImportingChatImages, !isShowingAskActivity else { return }
+        let leavingChatID = displayedChat.id
         chatDraftSaveTask?.cancel()
         await run { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments); try await session.newChat(backend: settings.backend, model: settings.selectedModel) }
+        if displayedChat.id != leavingChatID { clearAskActivity() }
         chatDraft = lecture.currentChat.draft
         chatDraftAttachments = lecture.currentChat.draftAttachments
         chatAttachmentError = nil
         chatPreparationFailure = nil
         chatContext = ChatContext()
-        askVisible = true
+        showAsk()
     }
     func resumeChat(_ id: UUID) async {
-        guard runningChat == nil, !isStartingChat, !isImportingChatImages else { return }
+        guard runningChat == nil, !isStartingChat, !isImportingChatImages, !isShowingAskActivity else { return }
         if readOnly {
             readOnlyChatID = id == lecture.currentChat.id ? nil : id
             return
         }
+        let leavingChatID = displayedChat.id
         chatDraftSaveTask?.cancel()
         await run { try await session.setChatDraft(chatDraft, attachments: chatDraftAttachments); try await session.openChat(id: id, backend: settings.backend, model: settings.selectedModel) }
+        if displayedChat.id != leavingChatID { clearAskActivity() }
         chatDraft = lecture.currentChat.draft
         chatDraftAttachments = lecture.currentChat.draftAttachments
         chatAttachmentError = nil
@@ -221,7 +238,7 @@ extension LectureWindowModel {
         return nil
     }
     func showChat(forPage page: Int) {
-        askVisible = true
+        showAsk()
         guard let target = firstChatMessage(forPage: page) else { return }
         Task {
             if target.chatID != displayedChat.id { await resumeChat(target.chatID) }
@@ -231,7 +248,7 @@ extension LectureWindowModel {
     }
     /// Opens the chat at the discussion a learning point came from.
     func showChat(for point: LearningPoint) {
-        askVisible = true
+        showAsk()
         guard let target = chatLocation(for: point) else {
             errorMessage = "The source chat for this card is no longer available."
             return
@@ -254,8 +271,9 @@ extension LectureWindowModel {
         return (chat.id, messageID)
     }
     func fixFlagWithClaude(cardID: UUID) {
-        guard !readOnly, runningChat == nil, !isStartingChat, let card = activeCards.first(where: { $0.id == cardID }) else { return }
-        askVisible = true
+        guard !readOnly, runningChat == nil, !isStartingChat, !isShowingAskActivity,
+              let card = activeCards.first(where: { $0.id == cardID }) else { return }
+        showAsk()
         let question = "Fix this flag on Card \(cardNumbers[cardID] ?? 0): \(card.flag ?? card.issue?.message ?? "Check this card for accuracy and clarity.")"
         let refs: [ContextRef] = [.card(cardID)] + card.sourcePages.map(ContextRef.slide)
         isStartingChat = true
@@ -287,7 +305,7 @@ extension LectureWindowModel {
                 return
             }
             jumpToPrepare(page: page)
-            askVisible = true
+            showAsk()
         case .card(let number):
             guard let id = lecture.chatCitationCardID(number: number, jobID: jobID) else {
                 errorMessage = "This cited card is no longer available."
@@ -302,7 +320,7 @@ extension LectureWindowModel {
     }
     func openChatCard(_ id: UUID) {
         reviewSearch = ""; reviewFilter = .all; setMode(.review); selectCard(id)
-        askVisible = true
+        showAsk()
     }
     func resolveChatDeletions(chatID: UUID, messageID: UUID, cardIDs: Set<UUID>, delete: Bool) async {
         guard !readOnly else { return }
@@ -325,7 +343,8 @@ extension LectureWindowModel {
         app.scheduleReload()
     }
     func retryChatAnswer(_ message: ChatMessage) async {
-        guard !readOnly, runningChat == nil else { return }
+        guard !readOnly, runningChat == nil, !isShowingAskActivity else { return }
+        if askFlashcardJobID == message.editJobID { askFlashcard = nil }
         await run { _ = try await session.retryChat(messageID: message.id, backend: settings.backend, model: settings.selectedModel); try await session.refresh() }
     }
     func chatEditPending(_ job: Job) -> Bool { job.chatEditDisposition == .proposed }
