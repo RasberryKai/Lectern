@@ -9,6 +9,8 @@ struct ImportPDFsSheet: View {
     let pending: PendingPDFImport
 
     @State private var files: [PendingPDFImport.File] = []
+    @State private var removedFiles: [PendingPDFImport.File] = []
+    @State private var removalConfirmation: LecturePDFRemovalImpact?
     @State private var name = ""
     @State private var error: String?
     @State private var importing = false
@@ -26,7 +28,7 @@ struct ImportPDFsSheet: View {
     private static let rowHeight: CGFloat = 52
 
     private var totalPages: Int { files.reduce(0) { $0 + $1.pageCount } }
-    private var blocked: Bool { files.isEmpty || files.contains { $0.problem != nil } }
+    private var blocked: Bool { (!isEditing && files.isEmpty) || files.contains { $0.problem != nil } }
     private var module: Module? { model.module(pending.moduleID) }
     private var isEditing: Bool {
         if case .edit = pending.target { return true }
@@ -59,7 +61,7 @@ struct ImportPDFsSheet: View {
                     Text("Lecture name").font(.system(size: 13, weight: .semibold))
                     TextField("Lecture name", text: $name)
                         .textFieldStyle(.roundedBorder).controlSize(.large)
-                        .onSubmit(save)
+                        .onSubmit { save() }
                     Text("From the shared start of the file names.").font(Theme.small).foregroundStyle(Theme.quiet)
                 }
             }
@@ -92,7 +94,9 @@ struct ImportPDFsSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button("Cancel") { dismiss() }
                     .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
-                Button(action: save) {
+                Button {
+                    save()
+                } label: {
                     if importing { ProgressView().controlSize(.small).tint(Theme.onAccent) } else { Text(isEditing ? "Save Changes" : "Import") }
                 }
                 .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
@@ -104,6 +108,17 @@ struct ImportPDFsSheet: View {
         .background(Theme.surface)
         .disabled(importing)
         .interactiveDismissDisabled(importing)
+        .alert(removalTitle, isPresented: Binding(
+            get: { removalConfirmation != nil },
+            set: { if !$0 { removalConfirmation = nil } }
+        ), presenting: removalConfirmation) { confirmation in
+            Button(removedFiles.count == 1 ? "Remove PDF" : "Remove PDFs", role: .destructive) {
+                save(confirming: confirmation)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { confirmation in
+            Text(removalMessage(confirmation))
+        }
         .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
@@ -132,10 +147,28 @@ struct ImportPDFsSheet: View {
 
     private var summary: String {
         if let bad = files.first(where: { $0.problem != nil }) { return "Leave out \(bad.filename) to continue." }
-        if files.isEmpty { return "No files left to import." }
+        if files.isEmpty { return isEditing ? "This lecture will have no PDFs." : "No files left to import." }
         if isEditing { return "\(Format.count(files.count, "PDF")) · \(Format.count(totalPages, "slide"))" }
         if files.count == 1 { return "Imported as one \(totalPages)-slide lecture." }
         return "Merged into one \(totalPages)-slide lecture."
+    }
+
+    private var removalTitle: String {
+        if removedFiles.count == 1, let file = removedFiles.first { return "Remove “\(file.filename)”?" }
+        return "Remove \(removedFiles.count) PDFs?"
+    }
+
+    private func removalMessage(_ impact: LecturePDFRemovalImpact) -> String {
+        var deleted: [String] = []
+        if impact.noteCount > 0 { deleted.append(Format.count(impact.noteCount, "slide note")) }
+        if impact.deletedCardCount > 0 { deleted.append(Format.count(impact.deletedCardCount, "flashcard")) }
+        if impact.slideThreadCount > 0 { deleted.append(Format.count(impact.slideThreadCount, "slide conversation")) }
+        var sentences: [String] = []
+        if !deleted.isEmpty { sentences.append("This will also remove \(deleted.formatted(.list(type: .and))).") }
+        if impact.sharedCardCount > 0 {
+            sentences.append("Lectern will keep \(Format.count(impact.sharedCardCount, "flashcard")) that also link to other slides.")
+        }
+        return sentences.joined(separator: " ")
     }
 
     private var fileList: some View {
@@ -159,7 +192,7 @@ struct ImportPDFsSheet: View {
 
     private func row(index: Int, file: PendingPDFImport.File) -> some View {
         let canSplit = isSplittable(file)
-        let canRemove = if case .add = file.edit { true } else { false }
+        let existing = if case .existing = file.edit { true } else { false }
         return HStack(spacing: 10) {
             Image(systemName: "line.3.horizontal")
                 .foregroundStyle(Theme.faint)
@@ -193,17 +226,18 @@ struct ImportPDFsSheet: View {
                     .help("Set a file boundary in a previously merged PDF")
                     .padding(.trailing, 6)
             }
-            if canRemove {
-                Button {
-                    files.removeAll { $0.id == file.id }
-                } label: {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).frame(width: 28, height: 28).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.quiet)
-                .help("Leave this file out")
-                .accessibilityLabel("Leave \(file.filename) out")
+            Button {
+                remove(file)
+            } label: {
+                Image(systemName: existing ? "trash" : "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.quiet)
+            .help(existing ? "Remove this PDF" : "Leave this file out")
+            .accessibilityLabel(existing ? "Remove \(file.filename)" : "Leave \(file.filename) out")
         }
         .frame(height: Self.rowHeight)
         .contentShape(Rectangle())
@@ -211,11 +245,16 @@ struct ImportPDFsSheet: View {
             Button("Move Up") { files.swapAt(index, index - 1) }.disabled(index == 0)
             Button("Move Down") { files.swapAt(index, index + 1) }.disabled(index == files.count - 1)
             if canSplit { Button("Split…") { beginSplit(file) } }
-            if canRemove {
-                Divider()
-                Button("Leave Out") { files.removeAll { $0.id == file.id } }
-            }
+            Divider()
+            Button(existing ? "Remove PDF" : "Leave Out") { remove(file) }
         }
+    }
+
+    private func remove(_ file: PendingPDFImport.File) {
+        guard files.contains(where: { $0.id == file.id }) else { return }
+        if case .existing = file.edit { removedFiles.append(file) }
+        files.removeAll { $0.id == file.id }
+        if splitFileID == file.id { splitFileID = nil }
     }
 
     private func range(for index: Int) -> String {
@@ -265,7 +304,7 @@ struct ImportPDFsSheet: View {
         splitFileID = nil
     }
 
-    private func save() {
+    private func save(confirming confirmation: LecturePDFRemovalImpact? = nil) {
         guard !blocked, !importing, !inspectingFiles, hasEdits, splitFileID == nil else { return }
         importing = true; error = nil
         Task {
@@ -275,9 +314,15 @@ struct ImportPDFsSheet: View {
                     let urls = files.compactMap { if case .add(let url) = $0.edit { url } else { nil } }
                     try await model.importMerged(urls, name: name, into: pending.moduleID, slot: slot)
                 case .edit(let lectureID, _, let parts):
-                    try await model.savePDFEdits(files.map(\.edit), basedOn: parts, for: LectureRef(moduleID: pending.moduleID, lectureID: lectureID))
+                    let removedRanges = removedFiles.compactMap { file in
+                        if case .existing(_, let pages) = file.edit { pages } else { nil }
+                    }
+                    try await model.savePDFEdits(files.map(\.edit), removing: removedRanges, confirming: confirmation,
+                                                 basedOn: parts, for: LectureRef(moduleID: pending.moduleID, lectureID: lectureID))
                 }
                 dismiss()
+            } catch let impact as LecturePDFRemovalImpact {
+                removalConfirmation = impact
             } catch {
                 self.error = error.localizedDescription
             }

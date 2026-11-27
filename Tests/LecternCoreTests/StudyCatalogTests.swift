@@ -4,6 +4,7 @@ import Testing
 
 struct StudyCatalogTests {
     private let now = Date(timeIntervalSince1970: 1_767_311_880)
+    private let utc = TimeZone(secondsFromGMT: 0)!
 
     @Test func legacySessionOptionsPreserveExistingSettingsAndInheritNewCardOrder() throws {
         let legacy = Data("""
@@ -186,6 +187,103 @@ struct StudyCatalogTests {
         #expect(mixed.map { $0.memory != nil } == [true, false, true, false])
         #expect(mixed.filter { $0.memory != nil }.map(\.id) == [firstDue.id, secondDue.id])
         #expect(mixed.filter { $0.memory == nil } == Array(dueFirst.suffix(2)))
+    }
+
+    @Test func askFlashcardPrefersLocalDueDayThenNearestSourceSlide() {
+        let module = Module(name: "Probability")
+        let near = card("Near", pages: [5, 18])
+        let far = card("Far", pages: [10])
+        let older = card("Older", pages: [20])
+        let crossLecture = card("Another lecture", pages: [5])
+        let local = Lecture(moduleID: module.id, name: "Local", cards: [near, far, older])
+        let other = Lecture(moduleID: module.id, name: "Other", cards: [crossLecture])
+        var memory = [near.id: schedule(dueIn: -120), far.id: schedule(dueIn: -3_600),
+                      crossLecture.id: schedule(dueIn: -172_800)]
+
+        let sameDay = deck(module, lectures: [other, local], memory: memory)
+        #expect(sameDay.askFlashcard(lectureID: local.id, sourcePage: 5, now: now, timeZone: utc) { true }?.id == near.id)
+        #expect(sameDay.askFlashcard(lectureID: local.id, sourcePage: nil, now: now, timeZone: utc) { true }?.id == far.id)
+
+        memory[older.id] = schedule(dueIn: -86_400)
+        let differentDays = deck(module, lectures: [other, local], memory: memory)
+        #expect(differentDays.askFlashcard(lectureID: local.id, sourcePage: 5, now: now, timeZone: utc) { true }?.id == older.id)
+    }
+
+    @Test func askFlashcardIgnoresIneligibleCardsAndFallsBackToTheMostOverdueInTheModule() {
+        let module = Module(name: "Probability")
+        let overdue = card("Overdue")
+        let due = card("Due")
+        let disabled = Card(front: "Disabled", back: "Answer")
+        let superseded = Card(front: "Superseded", back: "Answer", verdict: .good, supersededBy: [due.id])
+        let unseen = card("Unseen")
+        let archivedCard = card("Archived")
+        let local = Lecture(moduleID: module.id, name: "Local", cards: [disabled, superseded, unseen])
+        let other = Lecture(moduleID: module.id, name: "Other", cards: [due, overdue])
+        var archived = Lecture(moduleID: module.id, name: "Archived", cards: [archivedCard])
+        archived.archivedAt = now
+        let memory = [disabled.id: schedule(dueIn: -86_400), superseded.id: schedule(dueIn: -86_400),
+                      archivedCard.id: schedule(dueIn: -86_400), overdue.id: schedule(dueIn: -3_600),
+                      due.id: schedule(dueIn: 0)]
+        let catalog = deck(module, lectures: [archived, local, other], memory: memory)
+
+        #expect(catalog.askFlashcard(lectureID: local.id, sourcePage: 1, now: now, timeZone: utc) { true }?.id == overdue.id)
+
+        let empty = deck(module, lectures: [archived, local], memory: memory)
+        #expect(empty.askFlashcard(lectureID: local.id, sourcePage: 1, now: now, timeZone: utc) { false } == nil)
+    }
+
+    @Test func askFlashcardPrefersLocalNewCardsThenFallsBackToTheLeastRecentlyReviewedCard() {
+        let module = Module(name: "Probability")
+        let near = card("Near", pages: [7])
+        let far = card("Far", pages: [12])
+        let otherUnseen = card("From another lecture", pages: [6])
+        let recent = card("Reviewed recently", pages: [6])
+        let leastRecent = card("Reviewed long ago")
+        let local = Lecture(moduleID: module.id, name: "Local", cards: [far, near, recent])
+        let other = Lecture(moduleID: module.id, name: "Other", cards: [otherUnseen, leastRecent])
+        let memory = [recent.id: schedule(dueIn: 300, reviewedAgo: 600),
+                      leastRecent.id: schedule(dueIn: 600, reviewedAgo: 86_400)]
+        let catalog = deck(module, lectures: [other, local], memory: memory)
+
+        #expect(catalog.askFlashcard(lectureID: local.id, sourcePage: 6, now: now, timeZone: utc) { true }?.id == near.id)
+        #expect(catalog.askFlashcard(lectureID: local.id, sourcePage: 6, now: now, timeZone: utc) { false }?.id == leastRecent.id)
+    }
+
+    @Test func askFlashcardUsesFreshModuleAndOverallDailyIntroductionCounts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-ask-study-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LibraryStore(rootURL: root)
+        let module = try await store.createModule(name: "Probability")
+        let other = try await store.createModule(name: "Regression")
+        let localCard = card("Probability")
+        let local = try await store.createLecture(Lecture(moduleID: module.id, name: "Local", cards: [localCard]))
+        let remote = try await store.createLecture(Lecture(moduleID: other.id, name: "Remote", cards: [card("Remote")]))
+        var preferences = StudyPreferences()
+        preferences.overallNewLimit = 1
+        try await store.saveStudyPreferences(preferences)
+        let entry = try #require(try await store.askFlashcard(moduleID: other.id, lectureID: remote.id, sourcePage: nil,
+                                                            now: now, timeZone: utc))
+
+        #expect(try await store.askFlashcard(moduleID: module.id, lectureID: local.id, sourcePage: nil,
+                                             now: now, timeZone: utc)?.id == localCard.id)
+        _ = try await store.gradeStudyCard(entry, rating: .good, eventID: UUID(), now: now, answeringTime: 2,
+                                           permitEarly: false, extraNewPerModule: 0, timeZone: utc)
+        _ = try await store.setModuleArchived(moduleID: other.id, archived: true)
+        #expect(try await store.askFlashcard(moduleID: module.id, lectureID: local.id, sourcePage: nil,
+                                             now: now, timeZone: utc) == nil)
+
+        try await store.setStudyNewCardLimit(moduleID: module.id, limit: 0)
+        let tomorrow = now.addingTimeInterval(86_400)
+        #expect(try await store.askFlashcard(moduleID: module.id, lectureID: local.id, sourcePage: nil,
+                                             now: tomorrow, timeZone: utc) == nil)
+        try await store.setStudyNewCardLimit(moduleID: module.id, limit: 1)
+        #expect(try await store.askFlashcard(moduleID: module.id, lectureID: local.id, sourcePage: nil,
+                                             now: tomorrow, timeZone: utc)?.id == localCard.id)
+    }
+
+    private func schedule(dueIn: TimeInterval, reviewedAgo: TimeInterval = 172_800) -> StudyMemoryState {
+        StudyMemoryState(stability: 1, difficulty: 5, due: now.addingTimeInterval(dueIn),
+                         lastReview: now.addingTimeInterval(-reviewedAgo), reps: 3, lapses: 0, phase: .review)
     }
 
     private func card(_ front: String, pages: [Int] = [], origin: CardOrigin = .manual) -> Card {

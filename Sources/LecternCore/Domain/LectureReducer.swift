@@ -47,7 +47,12 @@ public extension Lecture {
         }) else { throw LectureError.invalidMetadata("Threads must have unique valid anchor pages") }
         if let focused = viewPreferences.focusedPageIndex, !(0..<pageCount).contains(focused) { throw LectureError.invalidMetadata("Invalid focused page") }
         if let selected = viewPreferences.selectedCardID, !cards.contains(where: { $0.id == selected }) { throw LectureError.missingCard(selected) }
-        guard jobs.allSatisfy({ job in (job.kind != .generate || !job.pages.isEmpty) && job.pages.allSatisfy { $0 > 0 && $0 <= pageCount } }) else { throw LectureError.invalidMetadata("Job pages must belong to the document") }
+        guard jobs.allSatisfy({ job in
+            // Finished jobs can outlive every slide in their original generation scope.
+            let historical = job.state != .running && pdfLayoutRevision != nil && job.pdfLayoutRevision != pdfLayoutRevision
+            return (job.kind != .generate || !job.pages.isEmpty || historical)
+                && job.pages.allSatisfy { $0 > 0 && $0 <= pageCount }
+        }) else { throw LectureError.invalidMetadata("Job pages must belong to the document") }
         guard cards.allSatisfy({ !$0.history.isEmpty }) else { throw LectureError.invalidMetadata("Card history cannot be empty") }
         for card in cards where card.verdict == .good {
             guard issues(for: card).isEmpty else { throw LectureError.invalidApproval(card.id) }

@@ -12,6 +12,7 @@ struct ChatComposerTextView: NSViewRepresentable {
     var onFocus: (Bool) -> Void
     var onSend: () -> Void
     var onMenuKey: (UInt16) -> Bool
+    var onFlashcardKey: (NSEvent) -> Bool
     var onImages: ([ChatImageInput]) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -47,6 +48,7 @@ struct ChatComposerTextView: NSViewRepresentable {
             guard let coordinator else { return false }
             if (event.keyCode == 36 || event.keyCode == 76), event.modifierFlags.contains(.shift) { return false }
             if coordinator.parent.onMenuKey(event.keyCode) { return true }
+            if editor?.hasMarkedText() == false, coordinator.parent.onFlashcardKey(event) { return true }
             if event.keyCode == 36 || event.keyCode == 76 {
                 coordinator.parent.onSend(); return true
             }

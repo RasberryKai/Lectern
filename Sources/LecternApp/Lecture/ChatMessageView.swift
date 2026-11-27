@@ -49,7 +49,7 @@ struct ChatMessageView: View {
                            isLectureChatAnswer {
                             action("Retry", "arrow.clockwise") { Task { await model.retryChatAnswer(message) } }
                                 .opacity(hovering ? 1 : 0).accessibilityHidden(!hovering)
-                                .disabled(model.readOnly || model.runningChat != nil)
+                                .disabled(model.readOnly || model.runningChat != nil || model.isShowingAskActivity)
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).onHover { hovering = $0 }

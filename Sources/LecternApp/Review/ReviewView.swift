@@ -19,7 +19,7 @@ struct ReviewView: View {
                 }
             }
         } right: {
-            LectureChatSidebar(model: model, focus: focus)
+            LectureSidebar(model: model, focus: focus)
         }
     }
 
@@ -33,17 +33,8 @@ struct ReviewView: View {
                                  activeFill: Theme.ink, activeText: Theme.canvas)
                     .help("Test hides the answer until you press Space · T switches")
             }
-            if let card = model.selectedCard {
-                if !model.answerHidden {
-                    DisclosureGroup("Source slides", isExpanded: $model.reviewSourcesVisible) {
-                        ReviewSourceSection(model: model, card: card)
-                            .padding(.top, 10)
-                    }
-                    .font(Theme.body)
-                    .panel(padding: 12)
-                }
-                CardDetail(model: model, card: card, focus: focus)
-            } else { emptyState }
+            if let card = model.selectedCard { CardDetail(model: model, card: card, focus: focus) }
+            else { emptyState }
         }
     }
 
@@ -212,6 +203,7 @@ private struct CardDetail: View {
                         HStack(spacing: 20) {
                             Button("Fix it with AI") { model.fixFlagWithClaude(cardID: card.id); focus.wrappedValue = .ask }
                                 .buttonStyle(LinkButtonStyle(color: Theme.ai))
+                                .disabled(model.isShowingAskActivity)
                             Button("Dismiss") { model.dismissFlag(cardID: card.id) }
                                 .buttonStyle(LinkButtonStyle(color: Theme.quiet))
                         }.disabled(model.readOnly)
@@ -522,6 +514,29 @@ struct DiffText: View {
 }
 
 // MARK: - Source slides
+
+struct ReviewSourcePane: View {
+    let model: LectureWindowModel
+
+    var body: some View {
+        ScrollView {
+            Group {
+                if let card = model.selectedCard {
+                    if model.answerHidden {
+                        Text("Show the answer to see its source slides.").foregroundStyle(Theme.quiet)
+                    } else {
+                        ReviewSourceSection(model: model, card: card)
+                    }
+                } else {
+                    Text("Select a card to see its source slides.").foregroundStyle(Theme.quiet)
+                }
+            }
+            .font(Theme.body)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+        }
+    }
+}
 
 private struct ReviewSourceSection: View {
     @Bindable var model: LectureWindowModel

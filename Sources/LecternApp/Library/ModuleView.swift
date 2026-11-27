@@ -244,9 +244,9 @@ struct ModuleView: View {
         })
     }
 
-    /// A lecture row under `point` that can take more pages (it has slides).
+    /// An imported lecture row under `point` that can take PDFs.
     private func lectureAccepting(_ point: CGPoint) -> UUID? {
-        lectures.first { $0.pageCount > 0 && rowFrames[$0.id]?.contains(point) == true }?.id
+        lectures.first { rowFrames[$0.id]?.contains(point) == true }?.id
     }
 
     @ViewBuilder private var lectureArchive: some View {
@@ -410,7 +410,7 @@ private struct LectureRow: View {
             }.disabled(archived)
             Button("Move lecture…") { model.movingLecture = ref }.disabled(archived)
             Button("Edit PDFs…") { Task { await model.openPDFEditor(for: ref) } }
-                .disabled(archived || lecture.pageCount == 0)
+                .disabled(archived)
             if !archived, let progress {
                 Menu("Lecture status") {
                     LectureStatusOptions(current: progress.statusOverride?.cardMakingStatus) { status in

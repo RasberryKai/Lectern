@@ -81,6 +81,47 @@ public struct StudyDeck: Identifiable, Equatable, Sendable {
     public var approvedCount: Int { approvedCards.count }
     public var seenCount: Int { approvedCards.filter { $0.memory != nil }.count }
 
+    func askFlashcard(lectureID: UUID, sourcePage: Int?, now: Date, timeZone: TimeZone,
+                      permitsNewCard: () throws -> Bool) rethrows -> StudyCard? {
+        let cards = approvedCards
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+
+        func slideDistance(_ card: StudyCard) -> Int {
+            guard card.lectureID == lectureID, let sourcePage, sourcePage > 0 else { return .max }
+            return card.card.sourcePages.lazy.filter { $0 > 0 }.map { abs($0 - sourcePage) }.min() ?? .max
+        }
+
+        let reviewed = cards.lazy.compactMap { card -> (card: StudyCard, memory: StudyMemoryState)? in
+            card.memory.map { (card, $0) }
+        }
+        let due = reviewed.filter { $0.memory.due <= now }.min { lhs, rhs in
+            let leftLocal = lhs.card.lectureID == lectureID
+            let rightLocal = rhs.card.lectureID == lectureID
+            if leftLocal != rightLocal { return leftLocal }
+            if leftLocal && calendar.isDate(lhs.memory.due, inSameDayAs: rhs.memory.due) {
+                let leftDistance = slideDistance(lhs.card)
+                let rightDistance = slideDistance(rhs.card)
+                if leftDistance != rightDistance { return leftDistance < rightDistance }
+            }
+            return (lhs.memory.due, lhs.card.id.uuidString) < (rhs.memory.due, rhs.card.id.uuidString)
+        }
+        if let due { return due.card }
+
+        let unseen = cards.lazy.filter { $0.memory == nil }.min { lhs, rhs in
+            let leftLocal = lhs.lectureID == lectureID
+            let rightLocal = rhs.lectureID == lectureID
+            if leftLocal != rightLocal { return leftLocal }
+            return (slideDistance(lhs), lhs.id.uuidString) < (slideDistance(rhs), rhs.id.uuidString)
+        }
+        if let unseen, try permitsNewCard() { return unseen }
+
+        return reviewed.min { lhs, rhs in
+            (lhs.memory.lastReview, lhs.memory.due, lhs.card.id.uuidString) <
+                (rhs.memory.lastReview, rhs.memory.due, rhs.card.id.uuidString)
+        }?.card
+    }
+
     public func neededPerDay(now: Date = Date(), timeZone: TimeZone = .current) -> Int? {
         guard let exam = module.examDate else { return nil }
         var calendar = Calendar(identifier: .gregorian)
