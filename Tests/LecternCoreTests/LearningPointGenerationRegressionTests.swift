@@ -71,7 +71,7 @@ private actor PausedGenerationProvider: AIProvider {
         ])))
         let runner = JobRunner(store: store, providers: [FakeAIProvider(responses: [response])])
 
-        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, replaceExistingCards: true)
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, createNewSet: true)
         await runner.waitUntilIdle()
 
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
@@ -93,7 +93,7 @@ private actor PausedGenerationProvider: AIProvider {
         ])))
         let runner = JobRunner(store: store, providers: [FakeAIProvider(responses: [response])])
 
-        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, replaceExistingCards: true)
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, createNewSet: true)
         await runner.waitUntilIdle()
 
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
@@ -102,7 +102,7 @@ private actor PausedGenerationProvider: AIProvider {
         #expect(saved.cards.filter { $0.learningPointID == nil }.count == 1)
     }
 
-    @Test func splitDescendantsKeepProvenanceAndAreAllFrozenIntoReplaceDrafts() async throws {
+    @Test func splitDescendantsStayInTheirSetAndCanGuideASecondSet() async throws {
         var point = LearningPoint(text: "A concept from chat.", pages: [1], reviewed: true)
         point.draft = LearningPointDraft(front: "Original?", back: "Original answer.")
         var parent = Card(sourcePages: [1], front: "Current parent?", back: "Current parent answer.",
@@ -122,8 +122,9 @@ private actor PausedGenerationProvider: AIProvider {
         let children = lecture.cards.filter { !$0.isSuperseded }
         #expect(children.count == 2)
         #expect(children.allSatisfy { $0.learningPointID == point.id })
+        #expect(children.allSatisfy { lecture.cardGenerationIDs[$0.id] == lecture.cardGenerationIDs[parent.id] })
         #expect(lecture.learningPoints[0].cardIDs == children.map(\.id))
-        let drafts = PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1], replacesExistingCards: true)
+        let drafts = PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1], includeLinkedDrafts: true)
         #expect(drafts.map(\.point) == [point.id, point.id])
         #expect(Set(drafts.map(\.wirePointID)) == Set(children.map(\.id)))
         #expect(Set(drafts.map(\.front)) == Set(["Descendant A?", "Descendant B?"]))
@@ -132,24 +133,23 @@ private actor PausedGenerationProvider: AIProvider {
         defer { try? FileManager.default.removeItem(at: root) }
         let childA = try #require(children.first { $0.front == "Descendant A?" })
         let output = AIResponse(content: try encodeGeneration(GeneratedCards(cards: [
-            WireCard(front: childA.front, back: childA.back, sourceSlides: [1], point: childA.id.uuidString)
+            WireCard(front: "Alternative A?", back: childA.back, sourceSlides: [1], point: childA.id.uuidString)
         ])))
         let runner = JobRunner(store: store, providers: [FakeAIProvider(responses: [output])])
 
-        _ = try await runner.generate(moduleID: module.id, lectureID: storedLecture.id, replaceExistingCards: true)
+        let newID = try await runner.generate(moduleID: module.id, lectureID: storedLecture.id, createNewSet: true)
         await runner.waitUntilIdle()
 
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: storedLecture.id)
-        #expect(saved.cards.count == 2)
-        #expect(Set(saved.learningPoints[0].cardIDs ?? []).count == 2)
+        #expect(Array(saved.cards.prefix(lecture.cards.count)).map(\.id) == lecture.cards.map(\.id))
+        #expect(Set(saved.learningPoints[0].cardIDs ?? []).count == 3)
         #expect(saved.cards.allSatisfy { $0.learningPointID == point.id })
-        #expect(Set(saved.cards.map(\.front)) == Set(["Descendant A?", "Descendant B?"]))
+        #expect(saved.cards.filter { saved.cardGenerationIDs[$0.id] == newID }.map(\.front) == ["Alternative A?"])
     }
 
-    @Test func replacementDismissesPendingEditSuggestionForRemovedTarget() throws {
+    @Test func generationWithNoCardsKeepsPendingEditSuggestions() throws {
         let card = Card(sourcePages: [1], front: "Old?", back: "Old answer.")
-        var job = Job(kind: .generate, pages: [1])
-        job.replacesExistingCards = true
+        let job = Job(kind: .generate, pages: [1])
         var lecture = Lecture(moduleID: UUID(), name: "Suggestion", pageCount: 1, cards: [card], jobs: [job])
         var message = ChatMessage(role: .assistant, text: "A suggestion")
         message.suggestion = CardSuggestion(reason: "Clarified", cardID: card.id,
@@ -158,11 +158,11 @@ private actor PausedGenerationProvider: AIProvider {
 
         try LectureReducer.reduce(&lecture, action: .landGeneration(jobID: job.id, cards: [], skipped: [], usage: nil))
 
-        #expect(lecture.currentChat.messages[0].suggestion?.state == .dismissed)
-        #expect(throws: (any Error).self) {
-            try LectureReducer.reduce(&lecture, action: .resolveCardSuggestion(chatID: lecture.currentChat.id,
-                messageID: message.id, apply: true))
-        }
+        #expect(lecture.cards == [card])
+        #expect(lecture.currentChat.messages[0].suggestion?.state == .pending)
+        try LectureReducer.reduce(&lecture, action: .resolveCardSuggestion(chatID: lecture.currentChat.id,
+            messageID: message.id, apply: true))
+        #expect(lecture.cards.first?.front == "New?")
     }
 
     @Test func inFlightGenerationDoesNotConsumeAChangedDraft() async throws {
@@ -173,7 +173,7 @@ private actor PausedGenerationProvider: AIProvider {
         let provider = PausedGenerationProvider()
         let runner = JobRunner(store: store, providers: [provider])
 
-        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, replaceExistingCards: true)
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, createNewSet: true)
         let request = await provider.nextRequest()
         #expect(request.prompt.contains("Old draft?"))
         _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { current in
@@ -191,7 +191,7 @@ private actor PausedGenerationProvider: AIProvider {
         #expect(saved.learningPoints[0].cardIDs == nil)
     }
 
-    @Test func inFlightReplacePreservesLatestEditedLinkedDescendant() async throws {
+    @Test func inFlightGenerationPreservesLatestEditedLinkedDescendant() async throws {
         var point = LearningPoint(text: "A linked concept.", pages: [1], reviewed: true)
         point.draft = LearningPointDraft(front: "Original card?", back: "Original answer.")
         var linkedCard = Card(sourcePages: [1], front: "Original card?", back: "Original answer.",
@@ -204,7 +204,7 @@ private actor PausedGenerationProvider: AIProvider {
         let provider = PausedGenerationProvider()
         let runner = JobRunner(store: store, providers: [provider])
 
-        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, replaceExistingCards: true)
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, createNewSet: true)
         let request = await provider.nextRequest()
         #expect(request.prompt.contains("Original card?"))
         _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { current in
@@ -218,13 +218,14 @@ private actor PausedGenerationProvider: AIProvider {
 
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(saved.cards.count == 1)
+        #expect(saved.cards[0].id == card.id)
         #expect(saved.cards[0].front == "Latest card?")
         #expect(saved.cards[0].back == "Latest answer.")
         #expect(saved.cards[0].learningPointID == point.id)
         #expect(saved.learningPoints[0].cardIDs == [saved.cards[0].id])
     }
 
-    @Test func inFlightReplacePreservesLatestLinkedSourcePages() async throws {
+    @Test func inFlightGenerationPreservesLatestLinkedSourcePages() async throws {
         var point = LearningPoint(text: "A linked concept.", pages: [1, 2], reviewed: true)
         point.draft = LearningPointDraft(front: "Original card?", back: "Original answer.")
         var linkedCard = Card(sourcePages: [1], front: "Original card?", back: "Original answer.",
@@ -234,11 +235,11 @@ private actor PausedGenerationProvider: AIProvider {
         let card = linkedCard
         let (store, module, lecture, root) = try await fixture(pageCount: 2, cards: [card], learningPoints: [point])
         defer { try? FileManager.default.removeItem(at: root) }
-        #expect(PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1, 2], replacesExistingCards: true).first?.pages == [1])
+        #expect(PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1, 2], includeLinkedDrafts: true).first?.pages == [1])
         let provider = PausedGenerationProvider()
         let runner = JobRunner(store: store, providers: [provider])
 
-        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, replaceExistingCards: true)
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, createNewSet: true)
         let request = await provider.nextRequest()
         #expect(request.prompt.contains("Original card?"))
         _ = try await store.updateLecture(moduleID: module.id, lectureID: lecture.id) { current in
@@ -252,6 +253,7 @@ private actor PausedGenerationProvider: AIProvider {
 
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(saved.cards.count == 1)
+        #expect(saved.cards[0].id == card.id)
         #expect(saved.cards[0].sourcePages == [2])
         #expect(saved.cards[0].learningPointID == point.id)
         #expect(saved.learningPoints[0].cardIDs == [saved.cards[0].id])

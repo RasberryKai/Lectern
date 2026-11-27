@@ -145,16 +145,16 @@ private func encode<T: Encodable>(_ value: T) throws -> String { String(decoding
         #expect(lecture.cards[0].front == "Better?"); #expect(lecture.cards[0].history.count == 2)
 
         // Replacing every card brings chat-made cards back as drafts, plus the draft still waiting.
-        let drafts = PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1, 2], replacesExistingCards: true)
+        let drafts = PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1, 2], includeLinkedDrafts: true)
         #expect(Set(drafts.map(\.point)) == [add.id, improve.id, waiting.id])
-        #expect(PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1, 2], replacesExistingCards: false).map(\.point) == [waiting.id])
-        let prompt = try PromptBuilder.build(kind: .generate, rules: "", module: Module(name: "M"), lecture: lecture, pages: [1, 2], existingFronts: [], replacesExistingCards: true)
+        #expect(PromptBuilder.chatCardDrafts(lecture: lecture, pages: [1, 2], includeLinkedDrafts: false).map(\.point) == [waiting.id])
+        let prompt = try PromptBuilder.build(kind: .generate, rules: "", module: Module(name: "M"), lecture: lecture, pages: [1, 2], existingFronts: [], includeLinkedDrafts: true)
         #expect(prompt.contains("CHAT CARD DRAFTS")); #expect(prompt.contains(waiting.id.uuidString))
         #expect(!prompt.contains("\"text\":\"New insight\""))
 
         try LectureReducer.reduce(&lecture, action: .skipLearningPoint(pointID: waiting.id))
         #expect(!lecture.learningPoints[2].included)
-        #expect(PromptBuilder.chatCardDrafts(lecture: lecture, pages: [2], replacesExistingCards: true).isEmpty)
+        #expect(PromptBuilder.chatCardDrafts(lecture: lecture, pages: [2], includeLinkedDrafts: true).isEmpty)
     }
 
     @Test func generateLinksDraftCardsAndAddsAnyTheModelDropped() async throws {
@@ -173,7 +173,7 @@ private func encode<T: Encodable>(_ value: T) throws -> String { String(decoding
             ], skipped: [])))
         }
         let runner = JobRunner(store: store, providers: [provider])
-        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, replaceExistingCards: true)
+        _ = try await runner.generate(moduleID: module.id, lectureID: lecture.id, createNewSet: true)
         await runner.waitUntilIdle()
         let saved = try await store.loadLecture(moduleID: module.id, lectureID: lecture.id)
         #expect(saved.cards.count == 3)

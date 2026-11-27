@@ -319,7 +319,7 @@ extension LectureWindowModel {
         if mode == .prepare { focus(page - 1) } else { enlargedPage = page }
     }
     func openChatCard(_ id: UUID) {
-        reviewSearch = ""; reviewFilter = .all; setMode(.review); selectCard(id)
+        showReviewCard(id)
         showAsk()
     }
     func resolveChatDeletions(chatID: UUID, messageID: UUID, cardIDs: Set<UUID>, delete: Bool) async {

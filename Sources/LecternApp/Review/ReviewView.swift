@@ -7,57 +7,22 @@ struct ReviewView: View {
     var focus: FocusState<EditorField?>.Binding
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            LecturePanes(model: model) {
-                CardList(model: model)
-            } stage: {
-                GeometryReader { geometry in
-                    ScrollView {
-                        reviewStage
-                            .frame(maxWidth: 640)
-                            .padding(.horizontal, min(40, max(12, geometry.size.width * 0.04)))
-                            .padding(.vertical, 24)
-                            .frame(maxWidth: .infinity)
-                    }
+        LecturePanes(model: model) {
+            CardList(model: model)
+        } stage: {
+            GeometryReader { geometry in
+                ScrollView {
+                    reviewStage
+                        .frame(maxWidth: 640)
+                        .padding(.horizontal, min(40, max(12, geometry.size.width * 0.04)))
+                        .padding(.vertical, 24)
+                        .frame(maxWidth: .infinity)
                 }
-                .background(Theme.canvas)
-            } right: {
-                LectureSidebar(model: model, focus: focus)
             }
+            .background(Theme.canvas)
+        } right: {
+            LectureSidebar(model: model, focus: focus)
         }
-    }
-
-    private var header: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                reviewTitle.fixedSize()
-                Spacer(minLength: 0)
-                modeDescription.fixedSize()
-            }
-            VStack(alignment: .leading, spacing: 4) { reviewTitle; modeDescription }
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 11)
-        .background(Theme.inset)
-        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
-    }
-
-    private var reviewTitle: some View {
-        Text("Review · \(model.moduleName) · \(model.lecture.name)")
-            .font(Theme.heading(16))
-            .tracking(-0.3)
-            .lineLimit(1)
-            .accessibilityAddTraits(.isHeader)
-    }
-
-    private var modeDescription: some View {
-        Text(model.selectedCard?.solve == nil
-             ? (model.testMode ? "Test hides the answer until you reveal it" : "Browse shows both sides of the card")
-             : (model.testMode ? "Test hides the answer key until you check" : "Browse shows the generated example solved"))
-            .font(.system(size: 13))
-            .foregroundStyle(Theme.quiet)
     }
 
     private var reviewStage: some View {
@@ -117,20 +82,23 @@ struct ReviewView: View {
                 if model.lecture.pageCount > 0 {
                     Button("Go to Prepare") { model.setMode(.prepare) }.buttonStyle(PrimaryButtonStyle())
                 }
-            } else if model.testMode && model.reviewFilter == .unreviewed && model.count(for: .unreviewed) == 0 {
+            } else if model.reviewSearch.isEmpty && model.reviewCardScope == .approved {
+                Text("No approved cards yet").font(Theme.heading(22))
+                Text("Mark a card Good to add it here.").font(Theme.body).foregroundStyle(Theme.quiet)
+            } else if model.testMode && model.reviewCardScope == .all && model.reviewFilter == .unreviewed && model.scopedUnreviewedCount == 0 {
                 Text("Every card is tested").font(Theme.heading(22))
-                Text("\(Format.count(model.count(for: .good), "Good card")) ready for Anki. Bad cards stay here.")
+                Text("\(Format.count(model.approvedCount, "Good card")) ready for study.")
                     .font(Theme.body).foregroundStyle(Theme.quiet)
                 HStack(spacing: 10) {
                     Button("Export to Anki") {
                         Task { await model.app.returnToLibrary(destination: .export(model.ref.moduleID, lectureID: model.ref.lectureID)) }
                     }.buttonStyle(PrimaryButtonStyle())
-                    Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
+                    Button("Show all cards") { model.showAllReviewCards() }.buttonStyle(SecondaryButtonStyle())
                 }
             } else {
-                Text("Nothing in this filter").font(Theme.heading(22))
+                Text("No cards in this view").font(Theme.heading(22))
                 if model.reviewSearch.isEmpty {
-                    Button("Show all cards") { model.setReviewFilter(.all) }.buttonStyle(SecondaryButtonStyle())
+                    Button("Show all cards") { model.showAllReviewCards() }.buttonStyle(SecondaryButtonStyle())
                 } else {
                     Button("Clear search") { model.reviewSearch = ""; model.setReviewFilter(model.reviewFilter) }
                         .buttonStyle(SecondaryButtonStyle())
@@ -159,10 +127,11 @@ private struct CardList: View {
                 .frame(height: 34)
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: 7))
                 .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border))
-                SegmentedControl(options: [(ReviewFilter.all, "All"), (ReviewFilter.unreviewed, "To Review")],
-                                 selection: Binding(get: { model.reviewFilter }, set: { model.setReviewFilter($0) }),
-                                 activeFill: Theme.inset, activeText: Theme.ink)
-                    .frame(maxWidth: .infinity)
+                if model.reviewCardScope != .approved {
+                    SegmentedControl(options: [(ReviewFilter.all, "All"), (ReviewFilter.unreviewed, "To Review")],
+                                     selection: Binding(get: { model.reviewFilter }, set: { model.setReviewFilter($0) }),
+                                     activeFill: Theme.borderStrong, activeText: Theme.ink, fillsWidth: true)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.top, 14)
@@ -174,7 +143,8 @@ private struct CardList: View {
                     LazyVStack(spacing: 2) {
                         ForEach(model.visibleCards) { card in
                             Button { model.selectCard(card.id) } label: {
-                                CardRow(card: card, number: numbers[card.id] ?? 0, issues: !model.lecture.issues(for: card).isEmpty,
+                                CardRow(card: card, number: numbers[card.id] ?? 0, largestNumber: numbers.count,
+                                        issues: !model.lecture.issues(for: card).isEmpty,
                                         revising: model.runningJobs.contains { $0.kind == .revise && $0.targetCardID == card.id },
                                         selected: card.id == model.selectedCardID)
                             }
@@ -200,13 +170,22 @@ private struct CardList: View {
 private struct CardRow: View {
     let card: Card
     let number: Int
+    let largestNumber: Int
     let issues: Bool
     let revising: Bool
     let selected: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("\(number)").font(Theme.caption).monospacedDigit().foregroundStyle(Theme.quiet).frame(width: 20, alignment: .leading)
+            Text("\(largestNumber)")
+                .hidden()
+                .overlay(alignment: .leading) { Text("\(number)") }
+                .font(Theme.caption)
+                .monospacedDigit()
+                .foregroundStyle(Theme.quiet)
+                .fixedSize()
+                .frame(minWidth: 20, alignment: .leading)
+                .accessibilityHidden(true)
             HStack(spacing: 5) {
                 if card.solve != nil {
                     Text("solve")

@@ -74,6 +74,32 @@ public extension Lecture {
     }
     func coverage(page: Int) -> Int { cards.filter { !$0.isSuperseded && $0.verdict != .bad && $0.sourcePages.contains(page) }.count }
     var uncoveredSelectedPages: [Int] { slides.filter { $0.isSelected && coverage(page: $0.pageIndex + 1) == 0 }.map { $0.pageIndex + 1 } }
+    /// Includes superseded parents so split cards keep their original set.
+    var cardGenerationIDs: [UUID: UUID] {
+        let cardsByID = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
+        var result: [UUID: UUID] = [:]
+        for card in cards {
+            var current = card
+            var visited = Set<UUID>()
+            while visited.insert(current.id).inserted {
+                if let jobID = result[current.id] ?? current.inheritedGenerationJobID {
+                    result[card.id] = jobID
+                    break
+                }
+                switch current.origin {
+                case .generated(let jobID): result[card.id] = jobID
+                case .manual: break
+                case .splitFrom(let parentID):
+                    if let parent = cardsByID[parentID] {
+                        current = parent
+                        continue
+                    }
+                }
+                break
+            }
+        }
+        return result
+    }
     var visibleCards: [Card] {
         cards.filter { card in
             guard !card.isSuperseded else { return false }
@@ -242,18 +268,6 @@ public enum LectureReducer {
             guard lecture.jobs[j].state == .running else { throw LectureError.jobNotRunning(id) }
             guard lecture.jobs[j].kind == .generate else { throw LectureError.invalidMetadata("Wrong job kind") }
             let pages = lecture.jobs[j].pages
-            if lecture.jobs[j].replacesExistingCards == true {
-                let removedCardIDs = Set(lecture.cards.map(\.id))
-                invalidateSuggestions(targeting: removedCardIDs, in: &lecture)
-                lecture.cards.removeAll()
-                lecture.skippedSlides.removeAll()
-                lecture.viewPreferences.selectedCardID = nil
-                // Chat points whose cards are gone wait in the drawer again unless this generation re-creates them.
-                for p in lecture.learningPoints.indices where !(lecture.learningPoints[p].cardIDs ?? []).isEmpty {
-                    lecture.learningPoints[p].cardIDs = nil
-                    if lecture.learningPoints[p].draft != nil && lecture.learningPoints[p].included { lecture.learningPoints[p].reviewed = false }
-                }
-            }
             let generated = try drafts.map { draft in
                 var card = Card(sourcePages: draft.sourcePages, front: draft.front, back: draft.back, flag: draft.flag, history: [CardRevision(front: draft.front, back: draft.back, author: .ai, reason: draft.learningPointID == nil ? nil : "From your chat", at: now)], origin: .generated(jobID: id), allowedSourcePages: pages)
                 card.learningPointID = draft.learningPointID
@@ -277,6 +291,7 @@ public enum LectureReducer {
                     .filter { seen.insert($0).inserted }
                 lecture.learningPoints[p].reviewed = true
             }
+            lecture.skippedSlides.removeAll { pages.contains($0.slide) }
             lecture.skippedSlides.append(contentsOf: skipped); lecture.jobs[j].state = .succeeded; lecture.jobs[j].finishedAt = now; lecture.jobs[j].usage = usage
         case .landProposal(let id, let cards, let rationale, let usage):
             let j = try jobIndex(id, in: lecture)
@@ -571,15 +586,8 @@ public struct LectureController: Sendable {
     public mutating func receive(_ latest: Lecture) throws {
         guard latest.id == lecture.id, latest.moduleID == lecture.moduleID else { throw LectureError.identityMismatch }
         guard latest.updatedAt.timeIntervalSince1970.rounded(.down) >= lecture.updatedAt.timeIntervalSince1970.rounded(.down) else { throw LectureError.staleSnapshot }
-        let replacementLanded = latest.jobs.contains { job in
-            job.kind == .generate && job.replacesExistingCards == true && job.state == .succeeded &&
-                lecture.jobs.first(where: { $0.id == job.id })?.state != .succeeded
-        }
         for current in lecture.cards {
-            guard let incoming = latest.cards.first(where: { $0.id == current.id }) else {
-                guard replacementLanded else { throw LectureError.staleSnapshot }
-                continue
-            }
+            guard let incoming = latest.cards.first(where: { $0.id == current.id }) else { throw LectureError.staleSnapshot }
             guard Set(current.history.map(\.id)).isSubset(of: Set(incoming.history.map(\.id))) else { throw LectureError.staleSnapshot }
         }
         _ = try latest.validated()

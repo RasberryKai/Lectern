@@ -207,12 +207,13 @@ struct LandingBanner: View {
                         .padding(14).frame(width: 340)
                     }
             }
-            Button("Review them") {
-                model.dismissedJobIDs.insert(job.id)
-                model.setMode(.review)
-                model.setReviewFilter(.unreviewed)
+            if !cards.isEmpty {
+                Button("Review them") {
+                    model.setMode(.review)
+                    model.revealGenerated(job.id)
+                }
+                .buttonStyle(SecondaryButtonStyle())
             }
-            .buttonStyle(SecondaryButtonStyle())
             Button { model.dismissedJobIDs.insert(job.id) } label: { Image(systemName: "xmark") }
                 .buttonStyle(.plain).foregroundStyle(Theme.quiet)
         }

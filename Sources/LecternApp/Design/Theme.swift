@@ -198,6 +198,7 @@ struct SegmentedControl<Value: Hashable>: View {
     @Binding var selection: Value
     var activeFill: Color = Theme.accent
     var activeText: Color = Theme.onAccent
+    var fillsWidth = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -207,7 +208,8 @@ struct SegmentedControl<Value: Hashable>: View {
                     Text(option.label)
                         .font(.system(size: 13, weight: active ? .semibold : .regular))
                         .foregroundStyle(active ? activeText : Theme.ink)
-                        .padding(.horizontal, 13).padding(.vertical, 6)
+                        .padding(.horizontal, fillsWidth ? 0 : 13).padding(.vertical, 6)
+                        .frame(maxWidth: fillsWidth ? .infinity : nil)
                         .background(active ? activeFill : Color.clear)
                         .contentShape(Rectangle())
                 }
@@ -216,7 +218,7 @@ struct SegmentedControl<Value: Hashable>: View {
                 if index < options.count - 1 { Rectangle().fill(Theme.border).frame(width: 1) }
             }
         }
-        .fixedSize()
+        .fixedSize(horizontal: !fillsWidth, vertical: true)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong, lineWidth: 1))

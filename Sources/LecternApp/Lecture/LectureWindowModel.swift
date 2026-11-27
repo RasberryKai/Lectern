@@ -23,6 +23,8 @@ final class LectureWindowModel {
     var prepareFilter: PrepareFilter
     var reviewSearch = ""
     var reviewFilter: ReviewFilter
+    private(set) var reviewCardScope: ReviewCardScope
+    @ObservationIgnored private var reviewSelections: [ReviewCardScope: UUID] = [:]
     var selectedCardID: UUID?
     var thumbnailSize: ThumbnailSize
     var notesVisible = false
@@ -103,11 +105,13 @@ final class LectureWindowModel {
         focusedPageIndex = lecture.pageCount > 0 ? (prefs.focusedPageIndex ?? 0) : nil
         prepareFilter = prefs.filter == .selected ? .selected : .all
         reviewFilter = (prefs.reviewFilter == .unreviewed || prefs.reviewFilter == .needsAdjustment) ? .unreviewed : .all
+        reviewCardScope = prefs.reviewCardScope ?? .all
         selectedCardID = prefs.selectedCardID
         thumbnailSize = prefs.thumbnailSize
         thumbnailsVisible = prefs.sidebarVisible
         coverageShowsBacks = prefs.coverageShowsBacks
-        if selectedCardID == nil { selectedCardID = visibleCards.first?.id }
+        if !reviewScopes.contains(where: { $0.scope == reviewCardScope }) { reviewCardScope = .all }
+        if !visibleCards.contains(where: { $0.id == selectedCardID }) { selectedCardID = visibleCards.first?.id }
         chatDraft = lecture.currentChat.draft
         chatDraftAttachments = lecture.currentChat.draftAttachments
         loadEditor()
@@ -165,20 +169,49 @@ final class LectureWindowModel {
         }
     }
 
+    var reviewScopes: [(scope: ReviewCardScope, title: String)] {
+        var scopes: [(scope: ReviewCardScope, title: String)] = [(.all, "All cards")]
+        let generationIDs = lecture.cardGenerationIDs
+        let cards = activeCards
+        let activeGenerationIDs = Set(cards.compactMap { generationIDs[$0.id] })
+        guard activeGenerationIDs.count > 1 else { return scopes }
+
+        let representedIDs = Set(generationIDs.values)
+        var seen = Set<UUID>()
+        let orderedIDs = (lecture.jobs.map(\.id) + lecture.cards.compactMap { generationIDs[$0.id] })
+            .filter { representedIDs.contains($0) && seen.insert($0).inserted }
+        for (offset, id) in orderedIDs.enumerated() where activeGenerationIDs.contains(id) {
+            scopes.append((.generation(id), "Set \(offset + 1)"))
+        }
+        if cards.contains(where: { generationIDs[$0.id] == nil }) {
+            scopes.append((.other, "Other cards"))
+        }
+        scopes.append((.approved, "Approved"))
+        return scopes
+    }
+
+    private var scopedCards: [Card] {
+        if reviewCardScope == .all { return activeCards }
+        let generationIDs = lecture.cardGenerationIDs
+        return activeCards.filter { reviewCardScope.contains($0, generationID: generationIDs[$0.id]) }
+    }
+
     var visibleCards: [Card] {
         var copy = lecture
-        copy.viewPreferences.reviewFilter = reviewFilter
-        let cards = reviewFilter == .aiFlagged ? activeCards.filter { $0.flag != nil || $0.proposal != nil } : copy.visibleCards
-        let order = Dictionary(uniqueKeysWithValues: activeCards.enumerated().map { ($0.element.id, $0.offset) })
-        return cards.sorted { (order[$0.id] ?? 0) < (order[$1.id] ?? 0) }.filter { reviewSearch.isEmpty || $0.front.localizedCaseInsensitiveContains(reviewSearch) || $0.back.localizedCaseInsensitiveContains(reviewSearch) }
+        let scoped = scopedCards
+        copy.cards = scoped
+        copy.viewPreferences.reviewFilter = reviewCardScope == .approved ? .all : reviewFilter
+        let matching = reviewFilter == .aiFlagged && reviewCardScope != .approved
+            ? scoped.filter { $0.flag != nil || $0.proposal != nil } : copy.visibleCards
+        let ids = Set(matching.map(\.id))
+        return scoped.filter { card in
+            ids.contains(card.id) && (reviewSearch.isEmpty || card.front.localizedCaseInsensitiveContains(reviewSearch)
+                                     || card.back.localizedCaseInsensitiveContains(reviewSearch))
+        }
     }
 
-    func count(for filter: ReviewFilter) -> Int {
-        var copy = lecture
-        copy.viewPreferences.reviewFilter = filter
-        return filter == .aiFlagged ? activeCards.filter { $0.flag != nil || $0.proposal != nil }.count : copy.visibleCards.count
-    }
-
+    var scopedUnreviewedCount: Int { scopedCards.filter { $0.verdict.isAwaitingReview }.count }
+    var approvedCount: Int { activeCards.filter { $0.verdict == .good }.count }
     var activeCards: [Card] { lecture.cards.filter { !$0.isSuperseded } }
     var reviewedCount: Int { activeCards.filter { !$0.verdict.isAwaitingReview }.count }
 
@@ -209,7 +242,10 @@ final class LectureWindowModel {
 
     /// The latest Generate that landed while this window was open, until dismissed.
     var landedGenerate: Job? {
-        lecture.jobs.last { $0.kind == .generate && $0.state == .succeeded && ($0.finishedAt ?? .distantPast) > openedAt && !dismissedJobIDs.contains($0.id) }
+        guard let latest = lecture.jobs.filter({ $0.kind == .generate && $0.state == .succeeded })
+            .max(by: { ($0.finishedAt ?? .distantPast) < ($1.finishedAt ?? .distantPast) }),
+              (latest.finishedAt ?? .distantPast) > openedAt, !dismissedJobIDs.contains(latest.id) else { return nil }
+        return latest
     }
 
     // MARK: Navigation
@@ -272,9 +308,19 @@ final class LectureWindowModel {
     /// Prepare → Review showing the cards from one slide.
     func showCards(fromPage page: Int) {
         flushNote()
-        mode = .review
+        if let card = cards(from: page).first { showReviewCard(card.id) }
+        else { setMode(.review); showAllReviewCards() }
+    }
+
+    func showReviewCard(_ id: UUID) {
+        guard let card = activeCards.first(where: { $0.id == id }) else { return }
+        reviewSearch = ""
         reviewFilter = .all
-        selectCard(cards(from: page).first?.id ?? visibleCards.first?.id)
+        setMode(.review)
+        let generationID = lecture.cardGenerationIDs[id]
+        let scope = card.verdict == .good ? .approved : generationID.map(ReviewCardScope.generation) ?? .all
+        if !reviewCardScope.contains(card, generationID: generationID) { setReviewScope(scope) }
+        selectCard(id)
     }
 
     func selectCard(_ id: UUID?) {
@@ -299,6 +345,21 @@ final class LectureWindowModel {
         selectCard(visibleCards.first?.id)
     }
 
+    func setReviewScope(_ scope: ReviewCardScope) {
+        guard reviewCardScope != scope else { return }
+        guard scope == .all || reviewScopes.contains(where: { $0.scope == scope }) else { return }
+        reviewSelections[reviewCardScope] = selectedCardID
+        reviewCardScope = scope
+        let cards = visibleCards
+        let previousID = reviewSelections[scope]
+        selectCard(cards.first(where: { $0.id == previousID })?.id ?? cards.first?.id)
+    }
+
+    func showAllReviewCards() {
+        setReviewScope(.all)
+        setReviewFilter(.all)
+    }
+
     // MARK: Test mode
 
     /// Review as flashcards: the back, sources and AI notes stay hidden until the answer is shown.
@@ -315,7 +376,7 @@ final class LectureWindowModel {
         revealedCardID = nil
         UserDefaults.standard.set(on, forKey: "v2.review.testMode")
         // Flip review starts with unreviewed cards. Solve review tests the displayed sample.
-        if on, selectedCard?.solve == nil, reviewFilter == .all, count(for: .unreviewed) > 0 {
+        if on, selectedCard?.solve == nil, reviewFilter == .all, scopedUnreviewedCount > 0 {
             setReviewFilter(.unreviewed)
         }
     }
@@ -387,6 +448,15 @@ final class LectureWindowModel {
     /// Called when the session's lecture changes. Keeps the user's in-flight typing, but picks
     /// up text that changed elsewhere (accepted proposal, restore, undo, another window).
     func syncEditor() {
+        if !reviewScopes.contains(where: { $0.scope == reviewCardScope }) { setReviewScope(.all) }
+        if let card = selectedCard, !scopedCards.contains(where: { $0.id == card.id }) {
+            if mode == .review, reviewCardScope == .approved, card.verdict.isAwaitingReview {
+                // Editing an approved card sends it back for review. Keep that editor open.
+                showReviewCard(card.id)
+            } else {
+                selectCard(visibleCards.first?.id)
+            }
+        }
         if selectedCardID != nil && selectedCard == nil {
             // Selected card was split, undone or removed: fall back to a visible card.
             selectedCardID = visibleCards.first?.id
@@ -438,10 +508,11 @@ final class LectureWindowModel {
 
     func setVerdict(_ verdict: CardVerdict) async {
         guard let card = selectedCard else { return }
-        await run { try await session.flushEdits() }
+        let scope = reviewCardScope
         let before = visibleCards
+        await run { try await session.flushEdits() }
         await dispatch(.setVerdict(cardID: card.id, verdict))
-        guard errorMessage == nil else { return }
+        guard errorMessage == nil, reviewCardScope == scope, selectedCardID == card.id else { return }
         advance(from: card.id, previous: before)
     }
 
@@ -538,28 +609,35 @@ final class LectureWindowModel {
 
     func generate(additionalInstructions: String) async {
         guard !readOnly else { return }
-        var started = false
+        var startedJobID: UUID?
         await run {
             try await flushNoteNow()
-            _ = try await session.generate(backend: backend, model: model,
-                                           additionalInstructions: additionalInstructions, replaceExistingCards: true)
-            started = true
+            startedJobID = try await session.generate(backend: backend, model: model,
+                                                      additionalInstructions: additionalInstructions, createNewSet: true)
             try await session.refresh()
         }
         app.scheduleReload()
         // Review shows the generation overlay until the cards land, then reveals them.
-        if started { setMode(.review) }
+        if let startedJobID {
+            setMode(.review)
+            revealGenerated(startedJobID)
+        }
     }
 
     /// Called when a Generate stops running. In Review, show the new cards; with none,
     /// leave the job undismissed so Prepare's landing banner can explain the skipped slides.
     func revealGenerated(_ jobID: UUID) {
         guard mode == .review, let job = lecture.jobs.first(where: { $0.id == jobID }), job.state == .succeeded else { return }
-        let fresh = activeCards.filter { if case .generated(let id) = $0.origin { return id == jobID }; return false }
-        guard let first = fresh.first else { return }
+        let generationIDs = lecture.cardGenerationIDs
+        guard activeCards.contains(where: { generationIDs[$0.id] == jobID }) else { return }
         dismissedJobIDs.insert(jobID)
-        setReviewFilter(fresh.allSatisfy { $0.verdict == .unreviewed } ? .unreviewed : .all)
-        selectCard(first.id)
+        reviewSearch = ""
+        reviewFilter = .unreviewed
+        setReviewScope(.generation(jobID))
+        setReviewFilter(.unreviewed)
+        if reviewCardScope == .all, let first = visibleCards.first(where: { generationIDs[$0.id] == jobID }) {
+            selectCard(first.id)
+        }
     }
 
     func askContext(for page: Int) -> ThreadContext {
@@ -649,6 +727,7 @@ final class LectureWindowModel {
         await run {
             try await app.runner.retry(moduleID: ref.moduleID, lectureID: ref.lectureID, jobID: jobID)
             try await session.refresh()
+            revealGenerated(jobID)
         }
         app.scheduleReload()
     }
@@ -674,6 +753,7 @@ final class LectureWindowModel {
         prefs.focusedPageIndex = focusedPageIndex.flatMap { lecture.slides.indices.contains($0) ? $0 : nil }
         prefs.filter = prepareFilter == .selected ? .selected : .all
         prefs.reviewFilter = reviewFilter
+        prefs.reviewCardScope = reviewCardScope == .all ? nil : reviewCardScope
         prefs.selectedCardID = selectedCardID.flatMap { id in lecture.cards.contains { $0.id == id } ? id : nil }
         prefs.thumbnailSize = thumbnailSize
         prefs.sidebarVisible = thumbnailsVisible

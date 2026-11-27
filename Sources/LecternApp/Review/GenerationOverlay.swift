@@ -1,8 +1,7 @@
 import LecternCore
 import SwiftUI
 
-/// Covers Review while a Generate runs, so the cards about to be replaced aren't reviewed,
-/// and fades away to reveal the new cards when the job lands.
+/// Covers Review while Generate runs and fades away when the new set lands.
 struct GenerationOverlay: View {
     let model: LectureWindowModel
     let job: Job
@@ -18,10 +17,6 @@ struct GenerationOverlay: View {
                         .font(Theme.body).foregroundStyle(Theme.quiet).monospacedDigit()
                 }
                 Text(status).font(Theme.small).foregroundStyle(Theme.faint)
-                if job.replacesExistingCards == true, !model.activeCards.isEmpty {
-                    Text("Replaces your \(Format.count(model.activeCards.count, "current card")) when it finishes.")
-                        .font(Theme.small).foregroundStyle(Theme.faint)
-                }
                 if let warning = model.progress(job.id)?.warning {
                     Text(warning).font(Theme.small).foregroundStyle(Theme.amber).frame(maxWidth: 420)
                 }

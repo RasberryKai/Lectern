@@ -24,12 +24,12 @@ public enum PromptBuilder {
                              pages: [Int], existingFronts: [String], card: Card? = nil,
                              feedback: String = "", thread: SlideThread? = nil,
                              question: String = "", generationInstructions: String = "",
-                             contextCards: [Card]? = nil, replacesExistingCards: Bool = false) throws -> String {
+                             contextCards: [Card]? = nil, includeLinkedDrafts: Bool = false) throws -> String {
         let pageSet = Set(pages)
         let notes = lecture.slides.filter { pageSet.contains($0.pageIndex + 1) }.map {
             Note(slide: $0.pageIndex + 1, text: $0.note)
         }
-        let drafts = kind == .generate ? chatCardDrafts(lecture: lecture, pages: pages, replacesExistingCards: replacesExistingCards) : []
+        let drafts = kind == .generate ? chatCardDrafts(lecture: lecture, pages: pages, includeLinkedDrafts: includeLinkedDrafts) : []
         let draftIDs = Set(drafts.map(\.originPointID))
         let points = (lecture.learningPoints + lecture.threads.flatMap(\.learningPoints).filter { old in !lecture.learningPoints.contains(where: { $0.id == old.id }) }).filter {
             $0.included && !draftIDs.contains($0.id) && !$0.pages.allSatisfy { !pageSet.contains($0) }
@@ -141,9 +141,8 @@ public enum PromptBuilder {
             try container.encodeIfPresent(solve, forKey: .solve)
         }
     }
-    /// Chat card drafts on these slides that Generate must turn into cards. When the lecture's cards are
-    /// being replaced, cards already made from chat points come back as drafts so they survive the replacement.
-    public static func chatCardDrafts(lecture: Lecture, pages: [Int], replacesExistingCards: Bool) -> [ChatCardDraft] {
+    /// Include earlier chat-derived cards as drafting context when generating a whole new set.
+    public static func chatCardDrafts(lecture: Lecture, pages: [Int], includeLinkedDrafts: Bool) -> [ChatCardDraft] {
         let pageSet = Set(pages)
         return lecture.learningPoints.flatMap { point -> [ChatCardDraft] in
             guard point.included, let draft = point.draft else { return [] }
@@ -154,7 +153,7 @@ public enum PromptBuilder {
                 !card.isSuperseded && (linkedIDs.contains(card.id) || card.learningPointID == point.id)
             }
             if !linked.isEmpty {
-                guard replacesExistingCards else { return [] }
+                guard includeLinkedDrafts else { return [] }
                 return linked.map { card in
                     let currentPages = card.sourcePages.filter(pageSet.contains)
                     return ChatCardDraft(originPointID: point.id, wirePointID: card.id, sourceCardID: card.id,
@@ -164,7 +163,7 @@ public enum PromptBuilder {
                                   kind: point.kind?.rawValue, solve: card.solve?.draft)
                 }
             }
-            guard point.isPendingDraft, draft.replacesCardID == nil || replacesExistingCards else { return [] }
+            guard point.isPendingDraft, draft.replacesCardID == nil || includeLinkedDrafts else { return [] }
             return [ChatCardDraft(originPointID: point.id, wirePointID: point.id, sourceCardID: nil,
                                   sourceCardPages: nil, wasPendingDraft: true,
                                   draftReplacesCardID: draft.replacesCardID,

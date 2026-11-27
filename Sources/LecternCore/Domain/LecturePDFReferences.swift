@@ -46,9 +46,13 @@ extension Lecture {
             value.summary = citation(value.summary)
             return value
         }
+        let generationIDs = deletedCards.isEmpty ? [:] : cardGenerationIDs
         cards.removeAll { deletedCards.contains($0.id) }
         for index in cards.indices {
             var card = cards[index]
+            if case .splitFrom = card.origin, let jobID = generationIDs[card.id] {
+                card.inheritedGenerationJobID = jobID
+            }
             card.sourcePages = pages(card.sourcePages)
             card.allowedSourcePages = card.allowedSourcePages.map(pages)
             card.supersededBy?.removeAll(where: deletedCards.contains)

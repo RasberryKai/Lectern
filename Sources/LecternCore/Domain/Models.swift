@@ -72,6 +72,19 @@ public struct SlideState: Codable, Equatable, Identifiable, Sendable {
 public enum SlideFilter: String, Codable, CaseIterable, Sendable { case all, selected }
 public enum ThumbnailSize: String, Codable, CaseIterable, Sendable { case compact, regular, large }
 public enum ReviewFilter: String, Codable, CaseIterable, Sendable { case all, unreviewed, good, bad, needsAdjustment, aiFlagged, proposals }
+public enum ReviewCardScope: Codable, Hashable, Sendable {
+    case all, generation(UUID), other, approved
+
+    public func contains(_ card: Card, generationID: UUID?) -> Bool {
+        guard !card.isSuperseded else { return false }
+        switch self {
+        case .all: return true
+        case .generation(let id): return generationID == id && card.verdict != .good
+        case .other: return generationID == nil && card.verdict != .good
+        case .approved: return card.verdict == .good
+        }
+    }
+}
 public enum LectureMode: String, Codable, Sendable { case prepare, coverage, review }
 public struct ViewPreferences: Codable, Equatable, Sendable {
     public var focusedPageIndex: Int?
@@ -81,13 +94,14 @@ public struct ViewPreferences: Codable, Equatable, Sendable {
     public var filter: SlideFilter
     public var selectedCardID: UUID?
     public var reviewFilter: ReviewFilter
+    public var reviewCardScope: ReviewCardScope? = nil
     public var mode: LectureMode
     /// Coverage shows each card's back under its front.
     public var coverageShowsBacks: Bool
     public init(focusedPageIndex: Int? = nil, inspectorVisible: Bool = true, sidebarVisible: Bool = true, thumbnailSize: ThumbnailSize = .regular, filter: SlideFilter = .all, selectedCardID: UUID? = nil, reviewFilter: ReviewFilter = .all, mode: LectureMode = .prepare, coverageShowsBacks: Bool = false) {
         self.focusedPageIndex = focusedPageIndex; self.inspectorVisible = inspectorVisible; self.sidebarVisible = sidebarVisible; self.thumbnailSize = thumbnailSize; self.filter = filter; self.selectedCardID = selectedCardID; self.reviewFilter = reviewFilter; self.mode = mode; self.coverageShowsBacks = coverageShowsBacks
     }
-    private enum CodingKeys: String, CodingKey { case focusedPageIndex, inspectorVisible, sidebarVisible, thumbnailSize, filter, selectedCardID, reviewFilter, mode, coverageShowsBacks }
+    private enum CodingKeys: String, CodingKey { case focusedPageIndex, inspectorVisible, sidebarVisible, thumbnailSize, filter, selectedCardID, reviewFilter, reviewCardScope, mode, coverageShowsBacks }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         focusedPageIndex = try c.decodeIfPresent(Int.self, forKey: .focusedPageIndex)
@@ -98,6 +112,7 @@ public struct ViewPreferences: Codable, Equatable, Sendable {
         selectedCardID = try c.decodeIfPresent(UUID.self, forKey: .selectedCardID)
         let savedReviewFilter = try c.decode(ReviewFilter.self, forKey: .reviewFilter)
         reviewFilter = savedReviewFilter == .needsAdjustment ? .unreviewed : savedReviewFilter
+        reviewCardScope = try c.decodeIfPresent(ReviewCardScope.self, forKey: .reviewCardScope)
         // A mode this build doesn't know (written by a newer one) must not make the lecture unreadable.
         mode = (try? c.decode(LectureMode.self, forKey: .mode)) ?? .prepare
         // Lectures saved before Coverage existed have no key.
@@ -163,6 +178,8 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
     public var history: [CardRevision]
     public var proposal: Proposal?
     public var origin: CardOrigin
+    /// Retains the set if the parent of a split card is removed with its source slides.
+    var inheritedGenerationJobID: UUID? = nil
     public var supersededBy: [UUID]?
     public var exported: ExportMark?
     /// Explicit job scope is retained so invalid model citations are never silently discarded.
@@ -423,8 +440,6 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var baseRevisionID: UUID?
     public var prompt: String
     public var model: String
-    /// Absent on older jobs, which keep their original additive behavior.
-    public var replacesExistingCards: Bool? = nil
     public var isLectureChat: Bool? = nil
     /// True for Review chat. Nil on older jobs.
     public var allowsCardCreation: Bool? = nil

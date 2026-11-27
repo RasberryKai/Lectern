@@ -122,10 +122,10 @@ public actor JobRunner {
     @discardableResult
     public func generate(moduleID: UUID, lectureID: UUID, backend: AIBackend = .claudeCLI,
                          model: String = "opus", regenerateAll: Bool = false,
-                         additionalInstructions: String = "", replaceExistingCards: Bool = false) async throws -> UUID {
+                         additionalInstructions: String = "", createNewSet: Bool = false) async throws -> UUID {
         try await enqueue(kind: .generate, moduleID: moduleID, lectureID: lectureID, backend: backend,
                           model: model, regenerateAll: regenerateAll,
-                          additionalInstructions: additionalInstructions, replaceExistingCards: replaceExistingCards)
+                          additionalInstructions: additionalInstructions, createNewSet: createNewSet)
     }
     @discardableResult
     public func revise(moduleID: UUID, lectureID: UUID, cardID: UUID, feedback: String,
@@ -194,7 +194,7 @@ public actor JobRunner {
     private func enqueue(kind: JobKind, moduleID: UUID, lectureID: UUID, backend: AIBackend, model: String,
                          regenerateAll: Bool = false, cardID: UUID? = nil, feedback: String = "",
                          anchorPage: Int? = nil, context: ThreadContext = .neighbours(1), question: String = "",
-                         additionalInstructions: String = "", replaceExistingCards: Bool = false,
+                         additionalInstructions: String = "", createNewSet: Bool = false,
                          flashcardContext: FlashcardContext? = nil) async throws -> UUID {
         try Task.checkCancellation()
         try await store.assertModuleEditable(moduleID: moduleID)
@@ -223,7 +223,7 @@ public actor JobRunner {
         var pages: [Int]
         switch kind {
         case .generate:
-            pages = regenerateAll || replaceExistingCards ? initial.slides.filter(\.isSelected).map { $0.pageIndex + 1 } : initial.uncoveredSelectedPages
+            pages = regenerateAll || createNewSet ? initial.slides.filter(\.isSelected).map { $0.pageIndex + 1 } : initial.uncoveredSelectedPages
             guard !pages.isEmpty else { throw AIError.configuration("No selected slides without cards. Choose Regenerate all explicitly to include covered slides.") }
         case .revise:
             guard let card, card.proposal == nil else { throw AIError.configuration("Resolve this card's existing proposal first.") }
@@ -252,7 +252,7 @@ public actor JobRunner {
         guard pages.count <= 100 else { throw AIError.limit("v1 supports up to 100 slides per call. Reduce the selected context.") }
         guard pages.allSatisfy({ $0 > 0 && $0 <= initial.pageCount }) else { throw AIError.configuration("Repair invalid source slide links before sending this request.") }
         let allLectures = try await store.lectures(in: moduleID)
-        let fronts = allLectures.filter { !replaceExistingCards || $0.id != lectureID }
+        let fronts = allLectures.filter { !createNewSet || $0.id != lectureID }
             .flatMap(\.cards).filter { $0.verdict != .bad && !$0.isSuperseded }.map(\.front)
         let rules = kind == .generate || kind == .revise ? try await store.loadRules() : ""
         let contextCards: [Card]?
@@ -269,13 +269,12 @@ public actor JobRunner {
                                              pages: pages, existingFronts: fronts,
                                              card: (kind == .ask || kind == .chat) && thread?.flashcardContext != .current ? nil : card, feedback: feedback,
                                              thread: thread, question: question, generationInstructions: additionalInstructions,
-                                             contextCards: contextCards, replacesExistingCards: replaceExistingCards)
+                                             contextCards: contextCards, includeLinkedDrafts: createNewSet)
         let generationDrafts = kind == .generate
-            ? PromptBuilder.chatCardDrafts(lecture: initial, pages: pages, replacesExistingCards: replaceExistingCards).map(GenerationDraftSnapshot.init)
+            ? PromptBuilder.chatCardDrafts(lecture: initial, pages: pages, includeLinkedDrafts: createNewSet).map(GenerationDraftSnapshot.init)
             : []
         var job = Job(kind: kind, pages: pages, rulesVersion: PromptBuilder.hash(rules), backend: backend,
                       targetCardID: cardID, threadID: thread?.id, baseRevisionID: card?.currentRevisionID, prompt: prompt, model: resolvedModel)
-        job.replacesExistingCards = replaceExistingCards ? true : nil
         if kind == .chat {
             let editableCards = thread?.flashcardContext == .current ? card.map { [$0] } ?? [] : contextCards ?? []
             job.chatCardVersions = editableCards.filter { $0.solve == nil }.compactMap { card in
@@ -626,30 +625,8 @@ public actor JobRunner {
                     unlinkedCards.append(wire.draft)
                 }
 
-                // A current linked card may have been edited or split after the request snapshot.
-                // Re-add those latest descendants after Replace so stale model output cannot erase them.
-                var preservedCards: [CardDraft] = []
-                var preservedCardIDs = Set<UUID>()
-                if work.job.replacesExistingCards == true {
-                    for pointID in Set(expected.map(\.learningPointID)) {
-                        guard let point = lecture.learningPoints.first(where: { $0.id == pointID }), point.included else { continue }
-                        let unchangedSourceIDs = Set(liveExpected.filter { $0.learningPointID == pointID }.compactMap(\.sourceCardID))
-                        let linkedIDs = Set(point.cardIDs ?? [])
-                        for card in lecture.cards where !card.isSuperseded &&
-                            (linkedIDs.contains(card.id) || card.learningPointID == pointID) &&
-                            !unchangedSourceIDs.contains(card.id) && preservedCardIDs.insert(card.id).inserted {
-                            let currentPages = card.sourcePages.filter(work.job.pages.contains)
-                            let sourcePages = currentPages.isEmpty ? point.pages.filter(work.job.pages.contains) : currentPages
-                            guard !sourcePages.isEmpty else { continue }
-                            var preserved = CardDraft(front: card.front, back: card.back, sourcePages: sourcePages, flag: card.flag, solve: card.solve?.draft)
-                            preserved.learningPointID = pointID
-                            preservedCards.append(preserved)
-                        }
-                    }
-                }
-
                 let expectedSignatures = Set(expected.map { Self.normalizedCardKey(front: $0.front, back: $0.back, solve: $0.solve) })
-                let linkedSignatures = Set((linkedCards + preservedCards).map { Self.normalizedCardKey(front: $0.front, back: $0.back, solve: $0.solve) })
+                let linkedSignatures = Set(linkedCards.map { Self.normalizedCardKey(front: $0.front, back: $0.back, solve: $0.solve) })
                 var unlinkedSignatures = Set<String>()
                 let uniqueUnlinked = unlinkedCards.filter { draft in
                     let key = Self.normalizedCardKey(front: draft.front, back: draft.back, solve: draft.solve)
@@ -657,8 +634,11 @@ public actor JobRunner {
                     return unlinkedSignatures.insert(key).inserted
                 }
 
-                var cards = linkedCards + preservedCards + uniqueUnlinked
-                for draft in liveExpected where !linked.contains(draft.wirePointID) {
+                var cards = linkedCards + uniqueUnlinked
+                // Supply missing pending drafts. Linked cards already exist in an earlier set.
+                let pendingPointIDs = Set(lecture.learningPoints.filter(\.isPendingDraft).map(\.id))
+                for draft in liveExpected where draft.sourceCardID == nil
+                    && pendingPointIDs.contains(draft.learningPointID) && !linked.contains(draft.wirePointID) {
                     cards.append(CardDraft(front: draft.front, back: draft.back, sourcePages: draft.pages,
                                            learningPointID: draft.learningPointID, solve: draft.solve))
                 }

@@ -502,9 +502,43 @@ struct LectureTopBar: View {
     @ViewBuilder private var reviewTrailing: some View {
         Text("\(model.reviewedCount) of \(model.activeCards.count) reviewed")
             .font(Theme.small).foregroundStyle(Theme.quiet).monospacedDigit()
-        Button("Export to Anki") {
-            Task { await app.returnToLibrary(destination: .export(model.ref.moduleID, lectureID: model.ref.lectureID)) }
+        let scopes = model.reviewScopes
+        if scopes.count > 1 {
+            let title = scopes.first(where: { $0.scope == model.reviewCardScope })?.title ?? "All cards"
+            Menu {
+                Picker("Card set", selection: Binding(get: { model.reviewCardScope }, set: { model.setReviewScope($0) })) {
+                    ForEach(scopes, id: \.scope) { option in
+                        Text(option.title).tag(option.scope)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "rectangle.on.rectangle")
+                        .foregroundStyle(Theme.quiet)
+                        .accessibilityHidden(true)
+                    Text(title).foregroundStyle(Theme.ink)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.quiet)
+                        .accessibilityHidden(true)
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderStrong))
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .combine)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Card set")
+            .accessibilityValue(title)
+            .accessibilityIdentifier("reviewCardSet")
+            .help("Switch card sets")
         }
-        .buttonStyle(SecondaryButtonStyle())
     }
 }
