@@ -135,6 +135,9 @@ struct LectureWorkspace: View {
         guard !app.showSettings else { return false }
         let modifiers = Key.modifiers(event)
         let letter = Key.letter(event)
+        if event.keyCode == Key.escape, modifiers.isEmpty, SolveOrderingDragCancellation.cancel(in: event.window) {
+            return true
+        }
         let askActivityVisible = model.isAskVisible && !generationOverlayVisible
         if askActivityVisible, !editing || ChatComposerTextView.owns(NSApp.keyWindow?.firstResponder),
            model.handleWaitTowerKey(event) { return true }
@@ -267,8 +270,8 @@ struct LectureWorkspace: View {
         case Key.left, Key.up: model.stepCard(-1); return true
         case Key.right, Key.down: model.stepCard(1); return true
         case Key.space:
-            guard model.selectedCard?.solve == nil else { return false }
             if model.answerHidden { model.revealAnswer(); return true }
+            guard model.selectedCard?.solve == nil else { return false }
             guard let card = model.selectedCard, !card.sourcePages.isEmpty else { return false }
             let pages = card.sourcePages
             model.enlargedPage = pages[min(model.sourceIndex, pages.count - 1)]
@@ -276,7 +279,9 @@ struct LectureWorkspace: View {
         default: break
         }
         // In Test, a verdict only counts after the answer was shown.
-        if model.answerHidden, ["1", "2", "x", "s", "g"].contains(letter) { return true }
+        if model.answerHidden, ["1", "2", "x", "s", "g"].contains(letter) {
+            return model.selectedCard?.solve == nil || (letter != "1" && letter != "2")
+        }
         switch letter {
         case "t": model.setTestMode(!model.testMode); return true
         case "1": Task { await model.setVerdict(.good) }; return true

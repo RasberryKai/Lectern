@@ -167,7 +167,7 @@ public enum SolveChecker {
     private static func check(_ input: SolveInput, text rawText: String, inGrid: Bool,
                               options: [String] = []) -> SolveCellFeedback {
         let text = rawText.solveTrimmed
-        let expected = expectedAnswer(input)
+        let expected = displayedAnswers(for: input).joined(separator: " or ")
         guard !text.isEmpty else {
             return .init(status: inGrid ? .incorrect : .invalid, message: "Enter an answer.",
                          expected: inGrid ? expected : nil)
@@ -418,7 +418,7 @@ extension SolveChecker {
         return "\(parts[indices.year])-\(parts[indices.month])-\(parts[indices.day])"
     }
 
-    private static func expectedAnswer(_ input: SolveInput) -> String {
+    public static func displayedAnswers(for input: SolveInput) -> [String] {
         let answers = input.answers.map { answer in
             switch input.kind {
             case .number:
@@ -437,7 +437,17 @@ extension SolveChecker {
             }
         }
         var seen = Set<String>()
-        return answers.filter { seen.insert($0).inserted }.joined(separator: " or ")
+        return answers.filter { seen.insert($0).inserted }
+    }
+
+    public static func varianceMistakeMessages(for content: SolveCaseContent) -> [String] {
+        content.variance == nil ? [] : VarianceMistake.allCases.map(\.rawValue)
+    }
+
+    private enum VarianceMistake: String, CaseIterable {
+        case squaredMeanAsSecondMoment = "This matches the square of your E(X). Square each outcome before weighting it to find E(X²)."
+        case unsquaredMean = "This matches your E(X²) minus E(X). Square E(X) before subtracting it."
+        case squaredMeanAsVariance = "This matches E(X)². Subtract it from E(X²) to find the variance."
     }
 
     private static func formattedNumber(_ value: Decimal, key: String, format: SolveInputFormat, input: SolveInput) -> String {
@@ -487,16 +497,16 @@ extension SolveChecker {
         let learnerMoment = submitted(1, input: momentInput)
         if feedback[1].status == .incorrect, feedback[1].message == nil, let learnerMoment,
            let learnerMean, matches(learnerMoment, learnerMean * learnerMean, input: momentInput) {
-            feedback[1].message = "This matches the square of your E(X). Square each outcome before weighting it to find E(X²)."
+            feedback[1].message = VarianceMistake.squaredMeanAsSecondMoment.rawValue
         }
         if feedback[2].status == .incorrect, feedback[2].message == nil, let learnerVariance = submitted(2, input: varianceInput),
            let learnerMoment, let learnerMean, matches(learnerVariance, learnerMoment - learnerMean, input: varianceInput),
            !matches(learnerVariance, learnerMoment - learnerMean * learnerMean, input: varianceInput) {
-            feedback[2].message = "This matches your E(X²) minus E(X). Square E(X) before subtracting it."
+            feedback[2].message = VarianceMistake.unsquaredMean.rawValue
         } else if feedback[2].status == .incorrect, feedback[2].message == nil,
                   let learnerVariance = submitted(2, input: varianceInput),
                   matches(learnerVariance, meanKey * meanKey, input: varianceInput) {
-            feedback[2].message = "This matches E(X)². Subtract it from E(X²) to find the variance."
+            feedback[2].message = VarianceMistake.squaredMeanAsVariance.rawValue
         }
     }
 }

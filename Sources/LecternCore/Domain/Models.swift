@@ -171,6 +171,9 @@ public struct Card: Codable, Equatable, Identifiable, Sendable {
     public var learningPointID: UUID? = nil
     public var solve: SolveCard? = nil
     var hasApprovedSolve: Bool? = nil
+    /// A confirmed replacement keeps the card ID and selects a new history for Study.
+    var solveStudyScheduleID: UUID? = nil
+    public var studyScheduleID: UUID? { solve == nil ? nil : solveStudyScheduleID }
     public init(id: UUID = UUID(), sourcePages: [Int] = [], front: String, back: String, verdict: CardVerdict = .unreviewed, feedback: String = "", flag: String? = nil, issue: CardIssue? = nil, mathInterpretations: [String: MathInterpretation] = [:], history: [CardRevision]? = nil, proposal: Proposal? = nil, origin: CardOrigin = .manual, supersededBy: [UUID]? = nil, exported: ExportMark? = nil, allowedSourcePages: [Int]? = nil) {
         self.id = id; self.sourcePages = sourcePages; self.front = front; self.back = back; self.verdict = verdict; self.feedback = feedback; self.flag = flag; self.issue = issue; self.mathInterpretations = mathInterpretations; self.history = history ?? [CardRevision(front: front, back: back, author: origin == .manual ? .user : .ai)]; self.proposal = proposal; self.origin = origin; self.supersededBy = supersededBy; self.exported = exported; self.allowedSourcePages = allowedSourcePages
     }
@@ -385,10 +388,22 @@ public struct ChatEditUndo: Codable, Equatable, Sendable {
     public var mathInterpretations: [String: MathInterpretation]
     public var appliedVerdict: CardVerdict? = nil
     public var appliedMathInterpretations: [String: MathInterpretation]? = nil
+    public var solve: SolveCard? = nil
+    public var appliedSolve: SolveCard? = nil
+    var priorSolveStudyScheduleID: UUID? = nil
+    var priorSolveApproval: Bool? = nil
     public func matches(_ card: Card) -> Bool {
-        card.id == cardID && !card.isSuperseded && card.currentRevisionID == appliedRevisionID &&
+        let solveMatches: Bool
+        if card.studyScheduleID == appliedRevisionID, let current = card.solve, let appliedSolve {
+            // Background refill can append cases without changing the approved replacement.
+            solveMatches = current.draft == appliedSolve.draft && current.cases.starts(with: appliedSolve.cases)
+        } else {
+            solveMatches = card.solve == appliedSolve
+        }
+        return card.id == cardID && !card.isSuperseded && card.currentRevisionID == appliedRevisionID &&
             card.verdict == (appliedVerdict ?? (verdict == .good ? .unreviewed : verdict)) &&
-            card.mathInterpretations == (appliedMathInterpretations ?? [:])
+            card.mathInterpretations == (appliedMathInterpretations ?? [:]) &&
+            solveMatches
     }
 }
 public struct Job: Codable, Equatable, Identifiable, Sendable {
@@ -421,7 +436,7 @@ public struct Job: Codable, Equatable, Identifiable, Sendable {
     public var chatEditUndo: [ChatEditUndo]? = nil
     public var chatEditsUndoneAt: Date? = nil
     /// Page numbering used by the immutable request snapshot.
-    var pdfLayoutRevision: UUID? = nil
+    public internal(set) var pdfLayoutRevision: UUID? = nil
     public init(id: UUID = UUID(), kind: JobKind, pages: [Int], inputHash: String = "", rulesVersion: String = "1", backend: AIBackend = .claudeCLI, state: JobState = .running, error: String? = nil, usage: AIUsage? = nil, startedAt: Date = Date(), finishedAt: Date? = nil, targetCardID: UUID? = nil, threadID: UUID? = nil, baseRevisionID: UUID? = nil, prompt: String = "", model: String = "opus") {
         self.id = id; self.kind = kind; self.pages = pages; self.inputHash = inputHash; self.rulesVersion = rulesVersion; self.backend = backend; self.state = state; self.error = error; self.usage = usage; self.startedAt = startedAt; self.finishedAt = finishedAt; self.targetCardID = targetCardID; self.threadID = threadID; self.baseRevisionID = baseRevisionID; self.prompt = prompt; self.model = model
     }

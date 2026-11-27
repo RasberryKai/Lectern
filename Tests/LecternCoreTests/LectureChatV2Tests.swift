@@ -249,6 +249,96 @@ private actor V2Gate: AIProvider {
         #expect(requests[0].pdf == nil); #expect(requests[0].chatSnapshot?.initialRefs == [.allCards])
     }
 
+    @Test(arguments: ["format", "key", "invalidKey", "missingExercise"])
+    @MainActor func sidebarRevisesSolveCardsInPlaceAndValidatesTheAnswerKey(change: String) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("lectern-chat-solve-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LibraryStore(rootURL: root)
+        let module = try await store.createModule(name: "Accounting")
+        let pdf = root.appendingPathComponent("Source.pdf")
+        var box = CGRect(x: 0, y: 0, width: 300, height: 200)
+        let context = try #require(CGContext(pdf as CFURL, mediaBox: &box, nil))
+        context.beginPDFPage(nil); context.endPDFPage(); context.closePDF()
+
+        let sample = SolveCaseContent(
+            prompt: "Revenue is 2400000 and costs are 1000000 and 300000. Calculate profit.",
+            fields: [SolveField(prompt: "Profit", input: SolveInput(kind: .number, answers: ["1100000"]))],
+            explanation: "Subtract both costs from revenue."
+        )
+        let draft = SolveDraft(skill: "Calculate profit", reason: "Apply the formula", variation: "Vary the costs", sample: sample)
+        var card = Card(sourcePages: [1], front: sample.prompt, back: sample.explanation, verdict: .good)
+        try card.setSolveDraft(draft)
+        card.history[0].solve = draft
+        var variant = sample
+        variant.prompt = "Calculate profit if revenue is 3,000,000 and costs are 1,200,000."
+        variant.fields[0].input?.answers = ["1800000"]
+        card.solve?.cases.append(SolveCase(content: variant))
+        let created = try await store.createLecture(
+            Lecture(moduleID: module.id, name: "Profit", pageCount: 1, cards: [card]), sourceURL: pdf)
+        let lecture = try await store.loadLecture(moduleID: module.id, lectureID: created.id)
+        let original = try #require(lecture.cards.first)
+
+        var revised = draft
+        let question: String
+        switch change {
+        case "format":
+            question = "Add thousands separators to the numbers in the question."
+            revised.sample.prompt = "Revenue is 2,400,000 and costs are 1,000,000 and 300,000. Calculate profit."
+        case "key":
+            question = "Accept a tolerance of one in the answer."
+            revised.sample.fields[0].input?.tolerance = 1
+        default:
+            question = "Revise the answer key."
+            revised.sample.fields[0].input?.answers = []
+        }
+        let edit = ChatCardEdit(cardID: original.id, baseRevisionID: try #require(original.currentRevisionID),
+                                front: revised.sample.prompt, back: revised.sample.explanation,
+                                solve: change == "missingExercise" ? nil : revised)
+        let reply = ChatReply(message: "Here is the requested revision.", edits: [edit])
+        let provider = FakeAIProvider(responses: [AIResponse(content: String(decoding: try JSONEncoder().encode(reply), as: UTF8.self))])
+        let runner = JobRunner(store: store, providers: [provider])
+        let session = LectureSession(lecture: lecture, store: store, runner: runner)
+        let jobID = try await session.chat(question: question, contextRefs: [.card(original.id)], allowsCardCreation: true)
+        await runner.waitUntilIdle()
+        try await session.refresh()
+        let request = try #require(await provider.requests.first)
+        let schema = try #require(request.outputSchema)
+        let contract = try #require(JSONSerialization.jsonObject(with: Data(schema.utf8)) as? [String: Any])
+        let properties = try #require(contract["properties"] as? [String: Any])
+        let edits = try #require(properties["edits"] as? [String: Any])
+        let item = try #require(edits["items"] as? [String: Any])
+        #expect((item["required"] as? [String])?.contains("solve") == true)
+        #expect((contract["$defs"] as? [String: Any])?["solveDraft"] != nil)
+        #expect(request.prompt.contains(schema))
+        #expect(request.prompt.contains(original.id.uuidString))
+        #expect(!request.systemPrompt.contains("Request revision"))
+
+        let saved = try #require(session.lecture.cards.first)
+        let job = try #require(session.lecture.jobs.first(where: { $0.id == jobID }))
+        if change == "invalidKey" || change == "missingExercise" {
+            #expect(job.state == .failed)
+            #expect(saved == original)
+            return
+        }
+        #expect(job.chatEditDisposition == .applied)
+        #expect(saved.id == original.id)
+        #expect(saved.sourcePages == original.sourcePages)
+        #expect(saved.verdict == .unreviewed)
+        #expect(saved.front == revised.sample.prompt)
+        #expect(saved.solve?.draft == revised)
+        #expect(saved.history.last?.solve == revised)
+        #expect(saved.currentRevisionID != original.currentRevisionID)
+        let answer = change == "key" ? "1100001" : "1100000"
+        #expect(SolveChecker.check(try #require(saved.solve?.draft.sample), answers: [.text(answer)]).fields[0].status == .correct)
+
+        #expect(session.lecture.canUndoChatEdits(jobID: jobID))
+        try await session.dispatch(.undoChatEdits(jobID: jobID))
+        let undone = try #require(session.lecture.cards.first)
+        #expect(undone.solve == original.solve)
+        #expect(undone.front == original.front)
+        #expect(undone.verdict == .good)
+    }
+
     @Test @MainActor func deletionRequestsWaitForIndividualOrBatchApproval() async throws {
         let (store, module, lecture, root) = try await fixture()
         defer { try? FileManager.default.removeItem(at: root) }

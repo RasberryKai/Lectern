@@ -206,6 +206,18 @@ public struct MessagesAPIProvider: AIProvider {
                     content = [["type": "text", "text": try context.cards(ids)]]
                     for id in ids { let ref = ContextRef.card(id); if !read.contains(ref) { read.append(ref) }; onEvent(.read(ref)) }
                     if !initial.refs.contains(.allCards), ids.contains(where: { !initial.refs.contains(.card($0)) }) { searched = true }
+                case "get_solve_cases":
+                    guard let strings = input["ids"] as? [String] else {
+                        throw AIError.invalidResponse("get_solve_cases requires an array of solve-card references, such as [\"C12\"].")
+                    }
+                    let ids = try context.solveCaseCardIDs(strings)
+                    content = [["type": "text", "text": try context.solveCases(strings)]]
+                    for id in ids {
+                        let ref = ContextRef.card(id)
+                        if !read.contains(ref) { read.append(ref) }
+                        onEvent(.read(ref))
+                    }
+                    if !initial.refs.contains(.allCards), ids.contains(where: { !initial.refs.contains(.card($0)) }) { searched = true }
                 case "read_images":
                     guard let strings = input["ids"] as? [String], !strings.isEmpty, strings.count <= 4,
                           strings.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw AIError.invalidResponse("read_images requires 1–4 valid uploaded image IDs.") }
@@ -214,7 +226,16 @@ public struct MessagesAPIProvider: AIProvider {
                 case "edit_cards":
                     guard let edits = input["edits"], JSONSerialization.isValidJSONObject(edits) else { throw AIError.invalidResponse("edit_cards requires edits.") }
                     let decoded = try JSONDecoder().decode([ChatCardEdit].self, from: JSONSerialization.data(withJSONObject: edits))
-                    guard !decoded.isEmpty, decoded.allSatisfy({ edit in snapshot.cards.contains { $0.id == edit.cardID && $0.currentRevisionID == edit.baseRevisionID } }) else { throw AIError.invalidResponse("Card edit does not match the frozen card revision.") }
+                    guard !decoded.isEmpty, decoded.allSatisfy({ edit in
+                        snapshot.cards.contains { $0.id == edit.cardID && $0.currentRevisionID == edit.baseRevisionID }
+                    }) else { throw AIError.invalidResponse("Card edit does not match the frozen card revision.") }
+                    if snapshot.allowsSolveCardEdits == true, decoded.contains(where: { edit in
+                        edit.solve != nil || edit.caseEdits != nil ||
+                            snapshot.cards.contains { $0.id == edit.cardID && $0.solve != nil }
+                    }) {
+                        content = [["type": "text", "text": "Use the final edits array for solve-card edits or flip-to-solve replacements. Resubmit every edit from this call there."]]
+                        break
+                    }
                     proposed += decoded
                     content = [["type": "text", "text": "Changes proposed for review. Do not repeat card contents in the answer."]]
                 default: throw AIError.invalidResponse("Unknown chat tool: \(name).")
@@ -236,7 +257,8 @@ public struct MessagesAPIProvider: AIProvider {
             ["name": "read_slides", "description": "Read frozen lecture slide PNGs and extracted text.", "input_schema": array("pages", ["type": "integer"])],
             ["name": "read_images", "description": "Read uploaded images from the frozen image index by UUID, including prior-turn uploads.", "input_schema": array("ids", ["type": "string"])],
             ["name": "get_cards", "description": "Read current frozen cards and exact edit IDs by displayed reference (for example C12) or UUID. Supports the entire deck, including more than 100 cards.", "input_schema": array("ids", ["type": "string"])],
-            ["name": "edit_cards", "description": "Propose edits using each card's frozen base revision ID. Does not modify cards.", "input_schema": array("edits", edit)]
+            ["name": "get_solve_cases", "description": "Read the frozen full case pool and editable status for solve cards by displayed reference (for example C12). Call before proposing a solve-case edit.", "input_schema": array("ids", ["type": "string"])],
+            ["name": "edit_cards", "description": "Propose flip-card wording edits using each card's frozen base revision ID. For solve-card edits and flip-to-solve replacements use the final edits array.", "input_schema": array("edits", edit)]
         ]
     }
 

@@ -29,6 +29,11 @@ enum Theme {
     static let bad = dynamic(light: 0xB3412E, dark: 0xE88E7D)
     static let badWash = dynamic(light: 0xF8E6E2, dark: 0x3C2520)
 
+    static let solveGreen = dynamic(light: 0x3E5C41, dark: 0x7FA884)
+    static let solveGreenInk = dynamic(light: 0x2D4430, dark: 0xA9CBAD)
+    static let solveRedInk = dynamic(light: 0x7E2A1B, dark: 0xF0AE9E)
+    static let onSolveGreen = dynamic(light: 0xFFFFFF, dark: 0x10170F)
+
     static let diffRemovedText = dynamic(light: 0xA9661A, dark: 0xF0B072)
     static let diffRemovedWash = dynamic(light: 0xFBE6D5, dark: 0x45301C)
     static let diffAddedText = dynamic(light: 0x244A70, dark: 0xA9CBEE)

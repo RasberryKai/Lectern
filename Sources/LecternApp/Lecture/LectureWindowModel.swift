@@ -102,7 +102,7 @@ final class LectureWindowModel {
         mode = lecture.pageCount == 0 ? .review : prefs.mode
         focusedPageIndex = lecture.pageCount > 0 ? (prefs.focusedPageIndex ?? 0) : nil
         prepareFilter = prefs.filter == .selected ? .selected : .all
-        reviewFilter = prefs.reviewFilter == .needsAdjustment ? .unreviewed : prefs.reviewFilter
+        reviewFilter = (prefs.reviewFilter == .unreviewed || prefs.reviewFilter == .needsAdjustment) ? .unreviewed : .all
         selectedCardID = prefs.selectedCardID
         thumbnailSize = prefs.thumbnailSize
         thumbnailsVisible = prefs.sidebarVisible
@@ -281,6 +281,7 @@ final class LectureWindowModel {
         guard id != selectedCardID else { return }
         flushCardInBackground()
         selectedCardID = id
+        revealedCardID = nil
         sourceIndex = 0
         loadEditor()
     }
@@ -313,8 +314,10 @@ final class LectureWindowModel {
         testMode = on
         revealedCardID = nil
         UserDefaults.standard.set(on, forKey: "v2.review.testMode")
-        // Testing starts with what is left to test; Good cards stay one filter click away.
-        if on, reviewFilter == .all, count(for: .unreviewed) > 0 { setReviewFilter(.unreviewed) }
+        // Flip review starts with unreviewed cards. Solve review tests the displayed sample.
+        if on, selectedCard?.solve == nil, reviewFilter == .all, count(for: .unreviewed) > 0 {
+            setReviewFilter(.unreviewed)
+        }
     }
 
     func revealAnswer() {

@@ -8,9 +8,7 @@ struct ChatProviderContext {
     private func assetURL(_ relative: String) throws -> URL {
         let root = request.workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
         let url = root.appendingPathComponent(relative).standardizedFileURL
-        guard (snapshot.images ?? []).contains(where: { $0.relativePath == relative }) || relative == "cards.json" || snapshot.cards.indices.contains(where: { relative == snapshot.cardPath(at: $0) }) || snapshot.slides.contains(where: {
-            relative == String(format: "slides/%03d.png", $0.page) || relative == String(format: "slides/%03d.txt", $0.page)
-        }), url.resolvingSymlinksInPath() == url,
+        guard allowedFiles.contains(relative), url.resolvingSymlinksInPath() == url,
               url.path.hasPrefix(root.path + "/"), FileManager.default.fileExists(atPath: url.path) else {
             throw AIError.configuration("The frozen chat context file is unavailable or outside its job folder: \(relative)")
         }
@@ -63,6 +61,32 @@ struct ChatProviderContext {
         }
         return try ChatContextJSON.encode(payload)
     }
+    /// Resolve only frozen solve cards. Legacy snapshots can still use the native
+    /// Messages/Codex lookup, but their old CLI asset manifests remain untouched.
+    func solveCases(_ references: [String]) throws -> String {
+        guard !references.isEmpty, references.count <= 100 else {
+            throw AIError.invalidResponse("get_solve_cases requires 1–100 solve-card references, such as C12.")
+        }
+        let ids = try solveCaseCardIDs(references)
+        let lookups = try ids.enumerated().map { offset, id -> ChatSolveCaseLookup in
+            guard let index = snapshot.cards.firstIndex(where: { $0.id == id }),
+                  snapshot.cards[index].solve != nil else {
+                let reference = references[offset]
+                throw AIError.invalidResponse("Card \(reference) is a flip card. get_solve_cases only accepts solve cards.")
+            }
+            return ChatSolveCaseLookup(card: snapshot.cards[index], number: index + 1)
+        }
+        return try ChatContextJSON.encode(lookups)
+    }
+    func solveCaseCardIDs(_ references: [String]) throws -> [UUID] {
+        let ids = try cardIDs(references)
+        for (reference, id) in zip(references, ids) {
+            guard snapshot.cards.first(where: { $0.id == id })?.solve != nil else {
+                throw AIError.invalidResponse("Card \(reference) is a flip card. get_solve_cases only accepts solve cards.")
+            }
+        }
+        return ids
+    }
     func cardIDs(_ references: [String]) throws -> [UUID] {
         guard !references.isEmpty else { throw AIError.invalidResponse("get_cards requires at least one card reference, such as C12.") }
         return try references.map { reference in
@@ -75,7 +99,13 @@ struct ChatProviderContext {
         }
     }
     var allowedFiles: [String] {
-        (snapshot.images ?? []).map(\.relativePath) + ["cards.json"] + snapshot.cards.indices.map { snapshot.cardPath(at: $0) } + snapshot.slides.flatMap { [String(format: "slides/%03d.png", $0.page), String(format: "slides/%03d.txt", $0.page)] }
+        (snapshot.images ?? []).map(\.relativePath) + ["cards.json"] + snapshot.cards.indices.map { snapshot.cardPath(at: $0) } + solveCasePaths + snapshot.slides.flatMap { [String(format: "slides/%03d.png", $0.page), String(format: "slides/%03d.txt", $0.page)] }
+    }
+    private var solveCasePaths: [String] {
+        guard snapshot.solveCaseContextVersion == 1 else { return [] }
+        return snapshot.cards.indices.compactMap { index in
+            snapshot.cards[index].solve == nil ? nil : snapshot.solveCasePath(at: index)
+        }
     }
     func uploadedImages(_ ids: [UUID]) throws -> [[String: Any]] {
         try ids.flatMap { id -> [[String: Any]] in
@@ -113,6 +143,7 @@ struct ChatProviderContext {
     func reference(for relative: String) -> ContextRef? {
         if relative == "cards.json" { return .allCards }
         if let index = snapshot.cards.indices.first(where: { snapshot.cardPath(at: $0) == relative }) { return .card(snapshot.cards[index].id) }
+        if let index = snapshot.cards.indices.first(where: { snapshot.solveCasePath(at: $0) == relative }) { return .card(snapshot.cards[index].id) }
         if relative.hasPrefix("slides/"), let page = Int(URL(fileURLWithPath: relative).deletingPathExtension().lastPathComponent), snapshot.slides.contains(where: { $0.page == page }) { return .slide(page) }
         return nil
     }

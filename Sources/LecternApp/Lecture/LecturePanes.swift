@@ -7,7 +7,7 @@ import SwiftUI
 @Observable final class LecturePaneState {
     var prepareLeft: Double = UserDefaults.standard.object(forKey: "v2.prepare.left") as? Double ?? 180
     var prepareRight: Double = UserDefaults.standard.object(forKey: "v2.prepare.right") as? Double ?? 360
-    var reviewLeft: Double = UserDefaults.standard.object(forKey: "v2.review.left") as? Double ?? 300
+    var reviewLeft: Double = UserDefaults.standard.object(forKey: "v2.review.left") as? Double ?? 270
     var reviewRight: Double = UserDefaults.standard.object(forKey: "v2.review.right") as? Double ?? 360
     var focusedDivider: PaneSide?
     var reviewLeftVisible = true
@@ -62,7 +62,7 @@ struct LecturePanes<Left: View, Stage: View, Right: View>: View {
     }
 
     private func divider(_ side: PaneSide, displayedWidth: Double, maximum: Double) -> some View {
-        PaneDivider(side: side, width: displayedWidth, maximum: maximum, defaultWidth: side == .left ? (model.mode == .prepare ? 180 : 300) : 360) { width in
+        PaneDivider(side: side, width: displayedWidth, maximum: maximum, defaultWidth: side == .left ? (model.mode == .prepare ? 180 : 270) : 360) { width in
             model.panes.resize(side, mode: model.mode, width: width)
         } focusChanged: { active in
             model.panes.focusedDivider = active ? side : nil

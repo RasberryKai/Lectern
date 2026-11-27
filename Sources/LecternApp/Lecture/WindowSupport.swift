@@ -76,7 +76,7 @@ final class WindowDelegateProxy: NSObject, NSWindowDelegate {
     }
 }
 
-/// One local key monitor per lecture window. Text editors keep normal typing, Space and arrows;
+/// One local key monitor per lecture window. Editors and popups keep normal typing, Space and arrows;
 /// command shortcuts and Escape are seen first.
 struct KeyMonitor: NSViewRepresentable {
     /// Return true when handled. `editingText` tells whether a text view has focus.
@@ -120,7 +120,7 @@ final class KeyMonitorView: NSView {
     private static func isEditingText(_ responder: NSResponder?) -> Bool {
         var current = responder
         while let item = current {
-            if item is NSTextView || item is NSTextField { return true }
+            if item is NSTextView || item is NSTextField || item is NSPopUpButton { return true }
             current = item.nextResponder
         }
         return false

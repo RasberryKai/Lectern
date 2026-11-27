@@ -208,10 +208,13 @@ public struct ClaudeCLIProvider: AIProvider {
             for path in context.allowedFiles { _ = try context.file(path) }
             let paths = required.map { root.appendingPathComponent($0).path }
             let cardPath = snapshot.cardContextVersion == 1 ? "cards/C12.json (displayed card number)" : "cards/<UUID>.json"
+            let caseInstructions = snapshot.solveCaseContextVersion == 1
+                ? " Solve-case pools are in cases/C12.json; Read the matching file before proposing a case edit. It includes active and retired cases, and retired cases are read-only. Do not read case files unless needed."
+                : " This older retry has no scoped case files."
             return request.prompt + "\n\nFROZEN CHAT FILES: Read only files in " + root.path +
                 ". Slides are slides/007.png and slides/007.txt (three-digit original page number); individual cards are " + cardPath + " and the full deck is cards.json. All slides text supplied in FROZEN ATTACHED CONTEXT is already available; do not reread those text files. Pages without extracted text require reading their PNG images. Read the full deck only when the question needs it or All cards is attached. Never read a PDF or any other filesystem location. Before answering, Read these attached context files: " +
                 String(decoding: try JSONEncoder().encode(Array(Set(paths)).sorted()), as: UTF8.self) +
-                ". Look up other frozen slides/cards or indexed prior uploaded images only when needed. Return strict chat JSON including message, edits and quiz. Card edits are proposals in edits, using the frozen base revision ID."
+                ". Look up other frozen slides/cards or indexed prior uploaded images only when needed." + caseInstructions + " Return strict chat JSON including message, edits and quiz. Card edits are proposals in edits, using the frozen base revision ID."
         }
         guard let pdfURL else { return request.prompt }
         let encoder = JSONEncoder()

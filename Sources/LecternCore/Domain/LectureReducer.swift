@@ -67,7 +67,7 @@ public extension Lecture {
         if let allowed = card.allowedSourcePages, card.sourcePages.contains(where: { !allowed.contains($0) }), !result.contains(where: { $0.kind == .invalidSource }) { result.append(CardIssue(kind: .invalidSource, message: "Source pages are outside the job scope.")) }
         if let solve = card.solve {
             if solve.draft.validated == nil || Set(solve.cases.map(\.id)).count != solve.cases.count {
-                result.append(CardIssue(kind: .invalidSolve, message: "Request a revision with a complete and valid solve exercise."))
+                result.append(CardIssue(kind: .invalidSolve, message: "Ask the AI sidebar to revise the exercise with a complete answer key."))
             }
         } else if ![card.front, card.back].allSatisfy({ (try? FlashcardMathFormatter.formatForAnki($0, interpretations: card.mathInterpretations)) != nil }) { result.append(CardIssue(kind: .unresolvedMath, message: "Choose how to interpret ambiguous or unbalanced math.")) }
         return result
@@ -106,7 +106,7 @@ public enum LectureAction: Equatable, Sendable {
     case updateJob(Job)
     case landGeneration(jobID: UUID, cards: [CardDraft], skipped: [SkippedSlide], usage: AIUsage?)
     case landProposal(jobID: UUID, cards: [CardDraft], rationale: String, usage: AIUsage?)
-    case applyChatEdits(jobID: UUID, edits: [ChatCardEdit])
+    case applyChatEdits(jobID: UUID, edits: [ChatCardEdit], confirmsFlipReplacement: Bool = false)
     case undoChatEdits(jobID: UUID)
     case upsertThread(SlideThread)
     case setSlideSelection(pageIndex: Int, Bool)
@@ -136,10 +136,12 @@ public enum LectureReducer {
     private static func jobIndex(_ id: UUID, in lecture: Lecture) throws -> Int {
         guard let i = lecture.jobs.firstIndex(where: { $0.id == id }) else { throw LectureError.missingJob(id) }; return i
     }
-    private static func appendRevision(_ card: inout Card, author: RevisionAuthor, reason: String?, now: Date) {
+    @discardableResult
+    private static func appendRevision(_ card: inout Card, author: RevisionAuthor, reason: String?, now: Date) -> UUID {
         var revision = CardRevision(front: card.front, back: card.back, author: author, reason: reason, at: now)
         revision.solve = card.solve?.draft
         card.history.append(revision)
+        return revision.id
     }
     private static func setVerdict(_ verdict: CardVerdict, at index: Int, in lecture: inout Lecture) throws {
         if verdict == .good {
@@ -156,7 +158,7 @@ public enum LectureReducer {
         case .commitEdit(let id, let front, let back, let pages):
             let i = try index(id, in: lecture)
             if lecture.cards[i].solve != nil, front != lecture.cards[i].front || back != lecture.cards[i].back {
-                throw LectureError.invalidMetadata("Use Request change to revise the checked exercise and its answer key together.")
+                throw LectureError.invalidMetadata("Use the AI sidebar to revise the exercise and its answer key together.")
             }
             guard lecture.cards[i].front != front || lecture.cards[i].back != back || lecture.cards[i].sourcePages != pages else { return }
             if lecture.cards[i].front != front || lecture.cards[i].back != back { lecture.cards[i].mathInterpretations = [:] }
@@ -284,39 +286,103 @@ public enum LectureReducer {
             let i = try index(target, in: lecture)
             lecture.cards[i].proposal = Proposal(jobID: id, baseRevisionID: base, cards: cards, rationale: rationale, allowedSourcePages: lecture.jobs[j].pages)
             lecture.jobs[j].state = .succeeded; lecture.jobs[j].finishedAt = now; lecture.jobs[j].usage = usage
-        case .applyChatEdits(let id, let edits):
+        case .applyChatEdits(let id, let edits, let confirmsFlipReplacement):
             let j = try jobIndex(id, in: lecture)
             guard lecture.jobs[j].kind == .chat, lecture.jobs[j].state == .running else { throw LectureError.jobNotRunning(id) }
             guard Set(edits.map(\.cardID)).count == edits.count else { throw LectureError.invalidMetadata("Chat returned duplicate card edits.") }
+            let hasReplacements = edits.contains(where: \.replacesFlipCard)
+            if hasReplacements {
+                guard confirmsFlipReplacement, lecture.jobs[j].chatEditDisposition == .proposed else {
+                    throw LectureError.invalidMetadata("Confirm the solve-card replacement in chat first.")
+                }
+                guard lecture.jobs[j].pdfLayoutRevision == lecture.pdfLayoutRevision else { throw LectureError.staleSnapshot }
+            }
             let allowed = lecture.jobs[j].chatCardVersions ?? []
-            var undo: [ChatEditUndo] = []
+            // Validate every edit against the same pre-edit lecture before mutating any card.
+            var validatedEdits: [ChatCardEdit] = []
             for edit in edits {
                 guard let version = allowed.first(where: { $0.cardID == edit.cardID && $0.revisionID == edit.baseRevisionID }) else {
                     throw LectureError.invalidMetadata("Chat tried to edit a card outside its selected context.")
                 }
-                let i = try index(edit.cardID, in: lecture)
-                guard lecture.cards[i].solve == nil else {
-                    throw LectureError.invalidMetadata("Use Request change to revise a solve exercise.")
-                }
-                guard version.matches(lecture.cards[i]) else {
+                let before = lecture.cards[try index(edit.cardID, in: lecture)]
+                guard version.matches(before) else {
                     throw LectureError.invalidMetadata("A flashcard changed while chat was working. Your changes were kept; send the request again.")
                 }
-                guard !edit.front.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      !edit.back.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw LectureError.invalidMetadata("Chat returned a card with an empty front or back.")
+                if let caseEdits = edit.caseEdits {
+                    guard let solve = before.solve, !caseEdits.isEmpty,
+                          edit.baseRevisionID == before.currentRevisionID else {
+                        throw LectureError.invalidMetadata("This solve card changed. Look up its current cases and ask the AI sidebar again.")
+                    }
+                    for caseEdit in caseEdits {
+                        guard let current = solve.cases.first(where: { $0.id == caseEdit.caseID }) else {
+                            throw LectureError.invalidMetadata("A solve case was removed after this proposal. Look up the current cases and ask the AI sidebar again.")
+                        }
+                        guard !current.retired else {
+                            throw LectureError.invalidMetadata("A solve case was retired after this proposal. Look up an active case and ask the AI sidebar again.")
+                        }
+                        guard ChatSolveCaseEdit.contentHash(current.content) == caseEdit.baseContentHash else {
+                            throw LectureError.invalidMetadata("A solve case changed after this proposal. Look up its current content and ask the AI sidebar again.")
+                        }
+                    }
                 }
-                guard lecture.cards[i].front != edit.front || lecture.cards[i].back != edit.back else { continue }
-                let before = lecture.cards[i]
-                lecture.cards[i].front = edit.front; lecture.cards[i].back = edit.back
-                lecture.cards[i].mathInterpretations = [:]
-                if lecture.cards[i].verdict == .good || lecture.jobs[j].chatEdits != nil { lecture.cards[i].verdict = .unreviewed }
-                let revision = CardRevision(front: edit.front, back: edit.back, author: .ai, reason: "Chat edit", at: now)
-                lecture.cards[i].history.append(revision)
-                undo.append(ChatEditUndo(cardID: edit.cardID, appliedRevisionID: revision.id,
-                    front: before.front, back: before.back, verdict: before.verdict, mathInterpretations: before.mathInterpretations,
-                    appliedVerdict: lecture.cards[i].verdict, appliedMathInterpretations: lecture.cards[i].mathInterpretations))
+                guard let validated = edit.validated(for: before, allowsFlipReplacement: edit.replacesFlipCard) else {
+                    throw LectureError.invalidMetadata("Chat returned an invalid card edit or solve-case answer key.")
+                }
+                validatedEdits.append(validated)
             }
-            lecture.jobs[j].chatEditUndo = undo.isEmpty ? nil : undo
+
+            var candidate = lecture
+            var undo: [ChatEditUndo] = []
+            for edit in validatedEdits {
+                let i = try index(edit.cardID, in: candidate)
+                let before = candidate.cards[i]
+                if let caseEdits = edit.caseEdits, var solve = before.solve {
+                    var draft = solve.draft
+                    var changed = false
+                    for caseEdit in caseEdits {
+                        guard let caseIndex = solve.cases.firstIndex(where: { $0.id == caseEdit.caseID }),
+                              let content = caseEdit.content.checkedContent else { continue }
+                        let original = solve.cases[caseIndex]
+                        guard original.content != content else { continue }
+                        let replacement = SolveCase(content: content)
+                        solve.cases[caseIndex] = replacement
+                        var retiredOriginal = original
+                        retiredOriginal.retired = true
+                        solve.cases.append(retiredOriginal)
+                        if caseIndex == 0 {
+                            draft.sample = content
+                            candidate.cards[i].front = content.prompt
+                            candidate.cards[i].back = content.explanation
+                        }
+                        changed = true
+                    }
+                    guard changed else { continue }
+                    guard let checkedDraft = (draft.validated) else {
+                        throw LectureError.invalidMetadata("The revised sample no longer forms a valid solve exercise.")
+                    }
+                    solve.draft = checkedDraft
+                    candidate.cards[i].solve = solve
+                } else {
+                    guard before.front != edit.front || before.back != edit.back || before.solve?.draft != edit.solve else { continue }
+                    candidate.cards[i].front = edit.front; candidate.cards[i].back = edit.back
+                    try candidate.cards[i].setSolveDraft(edit.solve)
+                    candidate.cards[i].mathInterpretations = [:]
+                    if candidate.cards[i].verdict == .good || candidate.jobs[j].chatEdits != nil { candidate.cards[i].verdict = .unreviewed }
+                }
+                let reason = edit.replacesFlipCard ? "Replaced with a solve card in chat" : "Chat edit"
+                let revisionID = appendRevision(&candidate.cards[i], author: .ai, reason: reason, now: now)
+                if edit.replacesFlipCard {
+                    candidate.cards[i].solveStudyScheduleID = revisionID
+                    try setVerdict(.good, at: i, in: &candidate)
+                }
+                undo.append(ChatEditUndo(cardID: edit.cardID, appliedRevisionID: revisionID,
+                    front: before.front, back: before.back, verdict: before.verdict, mathInterpretations: before.mathInterpretations,
+                    appliedVerdict: candidate.cards[i].verdict, appliedMathInterpretations: candidate.cards[i].mathInterpretations,
+                    solve: before.solve, appliedSolve: candidate.cards[i].solve,
+                    priorSolveStudyScheduleID: before.solveStudyScheduleID, priorSolveApproval: before.hasApprovedSolve))
+            }
+            candidate.jobs[j].chatEditUndo = undo.isEmpty ? nil : undo
+            lecture = candidate
         case .undoChatEdits(let id):
             let j = try jobIndex(id, in: lecture)
             guard lecture.jobs[j].state == .succeeded, lecture.jobs[j].chatEditsUndoneAt == nil,
@@ -328,13 +394,35 @@ public enum LectureReducer {
                 guard edit.matches(lecture.cards[i]) else {
                     throw LectureError.invalidMetadata("A card was changed after this chat edit. Undo would overwrite newer changes.")
                 }
-                lecture.cards[i].front = edit.front; lecture.cards[i].back = edit.back
-                lecture.cards[i].mathInterpretations = edit.mathInterpretations
-                lecture.cards[i].verdict = edit.verdict
-                if edit.verdict == .good && !lecture.issues(for: lecture.cards[i]).isEmpty { lecture.cards[i].verdict = .unreviewed }
-                appendRevision(&lecture.cards[i], author: .user, reason: "Undo chat edit", now: now)
             }
-            lecture.jobs[j].chatEditsUndoneAt = now
+            var candidate = lecture
+            let caseEditedCardIDs = Set(candidate.jobs[j].chatEdits?.filter { $0.caseEdits != nil && $0.solve == nil }.map(\.cardID) ?? [])
+            for edit in edits {
+                let i = try index(edit.cardID, in: candidate)
+                if candidate.cards[i].studyScheduleID == edit.appliedRevisionID {
+                    candidate.cards[i].solveStudyScheduleID = edit.priorSolveStudyScheduleID
+                    candidate.cards[i].hasApprovedSolve = edit.priorSolveApproval
+                }
+                candidate.cards[i].front = edit.front; candidate.cards[i].back = edit.back
+                candidate.cards[i].mathInterpretations = edit.mathInterpretations
+                candidate.cards[i].solve = edit.solve
+                if caseEditedCardIDs.contains(edit.cardID), var restored = candidate.cards[i].solve,
+                   let applied = edit.appliedSolve {
+                    let originalIDs = Set(restored.cases.map(\.id))
+                    let retainedHistory = applied.cases.filter { !originalIDs.contains($0.id) }.map { changed -> SolveCase in
+                        var historical = changed
+                        historical.retired = true
+                        return historical
+                    }
+                    restored.cases.append(contentsOf: retainedHistory)
+                    candidate.cards[i].solve = restored
+                }
+                candidate.cards[i].verdict = edit.verdict
+                if edit.verdict == .good && !candidate.issues(for: candidate.cards[i]).isEmpty { candidate.cards[i].verdict = .unreviewed }
+                appendRevision(&candidate.cards[i], author: .user, reason: "Undo chat edit", now: now)
+            }
+            candidate.jobs[j].chatEditsUndoneAt = now
+            lecture = candidate
         case .upsertThread(let thread):
             if let i = lecture.threads.firstIndex(where: { $0.id == thread.id }) { lecture.threads[i] = thread } else { lecture.threads.append(thread) }
         case .setSlideSelection(let page, let selected):
@@ -388,7 +476,7 @@ public enum LectureReducer {
                 if let target = suggestion.cardID {
                     let i = try index(target, in: lecture)
                     guard lecture.cards[i].solve == nil else {
-                        throw LectureError.invalidMetadata("Use Request change to revise a solve exercise.")
+                        throw LectureError.invalidMetadata("Use the AI sidebar to revise a solve exercise.")
                     }
                     guard !lecture.cards[i].isSuperseded, lecture.cards[i].currentRevisionID == suggestion.baseRevisionID else {
                         throw LectureError.invalidMetadata("This card changed after the suggestion was made. Dismiss it, or ask again.")

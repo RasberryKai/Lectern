@@ -278,6 +278,7 @@ public struct CodexCLIProvider: AIProvider {
         }
         return [tool("read_slides", "Read frozen lecture slides as text and images by original slide number.", "pages", "integer", maxItems: 100),
                 tool("get_cards", "Read frozen cards including edit revision IDs. Use displayed IDs such as C12. Supports the entire deck, including more than 100 cards.", "ids", "string"),
+                tool("get_solve_cases", "Read the frozen complete case pool and editable status for solve cards by displayed ID such as C12. Read before proposing case edits.", "ids", "string"),
                 tool("read_images", "Read earlier uploaded images by their frozen attachment UUID.", "ids", "string", maxItems: 4)]
     }
 }
@@ -351,6 +352,11 @@ private struct CodexStudyContext {
             guard let ids = arguments["ids"] as? [String] else { throw AIError.invalidResponse("get_cards requires an array of card references, such as [\"C12\"].") }
             let values = try context.cardIDs(ids)
             blocks = [["type": "text", "text": try context.cards(values)]]
+            for id in values { onRead(.card(id)) }
+        case "get_solve_cases":
+            guard let ids = arguments["ids"] as? [String] else { throw AIError.invalidResponse("get_solve_cases requires an array of solve-card references, such as [\"C12\"].") }
+            let values = try context.solveCaseCardIDs(ids)
+            blocks = [["type": "text", "text": try context.solveCases(ids)]]
             for id in values { onRead(.card(id)) }
         case "read_images":
             guard let ids = arguments["ids"] as? [String], !ids.isEmpty, ids.count <= 4,

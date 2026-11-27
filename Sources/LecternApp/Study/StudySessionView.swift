@@ -147,7 +147,7 @@ struct StudySessionView: View {
                     toast(notice)
                 }
                 Group {
-                    if entry.card.solve != nil { solveCard(entry) }
+                    if entry.card.solve != nil { solveCard }
                     else { studyCard(entry) }
                 }
                     .frame(maxWidth: 640)
@@ -158,47 +158,33 @@ struct StudySessionView: View {
             .padding(.horizontal, 28)
             .frame(maxWidth: .infinity)
         }
+        .background(entry.card.solve != nil ? Theme.canvas : .clear)
     }
 
-    private func solveCard(_ entry: StudyCard) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 9) {
-                Text("Solve card").eyebrow()
-                cardStatus(entry)
-            }
+    private var solveCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
             if let exercise = session.currentSolveCase {
-                SolveExerciseView(content: exercise.content, answers: session.currentSolveAnswers) { answers in
-                    session.checkSolve(answers: answers)
-                }
+                SolveExerciseView(content: exercise.content, answers: session.currentSolveAnswers,
+                                  showsWorkedSolutionWhenCorrect: false,
+                                  onCheck: { session.checkSolve(answers: $0) })
                 .id(session.turnID)
                 .disabled(session.isBusy)
                 if session.revealed {
-                    HStack(spacing: 12) {
-                        if session.sourcePage != nil {
-                            Button {
-                                session.showSlide(cycle: true)
-                                focus = nil
-                            } label: {
-                                Label("Source slide", systemImage: "display")
-                            }
-                            .buttonStyle(SecondaryButtonStyle())
-                        }
-                        Button(action: openAsk) { Label("Ask AI", systemImage: "sparkles") }
-                            .buttonStyle(SecondaryButtonStyle(foreground: Theme.ai))
-                    }
-                    .disabled(session.isBusy || session.hasPendingGrade)
-                    Divider()
-                    gradeActions
+                    Rectangle().fill(Theme.border).frame(height: 1)
+                    gradeActions.padding(.horizontal, 16).padding(.vertical, 12)
                 }
             } else if session.error == nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Finding a verified case…").font(Theme.body).foregroundStyle(Theme.quiet)
                 }
+                .padding(.horizontal, 26).padding(.vertical, 20)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .panel(padding: 26)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.border).allowsHitTesting(false))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Solve card")
     }
@@ -375,7 +361,7 @@ struct StudySessionView: View {
 
     private var recallHints: some View {
         Text(session.current?.card.solve == nil ? "Space show · 1 Got it · 2 Missed · G Prepare"
-             : session.revealed ? "1 Got it · 2 Missed · G Prepare" : "")
+             : session.revealed ? "1 Got it · 2 Missed · G Prepare" : "↩ to check")
     }
 
     private var navigationHints: some View {
@@ -731,6 +717,9 @@ struct StudySessionView: View {
         guard !session.app.showSettings else { return false }
         let mods = Key.modifiers(event)
         let letter = Key.letter(event)
+        if event.keyCode == Key.escape, mods.isEmpty, SolveOrderingDragCancellation.cancel(in: event.window) {
+            return true
+        }
         if event.isARepeat, event.keyCode == Key.space || ["1", "2", "d", "u"].contains(letter), !editing {
             return true
         }
@@ -764,6 +753,7 @@ struct StudySessionView: View {
         }
         if letter == "u", session.canUndo { Task { await session.undoLast() }; return true }
         guard let entry = session.current, !session.isBusy else { return false }
+        if entry.card.solve != nil, !session.revealed, ["1", "2"].contains(letter) { return false }
         if event.keyCode == Key.space {
             guard entry.card.solve == nil else { return false }
             if !session.revealed { session.reveal() }

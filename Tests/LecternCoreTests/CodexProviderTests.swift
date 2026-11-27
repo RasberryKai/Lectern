@@ -257,6 +257,47 @@ import Testing
             #expect(log.contains("Unknown card C999"))
         }
     }
+
+    @Test func codexDispatchesOnDemandSolveCaseLookupFromFrozenManifest() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = try fixture(in: root, mode: "solveCaseLookup")
+        var request = try makeRequest(root: root, kind: .chat)
+        let content = SolveCaseContent(prompt: "Frozen case question", fields: [
+            SolveField(prompt: "Value", input: SolveInput(kind: .number, answers: ["42"]))
+        ], explanation: "Frozen explanation")
+        var card = Card(front: content.prompt, back: content.explanation)
+        try card.setSolveDraft(SolveDraft(skill: "Calculate", reason: "Apply the rule", variation: "Change inputs", sample: content))
+        var variant = content
+        variant.prompt = "Frozen second case"
+        card.solve?.cases.append(SolveCase(content: variant))
+        var snapshot = ChatSnapshot(slides: [], cards: [card], initialRefs: [])
+        snapshot.cardContextVersion = 1
+        snapshot.solveCaseContextVersion = 1
+        try FileManager.default.createDirectory(at: request.workingDirectory.appendingPathComponent("cards"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: request.workingDirectory.appendingPathComponent("cases"), withIntermediateDirectories: true)
+        var hashes: [String: String] = [:]
+        func write<T: Encodable>(_ value: T, path: String) throws {
+            let bytes = try ChatContextJSON.encode(value).data(using: .utf8)!
+            try bytes.write(to: request.workingDirectory.appendingPathComponent(path))
+            hashes[path] = PromptBuilder.hash(bytes)
+        }
+        try write(ChatCardContent.deck([card]), path: "cards.json")
+        try write(ChatCardContent(card, number: 1, includeEditIDs: true), path: snapshot.cardPath(at: 0))
+        try write(ChatSolveCaseLookup(card: card, number: 1), path: snapshot.solveCasePath(at: 0))
+        snapshot.assetHashes = hashes
+        request.chatSnapshot = snapshot
+
+        let result = try await makeProvider(executable: executable, root: root).execute(request, onEvent: { _ in })
+        #expect(try JSONDecoder().decode(ChatReply.self, from: Data(result.content.utf8)).message == "Read the frozen solve cases.")
+        #expect(result.read == [.card(card.id)])
+        #expect(result.searchedLecture)
+        let log = try String(contentsOf: root.appendingPathComponent("solveCaseLookup/requests.jsonl"), encoding: .utf8)
+        #expect(log.contains("get_solve_cases"))
+        #expect(log.contains("Frozen second case"))
+        #expect(log.contains(ChatSolveCaseEdit.contentHash(variant)))
+        #expect(log.contains("\\\"editable\\\":true"))
+    }
 }
 
 private func makeProvider(executable: URL, root: URL) -> CodexCLIProvider {
@@ -371,6 +412,15 @@ private func fixture(in root: URL, mode: String) throws -> URL {
                 tool_result = read()
                 if tool_result is None or "contentItems" not in tool_result.get("result", {}):
                     sys.exit(9)
+            if mode == "solveCaseLookup":
+                send({"id": 9003, "method": "item/tool/call", "params": {
+                    "threadId": "thread-fixture", "turnId": "turn-fixture", "tool": "get_solve_cases", "arguments": {"ids": ["C1"]}}})
+                tool_result = read()
+                if tool_result is None or tool_result.get("result", {}).get("success") is not True:
+                    sys.exit(13)
+                cases = json.loads(tool_result["result"]["contentItems"][0]["text"])
+                if cases[0]["cases"][1]["content"]["prompt"] != "Frozen second case":
+                    sys.exit(14)
             if mode in ("largeDeck", "retryCardLookup"):
                 if mode == "retryCardLookup":
                     for index, arguments in enumerate(({"ids": []}, {"ids": ["C999"]}, {"ids": True})):
@@ -399,6 +449,8 @@ private func fixture(in root: URL, mode: String) throws -> URL {
                      "front": card["back"], "back": card["front"]} for card in cards]})
             if mode == "toolRoundTrip":
                 text = "{\"message\":\"Read the frozen material.\",\"edits\":[],\"quiz\":[]}"
+            if mode == "solveCaseLookup":
+                text = "{\"message\":\"Read the frozen solve cases.\",\"edits\":[],\"quiz\":[]}"
             if mode == "commentary":
                 private_text = json.dumps({"message": "private planning", "edits": [], "quiz": []})
                 text = json.dumps({"message": "The public answer.", "edits": [], "quiz": []})

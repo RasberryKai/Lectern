@@ -310,6 +310,16 @@ final class StudySessionModel {
             return
         }
         guard updated != entry.card else { return }
+        if updated.studyScheduleID != entry.card.studyScheduleID {
+            let key = CardKey(entry)
+            let remaining = queue.dropFirst(position + 1).filter { CardKey($0.entry) != key }
+            queue.replaceSubrange((position + 1)..<queue.endIndex, with: remaining)
+            undo = nil
+            toast = "This card’s study schedule changed. It will be queued in a future session."
+            advance()
+            Task { await app.refreshStudy() }
+            return
+        }
         queue[position].entry.card = updated
         if updated.currentRevisionID != entry.card.currentRevisionID,
            updated.solve != nil || entry.card.solve != nil {
@@ -575,6 +585,7 @@ final class StudySessionModel {
         let submission = answerData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
         return """
         The learner is asking about this specific checked solve-card case.
+        Case ID: \(exercise.id.uuidString)
         Exercise:
         \(exercise.content.staticQuestion)
         Answer key and explanation:
